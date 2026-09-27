@@ -33,6 +33,9 @@ const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(140);
 /// Coalescing window for filesystem watch events.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(250);
+/// How long change events are ignored after a listing, so a refresh cannot
+/// trigger the next one.
+const WATCH_COOLDOWN: Duration = Duration::from_millis(1500);
 /// How long a toast stays on screen.
 const TOAST_TTL: Duration = Duration::from_secs(4);
 /// Sidebar width bounds.
@@ -42,10 +45,9 @@ const SIDEBAR_MAX: f32 = 340.0;
 const DOC_MIN: f32 = 380.0;
 const DOC_DEFAULT: f32 = 640.0;
 
+/// Most folders Quick access will hold, and so the most `pinN=` lines in prefs.
+const MAX_PINS: usize = 24;
 const ID_TITLE_DRAG: &str = "title_drag";
-/// Width reserved for the document header buttons, so the path beside them
-/// can be elided to exactly the space that is left.
-const DOC_BUTTONS_W: f32 = 250.0;
 const ID_LIST: &str = "file_list";
 const ID_COL_SIZE: &str = "col_size";
 const ID_COL_DATE: &str = "col_date";
@@ -104,6 +106,60 @@ impl Tab {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Files".to_owned()),
         }
+    }
+}
+
+/// The Quick access list: folders the user pinned, in the order they pinned
+/// them.
+///
+/// Kept apart from the app so the rules - no duplicates, a cap, comparing
+/// paths the way the filesystem does - can be tested without a window. It
+/// derefs to the path list so ordinary indexing and iteration keep working.
+#[derive(Default)]
+struct Pins(Vec<PathBuf>);
+
+/// Why a folder could not be pinned.
+#[derive(Debug, PartialEq, Eq)]
+enum PinError {
+    /// Already on the list.
+    AlreadyThere,
+    /// The list is full.
+    Full,
+}
+
+impl std::ops::Deref for Pins {
+    type Target = Vec<PathBuf>;
+
+    fn deref(&self) -> &Vec<PathBuf> {
+        &self.0
+    }
+}
+
+impl Pins {
+    /// Adds a folder, normalising it first so `a\b` and `a\b\` are one entry.
+    fn add(&mut self, path: &Path, max: usize) -> Result<(), PinError> {
+        let path = fs_model::normalize(path);
+        if self.0.contains(&path) {
+            return Err(PinError::AlreadyThere);
+        }
+        if self.0.len() >= max {
+            return Err(PinError::Full);
+        }
+        self.0.push(path);
+        Ok(())
+    }
+
+    /// Removes a folder. Returns whether it was on the list.
+    fn remove(&mut self, path: &Path) -> bool {
+        let path = fs_model::normalize(path);
+        let before = self.0.len();
+        self.0.retain(|p| p != &path);
+        self.0.len() != before
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        let path = fs_model::normalize(path);
+        self.0.contains(&path)
     }
 }
 
@@ -334,6 +390,8 @@ enum CtxAction {
     Rename,
     Delete,
     DeleteForever,
+    Pin,
+    Unpin,
 }
 
 /// Keys captured this frame, resolved after the UI is drawn so that focused
@@ -451,14 +509,32 @@ pub struct Xplor {
     watcher: Option<Box<dyn Watcher>>,
     watch_target: Option<PathBuf>,
     last_change: Option<Instant>,
+    /// When the last listing finished, for the watcher cooldown.
+    listed_at: Option<Instant>,
     /// Decoded image thumbnails, filled on demand by the icon view.
     thumbs: Thumbs,
     /// Head of the text file the details pane is showing, with its path.
     peek: Option<(PathBuf, String)>,
     /// Path whose head is being read, so it is only requested once.
     peek_pending: Option<PathBuf>,
+    /// Free space per volume, cached: reading it is milliseconds of work.
+    free_space: fs_model::FreeSpace,
     /// Folder the pointer is over while dragging, if any.
     drop_target: Option<PathBuf>,
+    /// Path whose context menu is up, if any. Held until egui reports the
+    /// popup closed, so the menu survives past the frame of the right click.
+    menu_path: Option<PathBuf>,
+    /// Where that menu was opened. Captured on the click so the menu does not
+    /// follow the pointer.
+    menu_anchor: Option<Pos2>,
+    /// Set on a right click and cleared the moment it is acted on, so opening
+    /// the menu is a one-shot rather than something re-asserted every frame.
+    menu_wanted: bool,
+    /// Folders the user pinned to Quick access, in the order they pinned them.
+    pins: Pins,
+    /// Folder sizes and counts, measured on a worker. Walking a folder is far
+    /// too slow to do on the frame that draws it.
+    measures: ops::Measures,
     /// Paths being dragged inside the app.
     drag_payload: Vec<PathBuf>,
     /// Last keystroke in the search box, used to debounce recursive searches.
@@ -547,10 +623,17 @@ impl Xplor {
             watcher: None,
             watch_target: None,
             last_change: None,
+            listed_at: None,
             thumbs: Thumbs::new(tx.clone()),
             peek: None,
             peek_pending: None,
+            free_space: fs_model::FreeSpace::default(),
             drop_target: None,
+            menu_path: None,
+            menu_anchor: None,
+            menu_wanted: false,
+            pins: Pins::default(),
+            measures: ops::Measures::new(tx.clone()),
             drag_payload: Vec::new(),
             search_typed: None,
             close_armed: false,
@@ -565,7 +648,7 @@ impl Xplor {
         cc.egui_ctx.set_fonts(theme::fonts());
         cc.egui_ctx.all_styles_mut(|s| *s = theme::style());
         cc.egui_ctx.set_theme(egui::Theme::Dark);
-        app.apply_prefs();
+        app.apply_prefs(arg.as_deref().filter(|p| p.is_dir()));
         app.request_listing();
         if let Some(p) = arg.filter(|p| p.is_file()) {
             app.open_path(&p);
@@ -578,7 +661,11 @@ impl Xplor {
     /// Reads `prefs.txt` from the user config directory. Missing or malformed
     /// entries simply fall back to the defaults, so a bad file can never stop
     /// the app from starting.
-    fn apply_prefs(&mut self) {
+    ///
+    /// `start_dir` is the folder named on the command line, if any. It wins
+    /// over the remembered folder, so opening a path from a shell or a file
+    /// manager lands where the user asked rather than where they were last.
+    fn apply_prefs(&mut self, start_dir: Option<&Path>) {
         let Ok(text) = std::fs::read_to_string(prefs_path()) else {
             return;
         };
@@ -639,12 +726,27 @@ impl Xplor {
         if let Some(v) = map.get("details") {
             self.details = *v != "0";
         }
-        if let Some(cwd) = map.get("cwd")
-            && *cwd != "-"
-        {
-            let p = PathBuf::from(cwd);
-            if p.is_dir() {
-                self.cwd = p;
+        // Pinned folders are numbered so their order survives a rewrite.
+        for i in 0..MAX_PINS {
+            let key = format!("pin{i}");
+            let Some(v) = map.get(key.as_str()) else {
+                break;
+            };
+            if !v.is_empty() {
+                let _ = self.pins.add(Path::new(v), MAX_PINS);
+            }
+        }
+        match start_dir {
+            Some(d) if d.is_dir() => self.cwd = fs_model::normalize(d),
+            _ => {
+                if let Some(cwd) = map.get("cwd")
+                    && *cwd != "-"
+                {
+                    let p = PathBuf::from(cwd);
+                    if p.is_dir() {
+                        self.cwd = p;
+                    }
+                }
             }
         }
     }
@@ -656,10 +758,17 @@ impl Xplor {
         if std::fs::create_dir_all(parent).is_err() {
             return;
         }
+        let pins: String = self
+            .pins
+            .iter()
+            .take(MAX_PINS)
+            .enumerate()
+            .map(|(i, p)| format!("pin{i}={}\n", p.to_string_lossy()))
+            .collect();
         let body = format!(
             "sidebar={}\nsidebar_w={}\ndoc_w={}\nsplit={}\nsort={}\nascending={}\n\
              show_hidden={}\nwrap={}\ncol_size={}\ncol_date={}\npreview_visible={}\n\
-             view={}\ndetails={}\ncwd={}\nwindow={}\n",
+             view={}\ndetails={}\ncwd={}\nwindow={}\n{pins}",
             self.sidebar,
             self.sidebar_w,
             self.doc_w,
@@ -681,6 +790,42 @@ impl Xplor {
         if let Err(e) = std::fs::write(&dir, body) {
             log::warn!("cannot write prefs: {e}");
         }
+    }
+
+    // ---- quick access ----------------------------------------------------
+
+    /// Adds a folder to Quick access, telling the user why if it cannot.
+    ///
+    /// Returns whether the list changed, so the caller can say so.
+    fn pin(&mut self, path: &Path) -> bool {
+        let result = self.pins.add(path, MAX_PINS);
+        match result {
+            Ok(()) => {
+                self.write_prefs();
+                true
+            }
+            Err(PinError::AlreadyThere) => {
+                self.toast(String::from("Already in Quick access"));
+                false
+            }
+            Err(PinError::Full) => {
+                self.toast_err(format!("Quick access holds at most {MAX_PINS} folders"));
+                false
+            }
+        }
+    }
+
+    /// Removes a folder from Quick access. Returns whether it was there.
+    fn unpin(&mut self, path: &Path) -> bool {
+        if !self.pins.remove(path) {
+            return false;
+        }
+        self.write_prefs();
+        true
+    }
+
+    fn is_pinned(&self, path: &Path) -> bool {
+        self.pins.contains(path)
     }
 
     // ---- tabs -----------------------------------------------------------
@@ -1318,6 +1463,13 @@ impl Xplor {
         let mut toggle: Option<PathBuf> = None;
         let mut expand: Option<PathBuf> = None;
 
+        // Quick access sits above everything else, the way Explorer puts it.
+        // The section only appears once something is pinned, so an unused
+        // sidebar stays quiet.
+        if !self.pins.is_empty() {
+            self.quick_access_ui(ui, &mut nav);
+        }
+
         // Roots: quick access, then devices. Labels stay friendly; the tree
         // itself only cares about paths.
         let mut roots: Vec<(String, PathBuf, bool)> = Vec::new();
@@ -1397,6 +1549,117 @@ impl Xplor {
         }
     }
 
+    /// The pinned folders at the top of the sidebar.
+    ///
+    /// Drawn separately from the tree because pinning is about one folder, not
+    /// a place in a hierarchy: no chevron, no children, no drop target.
+    fn quick_access_ui(&mut self, ui: &mut Ui, nav: &mut Option<PathBuf>) {
+        // Header: a pin glyph and a label, in the same quiet style the
+        // properties sheet uses for its section titles.
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), sp::SECTION), Sense::hover());
+        let painter = ui.painter();
+        let icon = Rect::from_center_size(
+            Pos2::new(rect.left() + 8.0, rect.center().y),
+            Vec2::splat(11.0),
+        );
+        Icon::Pin.paint(painter, icon, c::TEXT_GHOST);
+        let g = widgets::layout(
+            ui,
+            String::from("Quick access"),
+            theme::bold_font(10.0),
+            c::TEXT_GHOST,
+        );
+        widgets::galley_at(
+            painter,
+            Pos2::new(
+                icon.right() + sp::XS + 1.0,
+                rect.center().y - g.size().y * 0.5,
+            ),
+            &g,
+            c::TEXT_GHOST,
+        );
+
+        for path in self.pins.clone() {
+            let label = path.file_name().map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            if self.pin_row(ui, &label, &path, nav) {
+                // Same menu as everywhere else, so it offers to unpin.
+                self.open_context_menu(ui, &path);
+            }
+        }
+        ui.add_space(sp::XS);
+    }
+
+    /// One pinned row. Returns whether the row asked to be unpinned, via a
+    /// right click.
+    fn pin_row(
+        &mut self,
+        ui: &mut Ui,
+        label: &str,
+        path: &Path,
+        nav: &mut Option<PathBuf>,
+    ) -> bool {
+        let active = self.cwd == path;
+        let width = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(
+            Vec2::new(width, sp::NAV_ROW),
+            Sense::click().union(Sense::drag()),
+        );
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            if active {
+                painter.rect_filled(rect, CornerRadius::same(4), c::SEL);
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        Pos2::new(rect.left() + 1.0, rect.top() + 4.0),
+                        Vec2::new(2.0, sp::NAV_ROW - 8.0),
+                    ),
+                    1.0,
+                    c::ACCENT,
+                );
+            } else if resp.hovered() {
+                painter.rect_filled(rect, CornerRadius::same(4), c::HOVER);
+            }
+            // A pin, not a chevron: there is nothing here to expand.
+            let icon = Rect::from_center_size(
+                Pos2::new(rect.left() + 16.0, rect.center().y),
+                Vec2::splat(13.0),
+            );
+            let icon_color = if active { c::SEL_TEXT } else { c::TEXT_FAINT };
+            Icon::Pin.paint(painter, icon, icon_color);
+            Icon::Folder.paint(
+                painter,
+                Rect::from_center_size(
+                    Pos2::new(icon.right() + 9.0, rect.center().y),
+                    Vec2::splat(13.0),
+                ),
+                icon_color,
+            );
+            let text_x = icon.right() + 9.0 + 13.0 + sp::XS + 2.0;
+            let text_color = if active { c::SEL_TEXT } else { c::TEXT_DIM };
+            let g = widgets::layout_elided(
+                ui,
+                label.to_owned(),
+                theme::ui_font(tfs::BODY),
+                text_color,
+                (rect.right() - text_x - sp::SM).max(20.0),
+            );
+            widgets::galley_at(
+                painter,
+                Pos2::new(text_x, rect.center().y - g.size().y * 0.5),
+                &g,
+                text_color,
+            );
+        }
+        if resp.clicked() {
+            *nav = Some(path.to_path_buf());
+        }
+        resp.secondary_clicked()
+    }
+
     /// One sidebar line: chevron, icon, label, optional free-space note.
     ///
     /// Actions are collected into the out-parameters so the caller can apply
@@ -1473,7 +1736,8 @@ impl Xplor {
             let text_x = icon.right() + sp::XS + 2.0;
             let text_color = if active { c::SEL_TEXT } else { c::TEXT_DIM };
             let note = if is_device && !active {
-                fs_model::free_space(path)
+                self.free_space
+                    .get(path)
                     .map(|(avail, _)| format!("{} free", fs_model::fmt_size(avail)))
             } else {
                 None
@@ -1718,6 +1982,8 @@ impl Xplor {
         };
 
         let mut click: Option<(usize, ClickKind)> = None;
+        // Collected inside the loop and applied after it: the closure borrows
+        // list fields, so it cannot reach into the app to open a menu itself.
         let mut context: Option<PathBuf> = None;
         let scroll_to = self.scroll_to.take();
 
@@ -1835,6 +2101,9 @@ impl Xplor {
         if let Some((i, kind)) = click {
             self.handle_click(i, kind);
         }
+        if let Some(path) = context {
+            self.open_context_menu(ui, &path);
+        }
         // Dragging out of a selected row starts an in-app file drag; releasing
         // over a folder row moves or copies the selection there.
         let moved_far = ui.input(|i| {
@@ -1851,7 +2120,9 @@ impl Xplor {
         } else if !self.drag_payload.is_empty() && !ui.input(|i| i.pointer.any_down()) {
             self.drag_payload.clear();
         }
-        if let Some(path) = context {
+        // `menu_path` outlives the click that opened it: a popup is only drawn
+        // on the frames its function runs, so stop asking and it vanishes.
+        if let Some(path) = self.menu_path.clone() {
             self.context_menu(ui, &path);
         }
         self.perf.list_ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -1888,14 +2159,49 @@ impl Xplor {
         }
     }
 
+    /// Records a right click so the menu opens on this frame.
+    ///
+    /// Both the click position and the path are captured here. The position has
+    /// to be remembered rather than read per frame, or the menu would slide
+    /// along behind the pointer as it moves.
+    fn open_context_menu(&mut self, ui: &Ui, path: &Path) {
+        self.menu_path = Some(path.to_path_buf());
+        self.menu_anchor = ui.input(|i| i.pointer.interact_pos());
+        self.menu_wanted = true;
+    }
+
     /// Right-click menu.
+    ///
+    /// The popup is anchored to the pointer, not to the `Ui` cursor. The list is
+    /// virtualized, so by the time we get here the cursor can be millions of
+    /// pixels below the viewport, and a menu anchored there opens off-screen.
     fn context_menu(&mut self, ui: &mut Ui, path: &Path) {
         let path = path.to_path_buf();
         let is_dir = path.is_dir();
         let editable = !is_dir && fs_model::is_editable_text(&path);
+        let pinned = self.is_pinned(&path);
         let mut action: Option<CtxAction> = None;
-        let dummy = ui.allocate_response(Vec2::ZERO, Sense::hover());
-        egui::Popup::context_menu(&dummy).width(200.0).show(|ui| {
+
+        // The anchor is the spot that was clicked, recorded when the right
+        // click landed. Reading the pointer every frame instead would drag the
+        // menu along behind the mouse.
+        let anchor = self.menu_anchor.unwrap_or_else(|| {
+            ui.input(|i| i.pointer.interact_pos())
+                .unwrap_or_else(|| ui.max_rect().center())
+        });
+        let id = Id::new(("ctx_menu", &path));
+        let dummy = ui.interact(Rect::from_min_size(anchor, Vec2::ZERO), id, Sense::click());
+
+        let popup = egui::Popup::menu(&dummy).id(id);
+        let was_open = popup.is_open();
+        // Open exactly once, on the frame the right click landed. After that
+        // egui owns the state: it closes on a click anywhere or on Escape, and
+        // we must not re-open behind its back or the menu could never be
+        // dismissed.
+        let open = std::mem::take(&mut self.menu_wanted)
+            .then_some(egui::containers::SetOpenCommand::Bool(true));
+
+        let shown = popup.open_memory(open).width(200.0).show(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(sp::SM, 3.0);
             if editable && ui.button("Open in editor").clicked() {
                 action = Some(CtxAction::OpenEditor);
@@ -1924,6 +2230,15 @@ impl Xplor {
             if ui.button("Copy as path").clicked() {
                 action = Some(CtxAction::CopyPath);
             }
+            if is_dir {
+                if pinned {
+                    if ui.button("Unpin from Quick access").clicked() {
+                        action = Some(CtxAction::Unpin);
+                    }
+                } else if ui.button("Pin to Quick access").clicked() {
+                    action = Some(CtxAction::Pin);
+                }
+            }
             if ui.button("Rename\u{2026}").clicked() {
                 action = Some(CtxAction::Rename);
             }
@@ -1937,6 +2252,15 @@ impl Xplor {
                 action = Some(CtxAction::DeleteForever);
             }
         });
+
+        // egui closed the menu: a click anywhere, or Escape. Drop the path so
+        // the caller stops asking for a menu that is no longer up. A popup is
+        // only drawn on the frames its function runs, so one missed frame
+        // would make it vanish anyway.
+        if was_open && shown.is_none() {
+            self.menu_path = None;
+            self.menu_anchor = None;
+        }
 
         let Some(action) = action else { return };
         match action {
@@ -1957,6 +2281,20 @@ impl Xplor {
             CtxAction::OpenTerminal => self.open_in_terminal(&path),
             CtxAction::Cut => self.copy_selection(true),
             CtxAction::Rename => self.start_rename(&path),
+            CtxAction::Pin => {
+                let name = path.file_name().map_or_else(
+                    || path.to_string_lossy().into_owned(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                if self.pin(&path) {
+                    self.toast(format!("Pinned {name} to Quick access"));
+                }
+            }
+            CtxAction::Unpin => {
+                if self.unpin(&path) {
+                    self.toast(String::from("Removed from Quick access"));
+                }
+            }
             CtxAction::Delete => self.delete_selection(false),
             CtxAction::DeleteForever => self.delete_selection(true),
         }
@@ -2044,7 +2382,7 @@ impl Xplor {
         }
 
         ui.add_space(sp::XS);
-        properties_ui(ui, &path);
+        properties_ui(ui, &path, self.measures.get(&path));
 
         // Text files get their first lines, the way Explorer's pane does.
         if !is_dir && fs_model::is_editable_text(&path) {
@@ -2116,9 +2454,113 @@ impl Xplor {
         let is_md = kind == DocKind::Markdown;
 
         // ---- header
-        let header_h = 34.0f32;
+        //
+        // Two rows instead of one crowded line: the title carries the weight,
+        // the folder sits underneath in quiet grey, and the actions are
+        // pictograms on the right. At 300px wide a single line could not hold
+        // all three without the path collapsing to a single character.
+        let title_h = 28.0f32;
+        let path_h = 19.0f32;
+        let header_h = title_h + path_h;
         let header =
             Rect::from_min_size(ui.min_rect().min, Vec2::new(ui.available_width(), header_h));
+        let title_row = Rect::from_min_max(
+            header.min,
+            Pos2::new(header.right(), header.top() + title_h),
+        );
+
+        // Actions first, so the title knows how much room is left.
+        let mut save = false;
+        let mut wrap = false;
+        let mut preview = false;
+        let mut close = false;
+        let btn = 26.0f32;
+        let action_count = 3 + usize::from(is_md) + usize::from(dirty);
+        let actions_w = btn * action_count as f32;
+        {
+            let spot = Rect::from_min_max(
+                Pos2::new(title_row.right() - actions_w - sp::SM, title_row.top()),
+                Pos2::new(title_row.right() - sp::SM, title_row.bottom()),
+            );
+            let mut bar = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(spot)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            // Close is always there; the rest appear only when they do something.
+            let (cr, crr) = bar.allocate_exact_size(Vec2::splat(btn), Sense::click());
+            if crr.hovered() {
+                bar.painter()
+                    .rect_filled(cr, CornerRadius::same(sp::RADIUS), c::HOVER);
+            }
+            Icon::Close.paint(
+                bar.painter(),
+                cr,
+                if crr.hovered() { c::TEXT } else { c::TEXT_DIM },
+            );
+            if crr.on_hover_text("Close (Ctrl+W)").clicked() {
+                close = true;
+            }
+            if is_md {
+                let (r, rr) = bar.allocate_exact_size(Vec2::splat(btn), Sense::click());
+                if rr.hovered() {
+                    bar.painter()
+                        .rect_filled(r, CornerRadius::same(sp::RADIUS), c::HOVER);
+                }
+                Icon::Preview.paint(
+                    bar.painter(),
+                    r,
+                    if self.preview_visible {
+                        c::ACCENT
+                    } else if rr.hovered() {
+                        c::TEXT
+                    } else {
+                        c::TEXT_DIM
+                    },
+                );
+                if rr
+                    .on_hover_text(if self.preview_visible {
+                        "Hide the live preview"
+                    } else {
+                        "Show the live preview"
+                    })
+                    .clicked()
+                {
+                    preview = true;
+                }
+            }
+            let (wr, wrr) = bar.allocate_exact_size(Vec2::splat(btn), Sense::click());
+            if wrr.hovered() {
+                bar.painter()
+                    .rect_filled(wr, CornerRadius::same(sp::RADIUS), c::HOVER);
+            }
+            Icon::Wrap.paint(
+                bar.painter(),
+                wr,
+                if self.wrap {
+                    c::ACCENT
+                } else if wrr.hovered() {
+                    c::TEXT
+                } else {
+                    c::TEXT_DIM
+                },
+            );
+            if wrr.on_hover_text("Soft wrap long lines").clicked() {
+                wrap = true;
+            }
+            if dirty {
+                let (sr, srr) = bar.allocate_exact_size(Vec2::splat(btn), Sense::click());
+                if srr.hovered() {
+                    bar.painter()
+                        .rect_filled(sr, CornerRadius::same(sp::RADIUS), c::HOVER);
+                }
+                Icon::Save.paint(bar.painter(), sr, c::ACCENT);
+                if srr.on_hover_text("Save (Ctrl+S)").clicked() {
+                    save = true;
+                }
+            }
+        }
+
         {
             let painter = ui.painter();
             painter.hline(
@@ -2126,26 +2568,19 @@ impl Xplor {
                 header.max.y - 0.5,
                 Stroke::new(1.0, c::BORDER),
             );
+            // Title: glyph, name, and a dot when there are unsaved changes.
             let x = header.left() + sp::SM;
-            let cy = header.center().y;
-            let icon = Rect::from_center_size(Pos2::new(x + 8.0, cy), Vec2::splat(14.0));
+            let cy = title_row.center().y;
+            let icon = Rect::from_center_size(Pos2::new(x + 7.0, cy), Vec2::splat(15.0));
+            let glyph_color = if dirty { c::TEXT_DIM } else { c::TEXT_GHOST };
             if is_md {
-                painter.rect_stroke(icon, 3.0, Stroke::new(1.0, c::BORDER), StrokeKind::Inside);
-                let g = widgets::layout(ui, "M".to_owned(), theme::bold_font(9.5), c::TEXT_DIM);
-                widgets::galley_at(
-                    painter,
-                    Pos2::new(
-                        icon.center().x - g.size().x * 0.5,
-                        icon.center().y - g.size().y * 0.5,
-                    ),
-                    &g,
-                    c::TEXT_DIM,
-                );
+                Icon::Markdown.paint(painter, icon, glyph_color);
             } else {
-                Icon::File.paint(painter, icon, c::TEXT_GHOST);
+                Icon::File.paint(painter, icon, glyph_color);
             }
-            let name_x = x + 22.0;
-            let name_g = widgets::layout(
+            let name_x = x + 21.0;
+            let name_room = (title_row.right() - actions_w - sp::SM - name_x - 10.0).max(24.0);
+            let name_g = widgets::layout_elided(
                 ui,
                 file_name.clone(),
                 if dirty {
@@ -2154,8 +2589,8 @@ impl Xplor {
                     theme::ui_font(tfs::BODY)
                 },
                 c::TEXT,
+                name_room,
             );
-            let name_w = name_g.size().x;
             widgets::galley_at(
                 painter,
                 Pos2::new(name_x, cy - name_g.size().y * 0.5),
@@ -2163,25 +2598,33 @@ impl Xplor {
                 c::TEXT,
             );
             if dirty {
-                painter.circle_filled(Pos2::new(name_x + name_w + 6.0, cy), 2.5, c::ACCENT);
+                painter.circle_filled(
+                    Pos2::new(name_x + name_g.size().x + 6.0, cy),
+                    2.5,
+                    c::ACCENT,
+                );
             }
-            // The location is elided into whatever the button cluster leaves,
-            // so a long path can never run under the buttons.
-            let buttons_left = header.right() - DOC_BUTTONS_W;
-            let loc_x = name_x + name_w + 14.0;
-            let loc_w = (buttons_left - loc_x - sp::SM).max(24.0);
-            let loc = widgets::layout_elided(
+
+            // Path underneath, elided in the middle so the folder name survives.
+            let path_row = Rect::from_min_max(
+                Pos2::new(header.left(), title_row.bottom()),
+                Pos2::new(header.right(), header.bottom()),
+            );
+            let loc = widgets::layout_elided_middle(
                 ui,
                 location,
                 theme::ui_font(tfs::SMALL),
-                c::TEXT_GHOST,
-                loc_w,
+                c::TEXT_FAINT,
+                (path_row.width() - sp::SM * 2.0).max(24.0),
             );
             widgets::galley_at(
                 painter,
-                Pos2::new(loc_x, cy - loc.size().y * 0.5),
+                Pos2::new(
+                    path_row.left() + sp::SM,
+                    path_row.center().y - loc.size().y * 0.5,
+                ),
                 &loc,
-                c::TEXT_GHOST,
+                c::TEXT_FAINT,
             );
             if read_only {
                 let g = widgets::layout(
@@ -2190,44 +2633,21 @@ impl Xplor {
                     theme::ui_font(tfs::SMALL),
                     c::DANGER,
                 );
-                widgets::text_right(painter, Pos2::new(buttons_left - sp::SM, cy), &g, c::DANGER);
+                widgets::text_right(
+                    painter,
+                    Pos2::new(path_row.right() - sp::SM, path_row.center().y),
+                    &g,
+                    c::DANGER,
+                );
             }
         }
-
-        // Header buttons, right aligned.
-        let mut save = false;
-        let mut wrap = false;
-        let mut preview = false;
-        let mut close = false;
-        {
-            let buttons = Rect::from_min_max(
-                Pos2::new(header.right() - DOC_BUTTONS_W, header.top()),
-                Pos2::new(header.right() - sp::SM, header.bottom()),
-            );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(buttons), |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::flat_button(ui, "Close", "Close (Ctrl+W)").clicked() {
-                        close = true;
-                    }
-                    if widgets::flat_button(ui, "Wrap", "Soft wrap").clicked() {
-                        wrap = true;
-                    }
-                    if is_md {
-                        let label = if self.preview_visible {
-                            "Hide preview"
-                        } else {
-                            "Preview"
-                        };
-                        if widgets::flat_button(ui, label, "Toggle the live preview").clicked() {
-                            preview = true;
-                        }
-                    }
-                    if dirty && widgets::flat_button(ui, "Save", "Save (Ctrl+S)").clicked() {
-                        save = true;
-                    }
-                });
-            });
+        if preview {
+            self.preview_visible = !self.preview_visible;
         }
+        if close {
+            self.close_doc();
+        }
+
         if save {
             self.save_doc();
         }
@@ -2485,19 +2905,27 @@ impl Xplor {
                 String::new()
             }
         } else {
-            let bytes: u64 = self
-                .sel
-                .iter()
-                .map(|p| {
-                    if p.is_dir() {
-                        ops::dir_size(p)
-                    } else {
-                        p.metadata().map(|m| m.len()).unwrap_or(0)
+            // Folders are measured on a worker, so the total is the sum of
+            // what is known: exact once every folder has reported, short by
+            // the rest while they are still being walked. Never block here.
+            let mut bytes = 0u64;
+            let mut pending = 0usize;
+            for p in &self.sel {
+                if p.is_dir() {
+                    match self.measures.get(p) {
+                        Some(m) => bytes = bytes.saturating_add(m.bytes),
+                        None => pending += 1,
                     }
-                })
-                .sum();
+                } else {
+                    bytes = bytes.saturating_add(p.metadata().map(|m| m.len()).unwrap_or(0));
+                }
+            }
             let n = self.sel.len();
-            format!("{n} selected  \u{00B7}  {}", fs_model::fmt_size(bytes))
+            let mark = if pending > 0 { "+\u{2026}" } else { "" };
+            format!(
+                "{n} selected  \u{00B7}  {}{mark}",
+                fs_model::fmt_size(bytes)
+            )
         };
 
         let right = self.jobs.first().map(|j| {
@@ -2852,7 +3280,7 @@ impl Xplor {
                 Modal::new(Id::new("properties"))
                     .frame(theme::dialog_frame())
                     .show(ctx, |ui| {
-                        properties_ui(ui, &path);
+                        properties_ui(ui, &path, self.measures.get(&path));
                         ui.add_space(sp::MD);
                         if ui.button("OK").clicked() {
                             close = true;
@@ -3687,6 +4115,7 @@ impl Xplor {
                         }
                         None => {
                             self.entries = entries;
+                            self.listed_at = Some(Instant::now());
                             fs_model::sort(&mut self.entries, self.sort, self.ascending);
                             self.listing = Listing::Ready;
                             self.row_cache.clear();
@@ -3754,6 +4183,9 @@ impl Xplor {
                 Msg::Finished { id, outcome } => {
                     self.jobs.retain(|j| j.job.id != id);
                     self.settle_pending_undo();
+                    // The job changed what is on disk, so cached subtree
+                    // totals for the folders it touched are no longer true.
+                    self.measures.clear();
                     if let Outcome::Failed(msg) = &outcome {
                         self.toast_err(msg.clone());
                     }
@@ -3802,6 +4234,9 @@ impl Xplor {
                 } => {
                     self.thumbs.insert(path, px, rgba, w, h, ctx);
                 }
+                Msg::Measured { path, measure } => {
+                    self.measures.set(path, measure);
+                }
                 Msg::TreeLoaded { path, dirs } => {
                     if self.sidebar_tree.loading.as_deref() == Some(path.as_path()) {
                         self.sidebar_tree.loading = None;
@@ -3826,6 +4261,14 @@ impl Xplor {
             return;
         }
         self.last_change = None;
+        // Reading a folder can itself raise a change event, so a refresh can
+        // trigger the next one. Ignoring events for a moment after each listing
+        // breaks that loop; a real edit still shows up, just not instantly.
+        if let Some(listed) = self.listed_at
+            && listed.elapsed() < WATCH_COOLDOWN
+        {
+            return;
+        }
         self.request_listing();
         if let Some(doc) = self.doc() {
             let dir = doc.path.parent().map(|p| p.to_path_buf());
@@ -4641,9 +5084,11 @@ impl Xplor {
             .retain(|t| now.duration_since(t.born) < TOAST_TTL);
     }
 }
-/// Section label used in the sidebar and lists.
 /// The Properties sheet, the same information Explorer shows, in one column.
-fn properties_ui(ui: &mut Ui, path: &Path) {
+///
+/// `measures` is the cached subtree total for a folder, or `None` while a
+/// worker is still walking it.
+fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
     let md = std::fs::metadata(path).ok();
     let name = path
         .file_name()
@@ -4695,21 +5140,30 @@ fn properties_ui(ui: &mut Ui, path: &Path) {
         },
     );
     row(ui, "Location", parent.display().to_string());
+    let is_dir = md.as_ref().is_some_and(std::fs::Metadata::is_dir);
     row(
         ui,
         "Size",
-        match md.as_ref() {
-            Some(m) if m.is_file() => fs_model::fmt_size(m.len()),
-            _ => {
-                let (files, folders) = count_children(path);
-                format!("{files} files, {folders} folders")
-            }
+        match (is_dir, measures) {
+            // A folder is measured in the background; until the answer lands
+            // show a dash rather than walk the tree on this frame.
+            (true, Some(m)) => fs_model::fmt_size(m.bytes),
+            (true, None) => String::from("\u{2014}"),
+            (false, _) => md
+                .as_ref()
+                .map_or_else(|| String::from("\u{2014}"), |m| fs_model::fmt_size(m.len())),
         },
     );
     if let Some(m) = md.as_ref() {
-        if m.is_dir() {
-            let (files, folders) = count_children(path);
-            row(ui, "Contains", format!("{files} files, {folders} folders"));
+        if is_dir {
+            row(
+                ui,
+                "Contains",
+                measures.map_or_else(
+                    || String::from("\u{2014}"),
+                    |m| format!("{} files, {} folders", m.files, m.folders),
+                ),
+            );
         }
         row(
             ui,
@@ -4801,23 +5255,6 @@ fn fmt_stamp(t: std::time::SystemTime) -> String {
         }
         Err(_) => String::from("\u{2014}"),
     }
-}
-
-/// Counts files and folders directly inside `path`.
-fn count_children(path: &Path) -> (usize, usize) {
-    let Ok(rd) = std::fs::read_dir(path) else {
-        return (0, 0);
-    };
-    let mut files = 0;
-    let mut folders = 0;
-    for e in rd.flatten() {
-        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            folders += 1;
-        } else {
-            files += 1;
-        }
-    }
-    (files, folders)
 }
 
 fn section_header(ui: &mut Ui, title: &str) {
@@ -5055,6 +5492,57 @@ mod tests {
 
     fn file(name: &str) -> Tab {
         Tab::file(Path::new(name))
+    }
+
+    #[test]
+    fn pins_keep_the_order_they_were_added_in() {
+        let mut p = Pins::default();
+        p.add(Path::new("/work/app"), 8).unwrap();
+        p.add(Path::new("/work/notes"), 8).unwrap();
+        p.add(Path::new("/home"), 8).unwrap();
+        assert_eq!(
+            *p,
+            vec![
+                PathBuf::from("/work/app"),
+                PathBuf::from("/work/notes"),
+                PathBuf::from("/home")
+            ]
+        );
+    }
+
+    #[test]
+    fn pinning_the_same_folder_twice_does_nothing() {
+        let mut p = Pins::default();
+        p.add(Path::new("/work"), 8).unwrap();
+        // Same folder, spelled with a trailing separator and a detour.
+        let again = p.add(Path::new("/work/./"), 8);
+        assert!(matches!(again, Err(PinError::AlreadyThere)));
+        assert_eq!(p.len(), 1);
+        assert!(p.contains(Path::new("/work")));
+    }
+
+    #[test]
+    fn pins_stop_at_the_cap() {
+        let mut p = Pins::default();
+        p.add(Path::new("/a"), 2).unwrap();
+        p.add(Path::new("/b"), 2).unwrap();
+        assert!(matches!(p.add(Path::new("/c"), 2), Err(PinError::Full)));
+        assert_eq!(p.len(), 2, "the rejected folder was not added");
+        // Freeing a slot lets the next one in.
+        assert!(p.remove(Path::new("/a")));
+        p.add(Path::new("/c"), 2).unwrap();
+        assert_eq!(*p, vec![PathBuf::from("/b"), PathBuf::from("/c")]);
+    }
+
+    #[test]
+    fn unpinning_says_whether_the_folder_was_there() {
+        let mut p = Pins::default();
+        p.add(Path::new("/a"), 8).unwrap();
+        p.add(Path::new("/b"), 8).unwrap();
+        assert!(p.remove(Path::new("/a")));
+        assert!(!p.remove(Path::new("/a")), "removed twice");
+        assert!(!p.remove(Path::new("/nowhere")));
+        assert_eq!(*p, vec![PathBuf::from("/b")]);
     }
 
     fn folder(name: &str) -> Tab {

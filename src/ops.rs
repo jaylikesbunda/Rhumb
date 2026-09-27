@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
 #[cfg(test)]
-use crate::fs_model::{self, free_space};
+use crate::fs_model;
 use crate::workers::{Job, Msg, OpKind, Outcome, Progress};
 
 const CHUNK: usize = 512 * 1024;
@@ -156,7 +156,7 @@ fn run_transfer(
 
     // Moving onto another volume cannot be a rename; warn only if space is short.
     if total_bytes > 0 && !cut {
-        if let Some((avail, _)) = free_space(&dest_dir) {
+        if let Some((avail, _)) = fs_model::FreeSpace::default().get(&dest_dir) {
             if avail.saturating_sub(16 * 1024 * 1024) < total_bytes {
                 let msg = format!(
                     "Not enough free space in {} (need {}, have {})",
@@ -264,6 +264,114 @@ pub fn dir_size(path: &Path) -> u64 {
         }
     }
     total
+}
+
+/// What a folder adds up to, for the status bar and the details pane.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Measure {
+    /// Total bytes of every file in the subtree.
+    pub bytes: u64,
+    /// Files in the subtree, at any depth.
+    pub files: usize,
+    /// Folders below the top one, at any depth.
+    pub folders: usize,
+}
+
+impl Measure {
+    /// One file, so a mixed selection can be totalled with folders.
+    pub fn of_file(bytes: u64) -> Self {
+        Self {
+            bytes,
+            files: 1,
+            folders: 0,
+        }
+    }
+}
+
+/// Walks a folder and totals its subtree.
+///
+/// Symlinks are counted but never followed: a link pointing back up the tree
+/// would otherwise walk forever.
+pub fn measure(path: &Path) -> Measure {
+    if path.is_file() {
+        return Measure::of_file(path.metadata().map(|m| m.len()).unwrap_or(0));
+    }
+    let mut out = Measure::default();
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
+        if entry.depth() == 0 {
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            out.folders += 1;
+        } else {
+            out.files += 1;
+            if let Ok(md) = entry.metadata() {
+                out.bytes = out.bytes.saturating_add(md.len());
+            }
+        }
+    }
+    out
+}
+
+/// Subtree measurements for folders, filled in by a worker.
+///
+/// Measuring means walking, and a folder can hold hundreds of thousands of
+/// entries. Doing that on the UI thread froze the window for seconds, so the
+/// walk happens on a worker and the answer is kept until something changes it.
+pub struct Measures {
+    values: std::collections::HashMap<PathBuf, Measure>,
+    asked: std::collections::HashSet<PathBuf>,
+    tx: Sender<Msg>,
+}
+
+impl Measures {
+    pub fn new(tx: Sender<Msg>) -> Self {
+        Self {
+            values: std::collections::HashMap::new(),
+            asked: std::collections::HashSet::new(),
+            tx,
+        }
+    }
+
+    /// The measurement for `path`, asking a worker for one if we lack it.
+    ///
+    /// Returns `None` until the answer lands, which is what lets the caller
+    /// show a dash instead of blocking.
+    pub fn get(&mut self, path: &Path) -> Option<Measure> {
+        if let Some(m) = self.values.get(path) {
+            return Some(*m);
+        }
+        if self.asked.insert(path.to_path_buf()) {
+            let tx = self.tx.clone();
+            let p = path.to_path_buf();
+            // One thread per request, and `asked` keeps it to one per folder.
+            let _ = std::thread::Builder::new()
+                .name("xplor-measure".into())
+                .spawn(move || {
+                    let _ = tx.send(Msg::Measured {
+                        measure: measure(&p),
+                        path: p,
+                    });
+                });
+        }
+        None
+    }
+
+    /// Records a worker's answer.
+    pub fn set(&mut self, path: PathBuf, m: Measure) {
+        self.asked.remove(&path);
+        self.values.insert(path, m);
+    }
+
+    /// Forgets everything, so the next read is measured afresh.
+    pub fn clear(&mut self) {
+        self.values.clear();
+        self.asked.clear();
+    }
 }
 
 /// Counts items (files + folders) under a path, for progress totals.
@@ -712,6 +820,76 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn measure_totals_the_whole_subtree() {
+        let root = tmp("measure");
+        let a = root.join("a");
+        fs::create_dir_all(a.join("deep/deeper")).unwrap();
+        fs::write(root.join("top.txt"), "12345").unwrap();
+        fs::write(a.join("one.txt"), "123").unwrap();
+        fs::write(a.join("deep/two.txt"), "1234").unwrap();
+        fs::write(a.join("deep/deeper/three.txt"), "12").unwrap();
+
+        let m = measure(&root);
+        assert_eq!(m.files, 4, "should count files at every depth");
+        // a, a/deep, a/deep/deeper: everything below the top.
+        assert_eq!(m.folders, 3, "should count folders at every depth");
+        assert_eq!(m.bytes, 5 + 3 + 4 + 2);
+    }
+
+    #[test]
+    fn measure_of_a_file_is_just_itself() {
+        let root = tmp("measure-file");
+        let f = root.join("solo.txt");
+        fs::write(&f, "abcd").unwrap();
+        assert_eq!(measure(&f), Measure::of_file(4));
+    }
+
+    #[test]
+    fn measure_does_not_follow_a_link_back_up_the_tree() {
+        let root = tmp("measure-loop");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("f.txt"), "x").unwrap();
+        // A link pointing at an ancestor: following it would never terminate.
+        let link = sub.join("up");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&root, &link).is_ok() {
+            let m = measure(&sub);
+            assert_eq!(m.files, 1, "the link's contents were walked");
+            return;
+        }
+        let m = measure(&sub);
+        assert_eq!(m.files, 1);
+        assert_eq!(m.bytes, 1);
+    }
+
+    #[test]
+    fn measures_asks_once_and_then_answers_from_cache() {
+        let root = tmp("measure-cache");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/f.txt"), "xy").unwrap();
+        let dir = root.join("sub");
+
+        let (tx, rx) = bus();
+        let mut cache = Measures::new(tx);
+
+        // Nothing known yet, and one request goes out.
+        assert_eq!(cache.get(&dir), None);
+        assert_eq!(cache.get(&dir), None, "asked twice for the same folder");
+        assert!(rx.try_recv().is_err(), "the ask is not a message");
+
+        // The worker answers, and after that it is a plain lookup.
+        cache.set(dir.clone(), measure(&dir));
+        assert_eq!(cache.get(&dir), Some(Measure::of_file(2)));
+
+        // Clearing makes it ask again, because the answer may be stale.
+        cache.clear();
+        assert_eq!(cache.get(&dir), None);
     }
 
     #[test]

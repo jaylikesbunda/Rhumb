@@ -2,6 +2,7 @@
 //! locations. All of this is pure logic so it stays cheap and testable.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,15 +61,19 @@ pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
     let mut out = Vec::with_capacity(64);
     for item in fs::read_dir(path)? {
         let Ok(item) = item else { continue };
-        let Ok(name_os) = item.file_name().into_string() else {
+        let name_os = item.file_name();
+        let Some(name) = name_os.to_str() else {
             continue; // non-UTF-8 name: skip rather than mangle
         };
-        let is_hidden = is_hidden(&item.file_name().to_string_lossy(), &item);
+        // One stat per entry. `is_hidden` used to fetch metadata of its own,
+        // which doubled the work of listing a folder holding hundreds of
+        // thousands of files. Metadata errors are common (broken links,
+        // races); fall back to defaults.
+        let md = item.metadata().ok();
+        let is_hidden = is_hidden(name, md.as_ref());
         if is_hidden && !show_hidden {
             continue;
         }
-        // Metadata errors are common (broken links, races); fall back to defaults.
-        let md = item.metadata().ok();
         let is_symlink = md.as_ref().is_some_and(fs::Metadata::is_symlink);
         let is_dir = md.as_ref().map_or_else(
             || item.file_type().is_ok_and(|t| t.is_dir()),
@@ -77,7 +82,7 @@ pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
         let size = md.as_ref().map_or(0, fs::Metadata::len);
         let modified = md.as_ref().and_then(|m| m.modified().ok());
         out.push(Entry {
-            name: name_os,
+            name: name.to_owned(),
             path: item.path(),
             is_dir,
             is_symlink,
@@ -90,7 +95,10 @@ pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
 }
 
 /// Hidden = dot-prefixed, or (on Windows) the hidden file attribute.
-pub fn is_hidden(name: &str, md: &fs::DirEntry) -> bool {
+///
+/// Takes the metadata the listing already fetched: asking for it again per
+/// entry is what made reading a very large folder slow.
+pub fn is_hidden(name: &str, md: Option<&fs::Metadata>) -> bool {
     if name.starts_with('.') {
         return true;
     }
@@ -98,8 +106,7 @@ pub fn is_hidden(name: &str, md: &fs::DirEntry) -> bool {
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        md.metadata()
-            .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+        md.is_some_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
     }
     #[cfg(not(windows))]
     {
@@ -319,15 +326,58 @@ pub fn drives() -> Vec<Place> {
     out
 }
 
-/// Free space of the volume containing `path`, if discoverable.
-pub fn free_space(path: &Path) -> Option<(u64, u64)> {
-    use sysinfo::Disks;
-    let disks = Disks::new_with_refreshed_list();
-    disks
-        .list()
-        .iter()
-        .find(|d| path.starts_with(d.mount_point()))
-        .map(|d| (d.available_space(), d.total_space()))
+/// Free space per volume, kept in memory and refreshed on a timer.
+///
+/// Enumerating disks is not cheap: it opens every volume and asks the OS for
+/// its capacity. Doing that once per device row per frame burned most of a core
+/// while the app sat idle, so it is cached here instead. The numbers only need
+/// to be roughly right, and a few seconds of staleness is invisible.
+#[derive(Default)]
+pub struct FreeSpace {
+    values: HashMap<PathBuf, (u64, u64)>,
+    refreshed: Option<std::time::Instant>,
+}
+
+/// How long a cached reading is trusted.
+const FREE_SPACE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl FreeSpace {
+    /// Available and total bytes for the volume holding `path`.
+    pub fn get(&mut self, path: &Path) -> Option<(u64, u64)> {
+        let stale = self.refreshed.is_none_or(|t| t.elapsed() > FREE_SPACE_TTL);
+        if stale {
+            self.refresh();
+        }
+        self.lookup(path)
+    }
+
+    /// Finds the volume a path sits on, without touching the OS.
+    ///
+    /// The longest matching mount point wins, so `/media/usb/photos` resolves
+    /// to `/media/usb` rather than to the root.
+    fn lookup(&self, path: &Path) -> Option<(u64, u64)> {
+        if let Some(v) = self.values.get(path) {
+            return Some(*v);
+        }
+        self.values
+            .iter()
+            .filter(|(mount, _)| path.starts_with(mount))
+            .max_by_key(|(mount, _)| mount.components().count())
+            .map(|(_, v)| *v)
+    }
+
+    /// Re-reads every volume in one pass.
+    pub fn refresh(&mut self) {
+        use sysinfo::Disks;
+        let disks = Disks::new_with_refreshed_list();
+        self.values.clear();
+        for d in disks.list() {
+            let mount = PathBuf::from(d.mount_point().to_string_lossy().to_string());
+            self.values
+                .insert(mount, (d.available_space(), d.total_space()));
+        }
+        self.refreshed = Some(std::time::Instant::now());
+    }
 }
 
 /// Path components, root first, for the breadcrumb bar.

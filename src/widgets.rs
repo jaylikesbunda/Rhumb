@@ -35,6 +35,14 @@ pub enum Icon {
     Close,
     /// A page with a folded corner and a mark, for Markdown.
     Markdown,
+    /// Two panes side by side, for the editor/preview split.
+    Preview,
+    /// An arrow turning back on itself, for soft wrap.
+    Wrap,
+    /// An arrow down into a tray, for save.
+    Save,
+    /// A pushpin, for quick access.
+    Pin,
 }
 
 impl Icon {
@@ -204,6 +212,127 @@ impl Icon {
                     [
                         Pos2::new(x + 2.5, page.center().y - 2.5),
                         Pos2::new(page.right() - 3.0, page.center().y + 2.5),
+                    ],
+                    stroke,
+                );
+            }
+            Icon::Preview => {
+                // A page with a narrow pane beside it: the split view.
+                let h = s * 0.42;
+                let stroke = Stroke::new(1.1, color);
+                let left = Rect::from_min_max(
+                    Pos2::new(ctr.x - h, ctr.y - h),
+                    Pos2::new(ctr.x - h * 0.25, ctr.y + h),
+                );
+                let right = Rect::from_min_max(
+                    Pos2::new(ctr.x + h * 0.25, ctr.y - h),
+                    Pos2::new(ctr.x + h, ctr.y + h),
+                );
+                p.rect_stroke(left, 1.5, stroke, StrokeKind::Inside);
+                p.rect_stroke(right, 1.5, stroke, StrokeKind::Inside);
+            }
+            Icon::Wrap => {
+                // An arrow that runs right, turns down and doubles back left.
+                let h = s * 0.34;
+                let stroke = Stroke::new(1.2, color);
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x - h, ctr.y - h),
+                        Pos2::new(ctr.x + h, ctr.y - h),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x + h, ctr.y - h),
+                        Pos2::new(ctr.x + h, ctr.y + h * 0.45),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x + h, ctr.y + h * 0.45),
+                        Pos2::new(ctr.x - h * 0.2, ctr.y + h * 0.45),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x - h * 0.7, ctr.y - h * 0.05),
+                        Pos2::new(ctr.x - h * 0.2, ctr.y + h * 0.45),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x - h * 0.7, ctr.y + h * 0.95),
+                        Pos2::new(ctr.x - h * 0.2, ctr.y + h * 0.45),
+                    ],
+                    stroke,
+                );
+            }
+            Icon::Pin => {
+                // A pushpin: a flat head tapering to a point, needle below.
+                let h = s * 0.32;
+                let w = s * 0.40;
+                let stroke = Stroke::new(1.15, color);
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x - w, ctr.y - h),
+                        Pos2::new(ctr.x + w, ctr.y - h),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x - w, ctr.y - h),
+                        Pos2::new(ctr.x, ctr.y + h * 0.3),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x + w, ctr.y - h),
+                        Pos2::new(ctr.x, ctr.y + h * 0.3),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x, ctr.y + h * 0.3),
+                        Pos2::new(ctr.x, ctr.y + h * 1.15),
+                    ],
+                    stroke,
+                );
+            }
+            Icon::Save => {
+                let h = s * 0.34;
+                let stroke = Stroke::new(1.2, color);
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x, ctr.y - h),
+                        Pos2::new(ctr.x, ctr.y + h * 0.25),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x - h * 0.55, ctr.y - h * 0.3),
+                        Pos2::new(ctr.x, ctr.y + h * 0.25),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x + h * 0.55, ctr.y - h * 0.3),
+                        Pos2::new(ctr.x, ctr.y + h * 0.25),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(ctr.x - h, ctr.y + h),
+                        Pos2::new(ctr.x + h, ctr.y + h),
                     ],
                     stroke,
                 );
@@ -634,6 +763,49 @@ pub fn layout(ui: &Ui, text: String, font: FontId, color: Color32) -> Arc<Galley
     ui.ctx().fonts_mut(|f| f.layout_job(job))
 }
 
+/// Shapes text elided in the *middle*, keeping the tail.
+///
+/// A path is only interesting at the end: "…\Documents\Projects\app" says far
+/// more than "C:\Users\…\Documents", so the head is what gets dropped.
+pub fn layout_elided_middle(
+    ui: &Ui,
+    text: String,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> Arc<Galley> {
+    let width = max_width.max(10.0);
+    let full = layout(ui, text.clone(), font.clone(), color);
+    if full.size().x <= width {
+        return full;
+    }
+    // Drop characters from the front until the remainder fits.
+    //
+    // `n` is how many leading characters go, so the *smallest* `n` that fits is
+    // the longest tail worth showing. `fits` is monotone — a shorter tail is
+    // never wider — which makes this a lower-bound search. `hi` always holds a
+    // candidate known to fit, starting from the bare ellipsis, so the search
+    // can never wander off the end and report nothing.
+    let chars: Vec<char> = text.chars().collect();
+    let mut lo = 0usize;
+    let mut hi = chars.len();
+    let mut best = layout(ui, String::from('\u{2026}'), font.clone(), color);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let candidate: String = std::iter::once('\u{2026}')
+            .chain(chars[mid..].iter().copied())
+            .collect();
+        let g = layout(ui, candidate, font.clone(), color);
+        if g.size().x <= width {
+            best = g;
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    best
+}
+
 /// Shapes text wrapped to `max_width`, keeping every line break the caller put
 /// in it. Used where a whole block of text is shown rather than one label.
 pub fn layout_wrapped(
@@ -896,6 +1068,73 @@ mod tests {
     use super::*;
     use crate::theme::col;
     use egui::vec2;
+
+    #[test]
+    fn middle_elision_keeps_the_tail_of_a_long_path() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        let font = ui_font(tfs::BODY);
+        let path = String::from(r"C:\Users\somebody\Documents\Projects\app");
+
+        // Narrow: the head must go, the folder name must stay.
+        let (narrow, plain, wide) = {
+            let (mut n, mut p, mut w) = (None, None, None);
+            let path = path.clone();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_max_size(vec2(400.0, 600.0));
+                n = Some(layout_elided_middle(
+                    ui,
+                    path.clone(),
+                    font.clone(),
+                    c::TEXT,
+                    120.0,
+                ));
+                p = Some(layout(ui, path.clone(), font.clone(), c::TEXT));
+                // Roomy: nothing is dropped, so the path reads in full.
+                w = Some(layout_elided_middle(
+                    ui,
+                    path.clone(),
+                    font.clone(),
+                    c::TEXT,
+                    900.0,
+                ));
+            });
+            out.textures_delta.clear();
+            (n.unwrap(), p.unwrap(), w.unwrap())
+        };
+        assert!(
+            narrow.size().x <= 120.0,
+            "elided to {}px, over the 120px budget",
+            narrow.size().x
+        );
+        assert!(
+            plain.size().x > 120.0,
+            "fixture is not long enough to be elided"
+        );
+        let shown: String = narrow.job.text.chars().collect();
+        assert!(shown.starts_with('\u{2026}'), "no ellipsis: {shown:?}");
+        assert!(shown.ends_with(r"Projects\app"), "lost the tail: {shown:?}");
+        assert_eq!(wide.job.text.chars().collect::<String>(), path);
+    }
+
+    #[test]
+    fn middle_elision_degrades_to_a_bare_ellipsis() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        let mut g = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_max_size(vec2(400.0, 600.0));
+            g = Some(layout_elided_middle(
+                ui,
+                String::from("a-very-long-unbreakable-folder-name"),
+                ui_font(tfs::BODY),
+                c::TEXT,
+                1.0,
+            ));
+        });
+        out.textures_delta.clear();
+        assert_eq!(g.unwrap().job.text.chars().collect::<String>(), "\u{2026}");
+    }
 
     #[test]
     fn cycling_visits_every_view_and_returns() {

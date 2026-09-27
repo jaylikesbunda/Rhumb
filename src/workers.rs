@@ -44,6 +44,12 @@ pub enum Msg {
     },
     /// A folder's subfolders finished loading for the sidebar tree.
     TreeLoaded { path: PathBuf, dirs: Vec<PathBuf> },
+    /// A folder's subtree finished being measured for the status bar and the
+    /// details pane.
+    Measured {
+        path: PathBuf,
+        measure: crate::ops::Measure,
+    },
     /// A file operation reported progress.
     Progress(Progress),
     /// A file operation finished.
