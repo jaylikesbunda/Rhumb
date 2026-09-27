@@ -58,7 +58,7 @@ Needs a Rust toolchain (1.85 or newer).
 git clone https://github.com/you/xplor
 cd xplor
 cargo build --release      # target/release/xplor
-cargo test                 # 71 unit tests
+cargo test                 # 111 unit tests
 cargo clippy --all-targets # lints
 ```
 

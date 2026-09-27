@@ -1,0 +1,6 @@
+# Keep line endings consistent: LF in the repository, native in the working
+# tree on Windows, so a checkout on either platform does not churn every file.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
