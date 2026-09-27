@@ -1,0 +1,113 @@
+name: release
+
+# A `v*` tag publishes installers for that version. Pushes to main and pull
+# requests only prove the project still builds and passes on both platforms.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test
+      - name: Check the other platform's build
+        if: matrix.os == 'windows-latest'
+        run: |
+          rustup target add x86_64-unknown-linux-gnu
+          cargo check --target x86_64-unknown-linux-gnu
+
+  msi:
+    name: windows installer
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The runner image already ships the WiX toolset that cargo-wix drives.
+      - uses: taiki-e/install-action@cargo-wix
+      - name: Build the MSI
+        run: cargo wix --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xplor-msi
+          path: target/wix/xplor.msi
+          if-no-files-found: error
+
+  appimage:
+    name: linux appimage
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the runtime libraries winit links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dri libxkbcommon-x11-0 libwayland-client0 libssl3 libudev1
+      - run: cargo build --release
+      - name: Assemble the AppDir
+        run: tools/make_appdir.sh
+      - name: Package it into an AppImage
+        uses: AppImageCrafters/appimage-builder@v2
+        with:
+          app-path: target/xplor.AppDir
+          output: xplor.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xplor-appimage
+          path: xplor.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: [msi, appimage]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Rename with the tag
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          mv dist/xplor.msi "dist/xplor-${tag}-x64.msi"
+          mv dist/xplor.AppImage "dist/xplor-${tag}-x86_64.AppImage"
+          ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          draft: false

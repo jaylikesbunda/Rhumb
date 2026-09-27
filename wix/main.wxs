@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  WiX v3 source for the Xplor MSI, driven by cargo-wix.
+
+  `cargo wix` substitutes the @@_*@@ placeholders from Cargo.toml before
+  running candle/light, so the version, authors and licence always match the
+  manifest. Run it with:
+
+      cargo install cargo-wix --locked
+      cargo wix --nocapture
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product
+        Id="*"
+        Name="Xplor"
+        UpgradeCode="7C1E1F0A-9C0B-4C7E-9E4A-2C0B4E1D5A31"
+        Language="1033"
+        Codepage="1252"
+        Manufacturer="Xplor"
+        Version="@@PKG_VERSION@@">
+
+        <Package Id="*"
+                 Keywords="Installer"
+                 Description="Xplor @@PKG_VERSION@@ file explorer"
+                 InstallerVersion="500"
+                 Languages="1033"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 SummaryCodepage="1252"
+                 Manufacturer="Xplor"/>
+
+        <MajorUpgrade Schedule="afterInstallInitialize"
+                      DowngradeErrorMessage="A newer version of Xplor is already installed."/>
+        <MediaTemplate EmbedCab="yes"/>
+
+        <!-- Everything installs under one folder, with no per-user state, so
+             uninstalling leaves nothing behind. -->
+        <Property Id="ARPPRODUCTICON" Value="ProductIcon"/>
+        <Property Id="ARPNOREPAIR" Value="1"/>
+        <Icon Id="ProductIcon" SourceFile="@@PKG_RESOURCES_DIR@@\icon.ico"/>
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="APPLICATIONFOLDER" Name="Xplor">
+                    <Component Id="MainExecutable" Guid="*">
+                        <File Id="XplorExe"
+                              Name="xplor.exe"
+                              Source="@@PKG_BINARIES@@\xplor.exe"
+                              KeyPath="yes">
+                            <Shortcut Id="StartMenuShortcut"
+                                      Directory="ProgramMenuFolder"
+                                      Name="Xplor"
+                                      Description="A minimal file explorer"
+                                      Advertise="yes"/>
+                        </File>
+                    </Component>
+                    <Component Id="Readme" Guid="*">
+                        <File Id="ReadmeTxt" Name="README.md" Source="@@PKG_ROOT@@\README.md" KeyPath="yes"/>
+                    </Component>
+                </Directory>
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Xplor"/>
+            </Directory>
+        </Directory>
+
+        <Feature Id="MainFeature" Title="Xplor" Level="1" ConfigurableDirectory="APPLICATIONFOLDER">
+            <ComponentRef Id="MainExecutable"/>
+            <ComponentRef Id="Readme"/>
+        </Feature>
+
+        <UIRef Id="WixUI_FeatureTree"/>
+        <WixVariable Id="WixUILicenseRtf" Value="@@PKG_ROOT_DIR@@\wix\License.rtf"/>
+    </Product>
+</Wix>
