@@ -31,6 +31,10 @@ pub enum Icon {
     Search,
     Sidebar,
     Sort,
+    /// A cross, for closing a tab.
+    Close,
+    /// A page with a folded corner and a mark, for Markdown.
+    Markdown,
 }
 
 impl Icon {
@@ -165,6 +169,34 @@ impl Icon {
                     color,
                     PathStroke::new(1.2, color),
                 ));
+            }
+            Icon::Close => {
+                let h = s * 0.26;
+                let stroke = Stroke::new(1.2, color);
+                p.line_segment([ctr + Vec2::new(-h, -h), ctr + Vec2::new(h, h)], stroke);
+                p.line_segment([ctr + Vec2::new(h, -h), ctr + Vec2::new(-h, h)], stroke);
+            }
+            Icon::Markdown => {
+                // A page outline with two short strokes inside: enough to read
+                // as "document" at 14px without needing a typeface.
+                let page = Rect::from_center_size(ctr, Vec2::splat(s * 0.86));
+                let stroke = Stroke::new(1.1, color);
+                p.rect_stroke(page, 2.0, stroke, StrokeKind::Inside);
+                let x = page.left() + page.width() * 0.36;
+                p.line_segment(
+                    [
+                        Pos2::new(x, page.top() + 3.0),
+                        Pos2::new(x, page.bottom() - 3.0),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(x + 2.5, page.center().y - 2.5),
+                        Pos2::new(page.right() - 3.0, page.center().y + 2.5),
+                    ],
+                    stroke,
+                );
             }
         }
     }

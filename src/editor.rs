@@ -82,6 +82,14 @@ impl Doc {
         }
     }
 
+    /// An empty document standing in for a path, used by a folder tab.
+    ///
+    /// It is never edited or saved: the tab only borrows the path so the strip
+    /// can name itself and the watcher knows what to follow.
+    pub fn placeholder(path: &Path) -> Doc {
+        Doc::from_parts(path.to_path_buf(), String::new(), DocKind::Text, None, true)
+    }
+
     /// Builds a document from text already in memory.
     pub fn from_parts(
         path: PathBuf,

@@ -78,6 +78,8 @@ pub mod sp {
     pub const TOOLBAR: f32 = 38.0;
     /// Status bar height.
     pub const STATUS: f32 = 24.0;
+    /// Tab strip height.
+    pub const TAB_H: f32 = 26.0;
     /// Sidebar section header height.
     pub const SECTION: f32 = 24.0;
     /// Icon square edge length.

@@ -12,6 +12,9 @@ binary, no runtime to install.
 
 - **Browse** with a lazy, Explorer-style tree in the sidebar, an address bar of
   clickable path segments, and a sortable list.
+- **Tabs**, like Windows 11 Explorer: `Ctrl+T` opens a new tab on the file
+  list, opening a file turns that tab into the document, and `Ctrl+Tab` moves
+  between them. Unsaved tabs show a dot and ask before closing.
 - **Three views** — details with sortable columns, a compact list, and large
   icons with real image thumbnails. `Ctrl+1`, `Ctrl+2`, `Ctrl+3`, or the
   switch in the bottom-right corner.
@@ -72,12 +75,14 @@ codegen unit, `panic=abort` and stripped symbols, which lands around 15 MB.
 | `Ctrl+F` | Focus the search box |
 | `Ctrl+H` | Show hidden items |
 | `Ctrl+N` / `Ctrl+Shift+N` | New text document / folder |
+| `Ctrl+T` | New tab showing files |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, `Ctrl+V` | Selection and clipboard |
 | `F2` | Rename |
 | `Delete` / `Shift+Delete` | Trash / delete permanently |
 | `Ctrl+Z` | Undo the last file operation |
 | `Alt+Enter` | Properties |
-| `Ctrl+S`, `Ctrl+W` | Save, close the document |
+| `Ctrl+S`, `Ctrl+W` | Save, close the tab |
 | `Tab` / `Shift+Tab` | Indent or outdent |
 | `Ctrl+/` | Toggle a line comment |
 | `F5` | Reload the folder |

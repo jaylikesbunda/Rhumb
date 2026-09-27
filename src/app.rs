@@ -57,6 +57,150 @@ enum Listing {
     Failed,
 }
 
+/// What a tab is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TabKind {
+    /// An open document.
+    File,
+    /// The file list, opened as its own tab.
+    Folder,
+}
+
+/// One open tab: either a document or the file list.
+struct Tab {
+    kind: TabKind,
+    doc: Doc,
+}
+
+impl Tab {
+    fn file(path: &Path) -> Tab {
+        Tab {
+            kind: TabKind::File,
+            doc: Doc::placeholder(path),
+        }
+    }
+
+    fn folder(path: &Path) -> Tab {
+        Tab {
+            kind: TabKind::Folder,
+            doc: Doc::placeholder(path),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.doc.path
+    }
+
+    fn label(&self) -> String {
+        match self.kind {
+            TabKind::File => self.doc.file_name(),
+            // A folder tab is named after the folder it was opened at.
+            TabKind::Folder => self
+                .doc
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Files".to_owned()),
+        }
+    }
+}
+
+/// The open tabs and which one is on screen.
+///
+/// Kept apart from the app so the rules - what closing does to the focus, how
+/// cycling wraps - can be tested without a window. It derefs to the tab list so
+/// ordinary indexing and iteration keep working.
+#[derive(Default)]
+struct Tabs {
+    open: Vec<Tab>,
+    active: usize,
+}
+
+impl std::ops::Deref for Tabs {
+    type Target = Vec<Tab>;
+
+    fn deref(&self) -> &Vec<Tab> {
+        &self.open
+    }
+}
+
+impl std::ops::DerefMut for Tabs {
+    fn deref_mut(&mut self) -> &mut Vec<Tab> {
+        &mut self.open
+    }
+}
+
+impl Tabs {
+    fn active_tab(&self) -> Option<&Tab> {
+        self.open.get(self.active)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.open.get_mut(self.active)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.open.is_empty()
+    }
+
+    /// True when the tab on screen is a document, which is what puts the
+    /// editor up. A folder tab shows the file list instead.
+    fn shows_file(&self) -> bool {
+        self.active_tab().is_some_and(|t| t.kind == TabKind::File)
+    }
+
+    /// Appends a tab and returns its index, without changing the focus.
+    fn push(&mut self, tab: Tab) -> usize {
+        self.open.push(tab);
+        self.open.len() - 1
+    }
+
+    fn index_of(&self, path: &Path) -> Option<usize> {
+        self.open.iter().position(|t| t.doc.path == path)
+    }
+
+    /// Moves the focus, ignoring an out-of-range index.
+    fn focus(&mut self, index: usize) {
+        if index < self.open.len() {
+            self.active = index;
+        }
+    }
+
+    /// Cycles to the next or previous tab, wrapping at both ends.
+    fn cycle(&mut self, back: bool) {
+        if self.open.len() < 2 {
+            return;
+        }
+        let n = self.open.len();
+        self.active = if back {
+            (self.active + n - 1) % n
+        } else {
+            (self.active + 1) % n
+        };
+    }
+
+    /// Closes a tab and keeps the focus on a sensible neighbour: the same file
+    /// if the closed one was before it, otherwise the new last.
+    fn close(&mut self, index: usize) {
+        if index >= self.open.len() {
+            return;
+        }
+        self.open.remove(index);
+        self.active = if self.open.is_empty() {
+            0
+        } else if index < self.active {
+            self.active - 1
+        } else {
+            self.active.min(self.open.len() - 1)
+        };
+    }
+
+    /// The first tab with unsaved changes, for the closing prompt.
+    fn first_dirty(&self) -> Option<usize> {
+        self.open.iter().position(|t| t.doc.dirty())
+    }
+}
+
 /// One reversible file operation, kept for Ctrl+Z.
 #[derive(Clone, Debug)]
 enum Undo {
@@ -201,6 +345,9 @@ struct Keys {
     toggle_hidden: bool,
     toggle_sidebar: bool,
     close_file: bool,
+    new_tab: bool,
+    next_tab: bool,
+    prev_tab: bool,
     new_file: bool,
     new_folder: bool,
     save: bool,
@@ -239,6 +386,8 @@ pub struct Xplor {
     typeahead: TypeAhead,
     /// Set by Alt+F; the toolbar button opens its menu and clears the flag.
     new_menu: bool,
+    /// Tab the "unsaved changes" prompt is about, when it came from a tab cross.
+    pending_close: Option<usize>,
     /// Whether the details pane is offered when nothing is open.
     details: bool,
     visible: Vec<usize>,
@@ -271,7 +420,8 @@ pub struct Xplor {
     scope: SearchScope,
 
     // Document
-    doc: Option<Doc>,
+    /// The open tabs and which one is on screen.
+    tabs: Tabs,
     loading: Option<PathBuf>,
     preview: Preview,
     render_version: u64,
@@ -343,6 +493,7 @@ impl Xplor {
             view: ViewMode::default(),
             typeahead: TypeAhead::default(),
             new_menu: false,
+            pending_close: None,
             details: true,
             visible: Vec::new(),
             listing: Listing::Loading,
@@ -366,7 +517,7 @@ impl Xplor {
             search_shown: false,
             scope: SearchScope::Below,
             sidebar_tree: SidebarTree::default(),
-            doc: None,
+            tabs: Tabs::default(),
             loading: None,
             preview: Preview::new(),
             render_version: 0,
@@ -508,6 +659,82 @@ impl Xplor {
         }
     }
 
+    // ---- tabs -----------------------------------------------------------
+
+    /// The tab on screen.
+    fn tab(&self) -> Option<&Tab> {
+        self.tabs.active_tab()
+    }
+
+    fn tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.active_tab_mut()
+    }
+
+    /// The document on screen, if any.
+    fn doc(&self) -> Option<&Doc> {
+        self.tab().map(|t| &t.doc)
+    }
+
+    fn doc_mut(&mut self) -> Option<&mut Doc> {
+        self.tab_mut().map(|t| &mut t.doc)
+    }
+
+    fn has_tabs(&self) -> bool {
+        !self.tabs.is_empty()
+    }
+
+    fn shows_file_tab(&self) -> bool {
+        self.tabs.shows_file()
+    }
+
+    /// Index of the tab showing `path`, if it is already open.
+    fn tab_index(&self, path: &Path) -> Option<usize> {
+        self.tabs.index_of(path)
+    }
+
+    /// Brings a tab to the front, rebuilding the preview cache if it changed.
+    fn focus_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        // A folder tab shows the folder it was opened at.
+        if self.tabs[index].kind == TabKind::Folder {
+            let dir = self.tabs[index].doc.path.clone();
+            self.tabs.focus(index);
+            if dir.is_dir() && dir != self.cwd {
+                self.navigate(&dir);
+            }
+            return;
+        }
+        if index == self.tabs.active {
+            return;
+        }
+        self.tabs.focus(index);
+        // The preview cache belongs to whichever document was on screen.
+        self.preview.reset();
+        self.render_version = 0;
+        self.last_edit = None;
+    }
+
+    /// Cycles to the next or previous tab, the way Ctrl+Tab does.
+    fn cycle_tab(&mut self, back: bool) {
+        let before = self.tabs.active;
+        self.tabs.cycle(back);
+        if self.tabs.active != before {
+            self.preview.reset();
+            self.render_version = 0;
+            self.last_edit = None;
+        }
+    }
+
+    /// Closes one tab, moving focus to a neighbour.
+    fn close_tab(&mut self, index: usize) {
+        self.tabs.close(index);
+        self.preview.reset();
+        self.render_version = 0;
+        self.last_edit = None;
+    }
+
     // ---- frame ---------------------------------------------------------
 
     fn draw(&mut self, root: &mut Ui, ctx: &Context) {
@@ -539,6 +766,19 @@ impl Xplor {
         // The status bar claims the full window width, so it is shown before the
         // side panels: a panel only gets what the earlier ones left behind, and
         // Explorer's status bar runs edge to edge under everything.
+        // The tab row spans the whole window, the way Explorer puts it above
+        // the folder view and the document pane.
+        if self.has_tabs() {
+            egui::containers::Panel::top("tabs")
+                .exact_size(sp::TAB_H)
+                .resizable(false)
+                .frame(tab_frame())
+                .show(root, |ui| {
+                    let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                    self.tab_strip(ui, rect);
+                });
+        }
+
         egui::containers::Panel::bottom("status")
             .exact_size(sp::STATUS)
             .resizable(false)
@@ -565,7 +805,7 @@ impl Xplor {
 
         // The right-hand pane is either the editor or, when nothing is open,
         // the details pane for the current selection. One pane, two jobs.
-        if self.doc.is_some() || (self.details && !self.sel.is_empty()) {
+        if self.shows_file_tab() || (self.details && !self.sel.is_empty()) {
             let doc_w = self.doc_w;
             egui::containers::Panel::right("doc_panel")
                 .resizable(true)
@@ -575,7 +815,7 @@ impl Xplor {
                 .frame(doc_frame())
                 .show(root, |ui| {
                     let w = ui.max_rect().width();
-                    if self.doc.is_some() {
+                    if self.shows_file_tab() {
                         self.doc_ui(ui);
                     } else {
                         self.details_ui(ui);
@@ -1722,7 +1962,11 @@ impl Xplor {
             widgets::empty_state(ui, "Loading\u{2026}", "Reading the file");
             return;
         }
-        let Some(doc) = self.doc.as_ref() else {
+        if self.tab().is_some_and(|t| t.kind == TabKind::Folder) {
+            widgets::empty_state(ui, "Files", "Open something to read it here");
+            return;
+        }
+        let Some(doc) = self.doc() else {
             return;
         };
         let kind = doc.kind;
@@ -1884,7 +2128,7 @@ impl Xplor {
                     });
                 });
             if reload {
-                if let Some(d) = self.doc.as_mut()
+                if let Some(d) = self.doc_mut()
                     && let Err(e) = d.reload()
                 {
                     self.toast_err(e);
@@ -1892,7 +2136,7 @@ impl Xplor {
                 self.preview.reset();
             }
             if keep {
-                if let Some(d) = self.doc.as_mut() {
+                if let Some(d) = self.doc_mut() {
                     d.externally_changed = false;
                 }
             }
@@ -1966,10 +2210,8 @@ impl Xplor {
 
     /// The code editor.
     fn editor_ui(&mut self, ui: &mut Ui, rect: Rect) {
-        let Some((path, before_chars)) = self
-            .doc
-            .as_ref()
-            .map(|d| (d.path.clone(), d.text.chars().count()))
+        let Some((path, before_chars)) =
+            self.doc().map(|d| (d.path.clone(), d.text.chars().count()))
         else {
             return;
         };
@@ -1995,8 +2237,7 @@ impl Xplor {
         let mut skip_to: Option<usize> = None;
         if let Some(caret) = self.editor_caret {
             let ready = self
-                .doc
-                .as_ref()
+                .doc()
                 .is_some_and(|d| editing::should_skip_closer(&d.text, caret));
             if ready
                 && ui
@@ -2008,7 +2249,7 @@ impl Xplor {
         }
 
         let (output, _tokens) = {
-            let doc = self.doc.as_mut().expect("checked above");
+            let doc = self.doc_mut().expect("checked above");
             let child = ui.scope_builder(
                 egui::UiBuilder::new()
                     .max_rect(rect)
@@ -2034,7 +2275,7 @@ impl Xplor {
         let id = output.response.id;
         let range = output.cursor_range;
         self.editor_caret = range.map(|r| r.primary.index.0);
-        let after_chars = self.doc.as_ref().map_or(0, |d| d.text.chars().count());
+        let after_chars = self.doc().map_or(0, |d| d.text.chars().count());
         let typed_one = after_chars == before_chars + 1;
         if let Some(target) = skip_to {
             self.set_text_cursor(ui.ctx(), id, target);
@@ -2049,7 +2290,7 @@ impl Xplor {
 
     /// Markdown preview, refreshed after a short pause in typing.
     fn preview_ui(&mut self, ui: &mut Ui, _rect: Rect) {
-        let Some(doc) = self.doc.as_ref() else {
+        let Some(doc) = self.doc() else {
             return;
         };
         if let Some(last) = self.last_edit {
@@ -2061,11 +2302,7 @@ impl Xplor {
             self.render_version = doc.version;
         }
         let version = self.render_version;
-        let text = self
-            .doc
-            .as_ref()
-            .map(|d| d.text.clone())
-            .unwrap_or_default();
+        let text = self.doc().map(|d| d.text.clone()).unwrap_or_default();
         self.preview.sync(&text, version);
 
         let indent = sp::LG;
@@ -2185,7 +2422,7 @@ impl Xplor {
             );
             right_x -= 158.0;
         }
-        let info = match self.doc.as_ref() {
+        let info = match self.doc() {
             Some(d) => {
                 let stats = self.preview.stats();
                 let kb = d.text.len() as f32 / 1024.0;
@@ -2454,14 +2691,19 @@ impl Xplor {
                     if save {
                         self.save_doc();
                     }
-                    self.doc = None;
-                    self.preview.reset();
-                    self.close_armed = true;
+                    // The prompt came from a tab cross, or from Ctrl+W on the
+                    // active tab; either way close the tab it named.
+                    match self.pending_close.take() {
+                        Some(i) if i < self.tabs.len() => self.close_tab(i),
+                        _ => self.close_active_tab(),
+                    }
                     if close_app {
+                        self.close_armed = true;
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     }
                     None
                 } else if cancel {
+                    self.pending_close = None;
                     None
                 } else {
                     Some(Dialog::Unsaved { path, close_app })
@@ -2515,7 +2757,9 @@ impl Xplor {
                             ("F2", "Rename"),
                             ("Ctrl+N  /  Ctrl+Shift+N", "New document  /  folder"),
                             ("Alt+F", "The New menu, including compress to ZIP"),
-                            ("Ctrl+S  /  Ctrl+W", "Save  /  close the document"),
+                            ("Ctrl+S  /  Ctrl+W", "Save  /  close the tab"),
+                            ("Ctrl+T", "New tab showing files"),
+                            ("Ctrl+Tab  /  Ctrl+Shift+Tab", "Next  /  previous tab"),
                             ("Tab  /  Shift+Tab", "Indent  /  outdent"),
                             ("Ctrl+/", "Toggle a line comment"),
                             ("Escape", "Clear the search, then the selection"),
@@ -2701,6 +2945,12 @@ impl Xplor {
                 || i.consume_key(egui::Modifiers::COMMAND, Key::B);
             k.close_file = i.consume_key(egui::Modifiers::CTRL, Key::W)
                 || i.consume_key(egui::Modifiers::COMMAND, Key::W);
+            k.new_tab = i.consume_key(egui::Modifiers::CTRL, Key::T)
+                || i.consume_key(egui::Modifiers::COMMAND, Key::T);
+            k.next_tab = i.consume_key(egui::Modifiers::CTRL, Key::Tab)
+                || i.consume_key(egui::Modifiers::CTRL, Key::PageDown);
+            k.prev_tab = i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, Key::Tab)
+                || i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, Key::PageUp);
             k.new_file = i.consume_key(egui::Modifiers::CTRL, Key::N);
             k.new_folder = i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, Key::N);
             k.save = i.consume_key(egui::Modifiers::CTRL, Key::S)
@@ -2781,6 +3031,15 @@ impl Xplor {
         }
         if k.close_file {
             self.close_doc();
+        }
+        if k.new_tab {
+            self.new_tab();
+        }
+        if k.next_tab {
+            self.cycle_tab(false);
+        }
+        if k.prev_tab {
+            self.cycle_tab(true);
         }
         if k.new_file {
             self.dialog = Dialog::Create {
@@ -3011,13 +3270,12 @@ impl Xplor {
     }
 
     fn request_close(&mut self, ctx: &Context) {
-        if self.unsaved() {
+        if let Some(i) = self.unsaved_tab() {
+            // Name the file that actually needs saving, not the visible one.
+            self.pending_close = Some(i);
+            let path = self.tabs[i].doc.path.clone();
             self.dialog = Dialog::Unsaved {
-                path: self
-                    .doc
-                    .as_ref()
-                    .map(|d| d.path.clone())
-                    .unwrap_or_default(),
+                path,
                 close_app: true,
             };
         } else {
@@ -3031,23 +3289,166 @@ impl Xplor {
         if !closing {
             return;
         }
-        if self.unsaved() && !self.close_armed {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.dialog = Dialog::Unsaved {
-                path: self
-                    .doc
-                    .as_ref()
-                    .map(|d| d.path.clone())
-                    .unwrap_or_default(),
-                close_app: true,
-            };
+        if let Some(i) = self.unsaved_tab() {
+            if !self.close_armed {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                self.pending_close = Some(i);
+                let path = self.tabs[i].doc.path.clone();
+                self.dialog = Dialog::Unsaved {
+                    path,
+                    close_app: true,
+                };
+            }
         } else {
             self.close_armed = true;
         }
     }
 
-    fn unsaved(&self) -> bool {
-        self.doc.as_ref().is_some_and(Doc::dirty)
+    /// The first tab with unsaved changes, for the "save before closing" prompt.
+    fn unsaved_tab(&self) -> Option<usize> {
+        self.tabs.first_dirty()
+    }
+
+    /// Closes the tab on screen, used by `Ctrl+W` and the tab strip.
+    fn close_active_tab(&mut self) {
+        if self.has_tabs() {
+            let active = self.tabs.active;
+            self.close_tab(active);
+        }
+    }
+
+    /// The row of open documents above the editor.
+    ///
+    /// Tabs share the width evenly and elide their names, so a long path can
+    /// never push the row wider than the panel. Clicking focuses, the little
+    /// cross closes, and the middle button closes too.
+    fn tab_strip(&mut self, ui: &mut Ui, rect: Rect) {
+        let count = self.tabs.len();
+        ui.painter().hline(
+            rect.left()..=rect.right(),
+            rect.max.y - 0.5,
+            Stroke::new(1.0, c::BORDER),
+        );
+        if count == 0 {
+            return;
+        }
+        // Tabs never get narrower than this; the row scrolls instead.
+        const MIN_W: f32 = 96.0;
+        const MAX_W: f32 = 190.0;
+        let w = ((rect.width() - 4.0) / count as f32).clamp(MIN_W, MAX_W);
+        let close_w = 16.0f32;
+        let mut focus = None;
+        let mut close = None;
+
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let x = rect.left() + 2.0 + i as f32 * w;
+            if x + w > rect.right() {
+                break;
+            }
+            let tab_rect = Rect::from_min_size(
+                Pos2::new(x, rect.top() + 2.0),
+                Vec2::new(w - 2.0, rect.height() - 3.0),
+            );
+            let resp = ui.interact(tab_rect, Id::new(("tab", i)), Sense::click());
+            if resp.clicked() {
+                focus = Some(i);
+            }
+            if resp.middle_clicked() {
+                close = Some(i);
+            }
+
+            let active = i == self.tabs.active;
+            let dirty = tab.doc.dirty();
+            let painter = ui.painter();
+            if active {
+                painter.rect_filled(tab_rect, CornerRadius::same(sp::RADIUS), c::SEL);
+            } else if resp.hovered() {
+                painter.rect_filled(tab_rect, CornerRadius::same(sp::RADIUS), c::HOVER);
+            }
+            // The active tab is joined to the body below it by a hairline.
+            if active {
+                painter.hline(
+                    tab_rect.left()..=tab_rect.right(),
+                    tab_rect.max.y - 0.5,
+                    Stroke::new(1.0, c::BG),
+                );
+            }
+
+            let text_color = if active { c::SEL_TEXT } else { c::TEXT_DIM };
+            let icon = Rect::from_center_size(
+                Pos2::new(tab_rect.left() + 12.0, tab_rect.center().y),
+                Vec2::splat(sp::ICON),
+            );
+            match tab.kind {
+                TabKind::Folder => Icon::Folder.paint(painter, icon, text_color),
+                TabKind::File if tab.doc.kind == DocKind::Markdown => {
+                    Icon::Markdown.paint(painter, icon, text_color)
+                }
+                TabKind::File => Icon::File.paint(painter, icon, text_color),
+            }
+
+            let text_x = icon.right() + 6.0;
+            let name_w = (tab_rect.right() - text_x - close_w - 6.0).max(20.0);
+            let name_g = widgets::layout_elided(
+                ui,
+                tab.label(),
+                theme::ui_font(tfs::SMALL),
+                text_color,
+                name_w,
+            );
+            widgets::galley_at(
+                painter,
+                Pos2::new(text_x, tab_rect.center().y - name_g.size().y * 0.5),
+                &name_g,
+                text_color,
+            );
+
+            // Unsaved changes: a dot, the same signal as the header uses.
+            if dirty {
+                painter.circle_filled(
+                    Pos2::new(text_x + name_g.size().x + 5.0, tab_rect.center().y),
+                    2.5,
+                    c::ACCENT,
+                );
+            }
+
+            // The close cross, which only lights up under the pointer.
+            let close_rect = Rect::from_center_size(
+                Pos2::new(tab_rect.right() - 11.0, tab_rect.center().y),
+                Vec2::splat(close_w),
+            );
+            let close_resp = ui.interact(close_rect, Id::new(("tab-close", i)), Sense::click());
+            if close_resp.clicked() {
+                close = Some(i);
+            }
+            if close_resp.hovered() || resp.hovered() {
+                Icon::Close.paint(painter, close_rect, c::TEXT_DIM);
+            }
+            let _ = close_resp.on_hover_text(if dirty {
+                "Close without saving"
+            } else {
+                "Close (Ctrl+W)"
+            });
+        }
+
+        if let Some(i) = focus {
+            self.focus_tab(i);
+        }
+        if let Some(i) = close
+            && let Some(tab) = self.tabs.get(i)
+        {
+            let path = tab.path().to_path_buf();
+            if tab.doc.dirty() {
+                self.dialog = Dialog::Unsaved {
+                    path,
+                    close_app: false,
+                };
+                // Remember which tab the prompt is about.
+                self.pending_close = Some(i);
+            } else {
+                self.close_tab(i);
+            }
+        }
     }
 
     fn filter_focused(&self, ctx: &Context) -> bool {
@@ -3065,7 +3466,7 @@ impl Xplor {
         if primary == 0 {
             return;
         }
-        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(doc) = self.doc_mut() else { return };
         let typed = editing::char_at(&doc.text, primary - 1);
         let Some(typed) = typed else { return };
 
@@ -3085,7 +3486,7 @@ impl Xplor {
     fn indent_lines(&mut self, ctx: &Context, id: Id, range: Option<CCursorRange>, outdent: bool) {
         let Some(range) = range else { return };
         let (lo, hi) = ordered(range.primary.index.0, range.secondary.index.0);
-        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(doc) = self.doc_mut() else { return };
         let caret = editing::indent(&mut doc.text, lo..hi, outdent);
         self.after_edit(ctx, id, caret);
     }
@@ -3094,7 +3495,7 @@ impl Xplor {
         let Some(range) = range else { return };
         let (lo, hi) = ordered(range.primary.index.0, range.secondary.index.0);
         let token = editing::comment_token(path);
-        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(doc) = self.doc_mut() else { return };
         let caret = editing::toggle_comment(&mut doc.text, lo..hi, token);
         self.after_edit(ctx, id, caret);
     }
@@ -3102,7 +3503,7 @@ impl Xplor {
     /// Marks the buffer edited, schedules a Markdown refresh, and moves the
     /// caret when our own edit invalidated it.
     fn after_edit(&mut self, ctx: &Context, id: Id, caret: Option<usize>) {
-        if let Some(doc) = self.doc.as_mut() {
+        if let Some(doc) = self.doc_mut() {
             doc.touch();
             self.render_version = doc.version;
         }
@@ -3169,13 +3570,32 @@ impl Xplor {
                         Some(e) => self.toast_err(e),
                         None => {
                             let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                            self.doc = Some(Doc::from_parts(
+                            let doc = Doc::from_parts(
                                 path.clone(),
                                 text,
                                 editor::doc_kind(&path),
                                 mtime,
                                 false,
-                            ));
+                            );
+                            // The tab was created when the read started, so the
+                            // text goes into the tab that is already on screen.
+                            match self.tab_index(&path) {
+                                Some(i) => {
+                                    self.tabs.focus(i);
+                                    if let Some(t) = self.tabs.get_mut(i) {
+                                        t.kind = TabKind::File;
+                                        t.doc = doc;
+                                    }
+                                }
+                                None => {
+                                    let i = self.tabs.push(Tab {
+                                        kind: TabKind::File,
+                                        doc,
+                                    });
+                                    self.tabs.active = i;
+                                }
+                            }
+                            self.preview.reset();
                             self.render_version = 1;
                             self.preview.reset();
                         }
@@ -3244,7 +3664,7 @@ impl Xplor {
                 }
                 Msg::Watch(path) => {
                     self.last_change = Some(Instant::now());
-                    if let Some(doc) = self.doc.as_mut()
+                    if let Some(doc) = self.doc_mut()
                         && doc.path == path
                     {
                         doc.check_external_change();
@@ -3261,7 +3681,7 @@ impl Xplor {
         }
         self.last_change = None;
         self.request_listing();
-        if let Some(doc) = self.doc.as_ref() {
+        if let Some(doc) = self.doc() {
             let dir = doc.path.parent().map(|p| p.to_path_buf());
             if let Some(dir) = dir {
                 self.watch(&dir);
@@ -3477,27 +3897,47 @@ impl Xplor {
 
     // ---- opening files ---------------------------------------------------------
 
+    /// Opens a file in a tab, or focuses the tab that already has it.
     fn open_path(&mut self, path: &Path) {
         if path.is_dir() {
             self.navigate(path);
             return;
         }
-        if self.doc.as_ref().is_some_and(|d| d.path == path) {
+        // Already open: just bring it forward, the way Explorer does.
+        if let Some(i) = self.tab_index(path) {
+            self.focus_tab(i);
             return;
         }
+        // Not something we can read: hand it to the desktop and add no tab.
         if !fs_model::is_editable_text(path) {
             if let Err(e) = editor::open_externally(path) {
                 self.toast_err(e);
             }
             return;
         }
-        if self.unsaved() {
-            self.toast("Save the open file first (Ctrl+S)".into());
-            return;
+
+        // A folder tab becomes the document, so one tab never shows two things.
+        let on_folder_tab = self
+            .tabs
+            .active_tab()
+            .is_some_and(|t| t.kind == TabKind::Folder);
+        if on_folder_tab {
+            // Reuse the slot, so the tab keeps its place in the strip.
+            if let Some(t) = self.tabs.active_tab_mut() {
+                t.kind = TabKind::File;
+                t.doc = Doc::placeholder(path);
+            }
+        } else {
+            let i = self.tabs.push(Tab::file(path));
+            self.tabs.active = i;
         }
-        // Read on a worker thread so a large file never stalls the UI.
+        self.preview.reset();
+        self.render_version = 0;
+        self.last_edit = None;
+
+        // Read on a worker thread so a large file never stalls the UI. The tab
+        // exists already, so the strip shows it while the text arrives.
         self.loading = Some(path.to_path_buf());
-        self.doc = None;
         let tx = self.tx.clone();
         let read_path = path.to_path_buf();
         let watch_dir = path.parent().map(|p| p.to_path_buf());
@@ -3516,27 +3956,45 @@ impl Xplor {
         }
     }
 
-    fn close_doc(&mut self) {
-        if self.doc.is_none() {
+    /// Opens a new tab showing the file list, the way Explorer does.
+    ///
+    /// A tab is either a document or the folder view. A folder tab remembers
+    /// the folder it was opened at, so focusing it goes back there.
+    fn new_tab(&mut self) {
+        if self
+            .tabs
+            .active_tab()
+            .is_some_and(|t| matches!(t.kind, TabKind::Folder))
+        {
+            self.toast("This tab is already showing files".into());
             return;
         }
-        if self.unsaved() {
+        let dir = self.cwd.clone();
+        let i = self.tabs.push(Tab::folder(&dir));
+        self.tabs.active = i;
+        self.preview.reset();
+    }
+
+    fn close_doc(&mut self) {
+        if !self.has_tabs() {
+            return;
+        }
+        // Ctrl+W closes the active tab, prompting if that one is dirty.
+        let active = self.tabs.active;
+        if self.tabs[active].doc.dirty() {
+            self.pending_close = Some(active);
+            let path = self.tabs[active].doc.path.clone();
             self.dialog = Dialog::Unsaved {
-                path: self
-                    .doc
-                    .as_ref()
-                    .map(|d| d.path.clone())
-                    .unwrap_or_default(),
+                path,
                 close_app: false,
             };
             return;
         }
-        self.doc = None;
-        self.preview.reset();
+        self.close_tab(active);
     }
 
     fn save_doc(&mut self) {
-        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(doc) = self.doc_mut() else { return };
         if !doc.dirty() {
             return;
         }
@@ -3748,7 +4206,7 @@ impl Xplor {
                 });
                 self.undo_stack.push(self.undo.clone().expect("just set"));
                 self.toast(format!("Renamed to {name}"));
-                if let Some(doc) = self.doc.as_mut()
+                if let Some(doc) = self.doc_mut()
                     && doc.path == path
                 {
                     doc.path = target;
@@ -3811,7 +4269,7 @@ impl Xplor {
             Undo::Renamed { from, to } => {
                 if let Err(e) = std::fs::rename(&to, &from) {
                     problems.push(format!("{}: {e}", display_name(&to)));
-                } else if let Some(doc) = self.doc.as_mut()
+                } else if let Some(doc) = self.doc_mut()
                     && doc.path == to
                 {
                     doc.path = from;
@@ -4240,6 +4698,15 @@ fn toolbar_frame() -> Frame {
         .outer_margin(Margin::ZERO)
 }
 
+/// The tab row sits on the same chrome as the toolbar, with no side padding of
+/// its own because the tabs manage their own insets.
+fn tab_frame() -> Frame {
+    Frame::new()
+        .fill(c::PANEL)
+        .inner_margin(Margin::ZERO)
+        .outer_margin(Margin::ZERO)
+}
+
 fn sidebar_frame() -> Frame {
     Frame::new()
         .fill(c::PANEL)
@@ -4327,4 +4794,133 @@ fn compact_button(ui: &mut Ui, label: &str, tip: &str) -> egui::Response {
         painter.galley(rect.min + pad, g, color);
     }
     resp.on_hover_text(tip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str) -> Tab {
+        Tab::file(Path::new(name))
+    }
+
+    fn folder(name: &str) -> Tab {
+        Tab::folder(Path::new(name))
+    }
+
+    fn three_files() -> Tabs {
+        let mut t = Tabs::default();
+        t.push(file("/a/one.txt"));
+        t.push(file("/a/two.txt"));
+        t.push(file("/a/three.txt"));
+        t
+    }
+
+    #[test]
+    fn closing_a_middle_tab_keeps_the_same_file_on_screen() {
+        let mut t = three_files();
+        t.active = 2;
+        // Closing the tab before the focus pulls the index back, so the file
+        // that was on screen stays on screen.
+        t.close(0);
+        assert_eq!(t.active, 1);
+        assert_eq!(t.active_tab().map(Tab::label).as_deref(), Some("three.txt"));
+    }
+
+    #[test]
+    fn closing_the_tab_on_screen_falls_back_to_the_new_last() {
+        let mut t = three_files();
+        t.active = 2;
+        t.close(2);
+        assert_eq!(t.active, 1);
+        assert_eq!(t.active_tab().map(Tab::label).as_deref(), Some("two.txt"));
+    }
+
+    #[test]
+    fn closing_the_last_tab_empties_the_strip_safely() {
+        let mut t = Tabs::default();
+        t.push(file("/a/only.txt"));
+        t.close(0);
+        assert!(t.is_empty());
+        assert_eq!(t.active, 0, "the index stays usable for the next open");
+        // Closing again must not panic.
+        t.close(0);
+        t.close(5);
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn cycling_wraps_at_both_ends() {
+        let mut t = three_files();
+        t.active = 0;
+        t.cycle(false);
+        assert_eq!(t.active, 1);
+        t.cycle(false);
+        t.cycle(false);
+        assert_eq!(t.active, 0, "forward wraps to the first");
+        t.cycle(true);
+        assert_eq!(t.active, 2, "backwards wraps to the last");
+    }
+
+    #[test]
+    fn a_single_tab_never_cycles() {
+        let mut t = Tabs::default();
+        t.push(file("/a/only.txt"));
+        t.cycle(false);
+        t.cycle(true);
+        assert_eq!(t.active, 0);
+    }
+
+    #[test]
+    fn an_empty_strip_never_cycles() {
+        let mut t = Tabs::default();
+        t.cycle(false);
+        t.cycle(true);
+        assert!(t.active_tab().is_none());
+    }
+
+    #[test]
+    fn focusing_ignores_an_index_past_the_end() {
+        let mut t = three_files();
+        t.focus(1);
+        assert_eq!(t.active, 1);
+        t.focus(9);
+        assert_eq!(t.active, 1, "an out-of-range focus is ignored");
+    }
+
+    #[test]
+    fn only_a_file_tab_shows_the_editor() {
+        let mut t = Tabs::default();
+        t.push(folder("/a/photos"));
+        assert!(!t.shows_file(), "a folder tab shows the file list");
+        t.push(file("/a/notes.md"));
+        t.active = 1;
+        assert!(t.shows_file());
+    }
+
+    #[test]
+    fn tabs_are_named_after_their_file_or_folder() {
+        assert_eq!(file("/a/notes.md").label(), "notes.md");
+        assert_eq!(folder("/a/photos").label(), "photos");
+        // A drive root has no name of its own.
+        assert_eq!(folder("/").label(), "Files");
+    }
+
+    #[test]
+    fn an_open_file_is_found_by_path() {
+        let mut t = three_files();
+        assert_eq!(t.index_of(Path::new("/a/two.txt")), Some(1));
+        assert_eq!(t.index_of(Path::new("/a/missing.txt")), None);
+        t.close(1);
+        assert_eq!(t.index_of(Path::new("/a/two.txt")), None);
+    }
+
+    #[test]
+    fn only_dirty_tabs_are_reported() {
+        let mut t = three_files();
+        assert_eq!(t.first_dirty(), None);
+        t[1].doc.text.push_str("edited");
+        t[1].doc.version += 1;
+        assert_eq!(t.first_dirty(), Some(1));
+    }
 }
