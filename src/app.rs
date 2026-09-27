@@ -118,6 +118,88 @@ impl Tab {
 #[derive(Default)]
 struct Pins(Vec<PathBuf>);
 
+/// Open and close state for the right-click menu.
+///
+/// egui's popups are fiddly in three specific ways, and each of them bit us
+/// once, so the rules live here where they can be tested:
+///
+/// * A popup is only drawn on the frames its function runs, so the path has to
+///   outlive the click that opened it.
+/// * Re-asserting "open" every frame makes the menu impossible to dismiss, so
+///   opening is a one-shot.
+/// * egui decides whether a click closes a popup by asking whether the popup
+///   was drawn last frame, and `read_response` falls back to the frame before
+///   that. A reused id therefore makes every right click after the first look
+///   like a close click, so each opening gets a fresh id.
+#[derive(Default)]
+struct MenuState {
+    path: Option<PathBuf>,
+    anchor: Option<Pos2>,
+    wanted: bool,
+    epoch: u64,
+}
+
+impl MenuState {
+    /// Records a right click. The anchor is captured here rather than read per
+    /// frame, or the menu would slide along behind the pointer.
+    fn open(&mut self, anchor: Option<Pos2>, path: PathBuf) {
+        self.path = Some(path);
+        self.anchor = anchor;
+        self.wanted = true;
+        self.epoch += 1;
+    }
+
+    fn close(&mut self) {
+        self.path = None;
+        self.anchor = None;
+        self.wanted = false;
+    }
+
+    fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Where the menu should appear.
+    fn anchor(&self) -> Option<Pos2> {
+        self.anchor
+    }
+
+    /// A fresh popup id, never reused between openings.
+    fn id(&self) -> Id {
+        Id::new(("ctx_menu", self.epoch))
+    }
+
+    /// Consumes the request to open. True once per right click.
+    fn take_open(&mut self) -> bool {
+        std::mem::take(&mut self.wanted)
+    }
+}
+
+/// Narrowest the editor or the preview may be squeezed to.
+const SPLIT_MIN_PANE: f32 = 160.0;
+
+/// Where the editor/preview divider sits, in pixels from the left.
+///
+/// The stored split is a fraction so the panes scale with the panel, but the
+/// limits are in pixels because that is what "too narrow to read" means. In a
+/// narrow panel a fraction like 0.2 would fall below the limit, so the clamp
+/// has to happen here rather than on the fraction.
+fn split_left(usable: f32, split: f32) -> f32 {
+    let min = SPLIT_MIN_PANE.min(usable * 0.5);
+    (usable * split).clamp(min, usable - min)
+}
+
+/// The fraction that puts the divider `left` pixels in.
+///
+/// The inverse of [`split_left`]. Writing the fraction straight from a raw
+/// pixel count is what made the divider jump: the width on screen had been
+/// clamped, but the drag wrote back the unclamped value, so a drag that moved
+/// nothing still relocated the split.
+fn split_fraction(usable: f32, left: f32) -> f32 {
+    let min = SPLIT_MIN_PANE.min(usable * 0.5);
+    (left / usable).clamp(min / usable, 1.0 - min / usable)
+}
+
 /// Why a folder could not be pinned.
 #[derive(Debug, PartialEq, Eq)]
 enum PinError {
@@ -521,15 +603,8 @@ pub struct Xplor {
     free_space: fs_model::FreeSpace,
     /// Folder the pointer is over while dragging, if any.
     drop_target: Option<PathBuf>,
-    /// Path whose context menu is up, if any. Held until egui reports the
-    /// popup closed, so the menu survives past the frame of the right click.
-    menu_path: Option<PathBuf>,
-    /// Where that menu was opened. Captured on the click so the menu does not
-    /// follow the pointer.
-    menu_anchor: Option<Pos2>,
-    /// Set on a right click and cleared the moment it is acted on, so opening
-    /// the menu is a one-shot rather than something re-asserted every frame.
-    menu_wanted: bool,
+    /// The right-click menu: which path, where, and whether to open it.
+    menu: MenuState,
     /// Folders the user pinned to Quick access, in the order they pinned them.
     pins: Pins,
     /// Folder sizes and counts, measured on a worker. Walking a folder is far
@@ -629,9 +704,7 @@ impl Xplor {
             peek_pending: None,
             free_space: fs_model::FreeSpace::default(),
             drop_target: None,
-            menu_path: None,
-            menu_anchor: None,
-            menu_wanted: false,
+            menu: MenuState::default(),
             pins: Pins::default(),
             measures: ops::Measures::new(tx.clone()),
             drag_payload: Vec::new(),
@@ -2120,9 +2193,9 @@ impl Xplor {
         } else if !self.drag_payload.is_empty() && !ui.input(|i| i.pointer.any_down()) {
             self.drag_payload.clear();
         }
-        // `menu_path` outlives the click that opened it: a popup is only drawn
-        // on the frames its function runs, so stop asking and it vanishes.
-        if let Some(path) = self.menu_path.clone() {
+        // The path outlives the click that opened it: a popup is only drawn on
+        // the frames its function runs, so stop asking and it vanishes.
+        if let Some(path) = self.menu.path().map(Path::to_path_buf) {
             self.context_menu(ui, &path);
         }
         self.perf.list_ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -2165,9 +2238,8 @@ impl Xplor {
     /// to be remembered rather than read per frame, or the menu would slide
     /// along behind the pointer as it moves.
     fn open_context_menu(&mut self, ui: &Ui, path: &Path) {
-        self.menu_path = Some(path.to_path_buf());
-        self.menu_anchor = ui.input(|i| i.pointer.interact_pos());
-        self.menu_wanted = true;
+        let anchor = ui.input(|i| i.pointer.interact_pos());
+        self.menu.open(anchor, path.to_path_buf());
     }
 
     /// Right-click menu.
@@ -2185,20 +2257,23 @@ impl Xplor {
         // The anchor is the spot that was clicked, recorded when the right
         // click landed. Reading the pointer every frame instead would drag the
         // menu along behind the mouse.
-        let anchor = self.menu_anchor.unwrap_or_else(|| {
+        let anchor = self.menu.anchor().unwrap_or_else(|| {
             ui.input(|i| i.pointer.interact_pos())
                 .unwrap_or_else(|| ui.max_rect().center())
         });
-        let id = Id::new(("ctx_menu", &path));
+        // Keyed by the opening, not the path, so each menu gets an id egui has
+        // never drawn before. See `open_context_menu`.
+        let id = self.menu.id();
         let dummy = ui.interact(Rect::from_min_size(anchor, Vec2::ZERO), id, Sense::click());
 
         let popup = egui::Popup::menu(&dummy).id(id);
-        let was_open = popup.is_open();
         // Open exactly once, on the frame the right click landed. After that
         // egui owns the state: it closes on a click anywhere or on Escape, and
         // we must not re-open behind its back or the menu could never be
         // dismissed.
-        let open = std::mem::take(&mut self.menu_wanted)
+        let open = self
+            .menu
+            .take_open()
             .then_some(egui::containers::SetOpenCommand::Bool(true));
 
         let shown = popup.open_memory(open).width(200.0).show(|ui| {
@@ -2253,13 +2328,12 @@ impl Xplor {
             }
         });
 
-        // egui closed the menu: a click anywhere, or Escape. Drop the path so
-        // the caller stops asking for a menu that is no longer up. A popup is
-        // only drawn on the frames its function runs, so one missed frame
-        // would make it vanish anyway.
-        if was_open && shown.is_none() {
-            self.menu_path = None;
-            self.menu_anchor = None;
+        // `show` returns `None` once the popup is closed, which is the only
+        // reliable signal: egui closes the popup *after* drawing it, so on the
+        // closing frame it still answers `Some`. Dropping the path here stops
+        // us asking for a menu that is no longer up.
+        if shown.is_none() {
+            self.menu.close();
         }
 
         let Some(action) = action else { return };
@@ -2718,8 +2792,8 @@ impl Xplor {
     /// cursor, which would push the second pane off the bottom of the panel.
     fn split_ui(&mut self, ui: &mut Ui, rect: Rect) {
         let divider_w = 7.0f32;
-        let usable = (rect.width() - divider_w).max(200.0);
-        let left_w = (usable * self.split).clamp(160.0, usable);
+        let usable = (rect.width() - divider_w).max(1.0);
+        let left_w = split_left(usable, self.split);
         let left = Rect::from_min_size(rect.min, Vec2::new(left_w, rect.height()));
         let divider = Rect::from_min_size(
             Pos2::new(rect.min.x + left_w, rect.min.y),
@@ -2754,7 +2828,10 @@ impl Xplor {
             );
         }
         if resp.dragged() {
-            self.split = ((left_w + resp.drag_delta().x) / usable).clamp(0.2, 0.8);
+            // Drag in pixels and convert back through the same clamp, so
+            // grabbing a divider that is already against its limit moves it
+            // smoothly instead of snapping somewhere else.
+            self.split = split_fraction(usable, left_w + resp.drag_delta().x);
         }
 
         let mut right_ui = ui.new_child(
@@ -5492,6 +5569,87 @@ mod tests {
 
     fn file(name: &str) -> Tab {
         Tab::file(Path::new(name))
+    }
+
+    #[test]
+    fn grabbing_the_divider_without_moving_it_changes_nothing() {
+        // Every fraction, at every panel width: the pixel width on screen and
+        // the stored fraction have to agree, or the split jumps on first drag.
+        for usable in [373.0, 500.0, 640.0, 900.0, 1400.0] {
+            for step in 0..=20 {
+                let split = step as f32 / 20.0;
+                let left = split_left(usable, split);
+                let back = split_fraction(usable, left);
+                assert!(
+                    (back * usable - left).abs() < 0.01,
+                    "usable {usable}, split {split}: drew at {left}px but stored {back}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neither_pane_is_squeezed_below_the_limit() {
+        // Wide panel: the limit is the real one.
+        assert_eq!(split_left(1000.0, 0.0), SPLIT_MIN_PANE);
+        assert_eq!(split_left(1000.0, 1.0), 1000.0 - SPLIT_MIN_PANE);
+        // Narrow panel: half the width each, rather than one pane vanishing.
+        assert_eq!(split_left(300.0, 0.0), 150.0);
+        assert_eq!(split_left(300.0, 1.0), 150.0);
+        // Absurdly narrow: still no negative or overlapping rects.
+        assert_eq!(split_left(10.0, 0.5), 5.0);
+    }
+
+    #[test]
+    fn the_divider_follows_the_drag_the_way_it_looks() {
+        // Dragging right widens the editor by the same number of pixels.
+        let usable = 800.0;
+        let start = split_left(usable, 0.5);
+        let after = split_fraction(usable, start + 40.0);
+        assert!((split_left(usable, after) - (start + 40.0)).abs() < 0.01);
+        // And the limit still holds at the extremes.
+        assert!(split_left(usable, split_fraction(usable, 99_999.0)) <= 800.0);
+    }
+
+    #[test]
+    fn every_menu_opening_gets_a_popup_id_egui_has_not_drawn() {
+        // Reusing the id is what broke this: egui falls back to an older frame
+        // when deciding whether a click closes a popup, so the second right
+        // click of a session opened the menu and closed it in one frame.
+        let mut m = MenuState::default();
+        let first = m.id();
+        m.open(Some(Pos2::new(10.0, 20.0)), PathBuf::from("/a"));
+        let second = m.id();
+        m.close();
+        m.open(Some(Pos2::new(30.0, 40.0)), PathBuf::from("/b"));
+        let third = m.id();
+        assert_ne!(first, second, "the first opening reused the idle id");
+        assert_ne!(second, third, "the second opening reused the first id");
+    }
+
+    #[test]
+    fn opening_is_a_one_shot_so_the_menu_can_be_dismissed() {
+        let mut m = MenuState::default();
+        assert!(!m.take_open(), "nothing asked for a menu yet");
+        m.open(Some(Pos2::new(1.0, 1.0)), PathBuf::from("/a"));
+        assert!(m.take_open(), "the click should open the menu");
+        assert!(!m.take_open(), "opening was re-asserted on a later frame");
+    }
+
+    #[test]
+    fn a_menu_keeps_its_path_and_anchor_until_it_closes() {
+        let mut m = MenuState::default();
+        m.open(Some(Pos2::new(5.0, 6.0)), PathBuf::from("/work"));
+        // Frames pass with the menu up: the path has to survive, or the popup
+        // is never drawn again and vanishes.
+        for _ in 0..5 {
+            assert_eq!(m.path(), Some(Path::new("/work")));
+            assert_eq!(m.anchor(), Some(Pos2::new(5.0, 6.0)));
+        }
+        m.close();
+        assert_eq!(m.path(), None);
+        assert_eq!(m.anchor(), None);
+        assert!(!m.take_open());
     }
 
     #[test]
