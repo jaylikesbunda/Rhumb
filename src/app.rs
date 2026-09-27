@@ -129,8 +129,8 @@ struct Pins(Vec<PathBuf>);
 ///   opening is a one-shot.
 /// * egui decides whether a click closes a popup by asking whether the popup
 ///   was drawn last frame, and `read_response` falls back to the frame before
-///   that. A reused id therefore makes every right click after the first look
-///   like a close click, so each opening gets a fresh id.
+///   that. A reused id therefore makes the click that opens the menu look like
+///   a click that closes it, so each opening gets a fresh id.
 #[derive(Default)]
 struct MenuState {
     path: Option<PathBuf>,
@@ -142,11 +142,19 @@ struct MenuState {
 impl MenuState {
     /// Records a right click. The anchor is captured here rather than read per
     /// frame, or the menu would slide along behind the pointer.
-    fn open(&mut self, anchor: Option<Pos2>, path: PathBuf) {
+    ///
+    /// Returns whether the menu was actually opened: when it is already up for
+    /// this folder there is nothing to do, and reopening it would drop any
+    /// hover state inside under a new popup id.
+    fn open(&mut self, anchor: Option<Pos2>, path: PathBuf) -> bool {
+        if self.path.as_deref() == Some(path.as_path()) {
+            return false;
+        }
         self.path = Some(path);
         self.anchor = anchor;
         self.wanted = true;
         self.epoch += 1;
+        true
     }
 
     fn close(&mut self) {
@@ -178,6 +186,118 @@ impl MenuState {
 /// Glyph size in the document header, and the gap between it and the text.
 const HEADER_ICON: f32 = 15.0;
 const HEADER_GAP: f32 = 6.0;
+/// The two header rows: title, then the location beneath it.
+const HEADER_TITLE_H: f32 = 28.0;
+const HEADER_PATH_H: f32 = 19.0;
+
+/// The two-row panel header, shared by the editor and the details pane.
+///
+/// Glyph and name centred together as one block on the first row, the
+/// location centred beneath them on the second. `actions_w` reserves room for
+/// buttons on the title row; pass 0 when there are none.
+///
+/// Centring the icon and the name *together* matters. Centring the name alone
+/// would slide the glyph off to the left, further from the words the longer
+/// the name gets, and the pair stops reading as a single title.
+#[allow(clippy::too_many_arguments)]
+fn panel_header(
+    ui: &mut Ui,
+    header: Rect,
+    title_row: Rect,
+    glyph: Icon,
+    name: String,
+    location: String,
+    dirty: bool,
+    read_only: bool,
+    actions_w: f32,
+) {
+    let painter = ui.painter();
+    painter.hline(
+        header.left()..=header.right(),
+        header.max.y - 0.5,
+        Stroke::new(1.0, c::BORDER),
+    );
+    let cy = title_row.center().y;
+    let title_room = Rect::from_min_max(
+        Pos2::new(title_row.left() + sp::SM, title_row.top()),
+        Pos2::new(title_row.right() - actions_w - sp::SM, title_row.bottom()),
+    );
+    let name_g = widgets::layout_elided(
+        ui,
+        name,
+        if dirty {
+            theme::bold_font(tfs::BODY)
+        } else {
+            theme::ui_font(tfs::BODY)
+        },
+        c::TEXT,
+        (title_room.width() - HEADER_ICON - HEADER_GAP - if dirty { 11.0 } else { 0.0 }).max(24.0),
+    );
+    let group_w = HEADER_ICON + HEADER_GAP + name_g.size().x + if dirty { 11.0 } else { 0.0 };
+    let group_x = title_room.center().x - group_w * 0.5;
+    let icon = Rect::from_center_size(
+        Pos2::new(group_x + HEADER_ICON * 0.5, cy),
+        Vec2::splat(HEADER_ICON),
+    );
+    glyph.paint(
+        painter,
+        icon,
+        if dirty { c::TEXT_DIM } else { c::TEXT_GHOST },
+    );
+    let name_x = icon.right() + HEADER_GAP;
+    widgets::galley_at(
+        painter,
+        Pos2::new(name_x, cy - name_g.size().y * 0.5),
+        &name_g,
+        c::TEXT,
+    );
+    if dirty {
+        painter.circle_filled(
+            Pos2::new(name_x + name_g.size().x + 6.0, cy),
+            2.5,
+            c::ACCENT,
+        );
+    }
+
+    // Path underneath, centred on the same axis and elided in the middle so
+    // the folder name survives a narrow panel.
+    let path_row = Rect::from_min_max(
+        Pos2::new(header.left(), title_row.bottom()),
+        Pos2::new(header.right(), header.bottom()),
+    );
+    let read_only_w = if read_only { 58.0 } else { 0.0 };
+    let path_room = (path_row.width() - sp::SM * 2.0 - read_only_w).max(24.0);
+    let loc = widgets::layout_elided_middle(
+        ui,
+        location,
+        theme::ui_font(tfs::SMALL),
+        c::TEXT_FAINT,
+        path_room,
+    );
+    widgets::galley_at(
+        painter,
+        Pos2::new(
+            path_row.center().x - loc.size().x * 0.5,
+            path_row.center().y - loc.size().y * 0.5,
+        ),
+        &loc,
+        c::TEXT_FAINT,
+    );
+    if read_only {
+        let g = widgets::layout(
+            ui,
+            String::from("read only"),
+            theme::ui_font(tfs::SMALL),
+            c::DANGER,
+        );
+        widgets::text_right(
+            painter,
+            Pos2::new(path_row.right() - sp::SM, path_row.center().y),
+            &g,
+            c::DANGER,
+        );
+    }
+}
 
 /// Narrowest the editor or the preview may be squeezed to.
 const SPLIT_MIN_PANE: f32 = 160.0;
@@ -2166,13 +2286,15 @@ impl Xplor {
                         if resp.double_clicked() {
                             click = Some((i, ClickKind::Open));
                         }
-                        // Only the release opens the menu. egui reports a click
-                        // when the button comes up, and a popup that was not
-                        // already up on the previous frame is exempt from being
-                        // closed by that click. Opening on the press instead
-                        // means the menu is up for the release, which closes
-                        // it again: visible only while the button is held.
-                        if resp.secondary_clicked() {
+                        // The menu opens on the press, with the release as a
+                        // fallback. A press is visible globally, while a click
+                        // needs egui to credit this exact widget — credit the
+                        // row loses whenever anything overlaps it. The close
+                        // behaviour below ignores the opening click, so opening
+                        // early cannot dismiss the menu again.
+                        let right_pressed =
+                            resp.hovered() && ui.input(|i| i.pointer.secondary_pressed());
+                        if right_pressed || resp.secondary_clicked() {
                             context = Some(entry.path.clone());
                             click = Some((i, ClickKind::Plain));
                         }
@@ -2274,69 +2396,77 @@ impl Xplor {
         // Keyed by the opening, not the path, so each menu gets an id egui has
         // never drawn before. See `open_context_menu`.
         let id = self.menu.id();
-        let dummy = ui.interact(Rect::from_min_size(anchor, Vec2::ZERO), id, Sense::click());
+        // Hover-only, so this placeholder can never steal the click credit
+        // from the row beneath it. It exists only to give the popup an id, a
+        // layer, and a rect to sit beside.
+        let dummy = ui.interact(Rect::from_min_size(anchor, Vec2::ZERO), id, Sense::hover());
 
         let popup = egui::Popup::menu(&dummy).id(id);
         // Open exactly once, on the frame the right click landed. After that
-        // egui owns the state: it closes on a click anywhere or on Escape, and
+        // egui owns the state: it closes on a click outside or on Escape, and
         // we must not re-open behind its back or the menu could never be
-        // dismissed.
+        // dismissed. Clicks *inside* the menu do not close it, so picking an
+        // item closes it by hand below.
         let open = self
             .menu
             .take_open()
             .then_some(egui::containers::SetOpenCommand::Bool(true));
 
-        let shown = popup.open_memory(open).width(200.0).show(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(sp::SM, 3.0);
-            if editable && ui.button("Open in editor").clicked() {
-                action = Some(CtxAction::OpenEditor);
-            }
-            if ui.button("Open with system app").clicked() {
-                action = Some(CtxAction::OpenExternal);
-            }
-            if is_dir && ui.button("Open in new window").clicked() {
-                action = Some(CtxAction::OpenNewWindow);
-            }
-            if ui.button("Show in file manager").clicked() {
-                action = Some(CtxAction::Reveal);
-            }
-            if ui.button("Open in Terminal").clicked() {
-                action = Some(CtxAction::OpenTerminal);
-            }
-            ui.add_space(sp::XS);
-            ui.separator();
-            ui.add_space(sp::XS);
-            if ui.button("Copy").clicked() {
-                action = Some(CtxAction::Copy);
-            }
-            if ui.button("Cut").clicked() {
-                action = Some(CtxAction::Cut);
-            }
-            if ui.button("Copy as path").clicked() {
-                action = Some(CtxAction::CopyPath);
-            }
-            if is_dir {
-                if pinned {
-                    if ui.button("Unpin from Quick access").clicked() {
-                        action = Some(CtxAction::Unpin);
-                    }
-                } else if ui.button("Pin to Quick access").clicked() {
-                    action = Some(CtxAction::Pin);
+        let shown = popup
+            .open_memory(open)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(200.0)
+            .show(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(sp::SM, 3.0);
+                if editable && ui.button("Open in editor").clicked() {
+                    action = Some(CtxAction::OpenEditor);
                 }
-            }
-            if ui.button("Rename\u{2026}").clicked() {
-                action = Some(CtxAction::Rename);
-            }
-            ui.add_space(sp::XS);
-            ui.separator();
-            ui.add_space(sp::XS);
-            if ui.button("Move to trash").clicked() {
-                action = Some(CtxAction::Delete);
-            }
-            if ui.button("Delete permanently\u{2026}").clicked() {
-                action = Some(CtxAction::DeleteForever);
-            }
-        });
+                if ui.button("Open with system app").clicked() {
+                    action = Some(CtxAction::OpenExternal);
+                }
+                if is_dir && ui.button("Open in new window").clicked() {
+                    action = Some(CtxAction::OpenNewWindow);
+                }
+                if ui.button("Show in file manager").clicked() {
+                    action = Some(CtxAction::Reveal);
+                }
+                if ui.button("Open in Terminal").clicked() {
+                    action = Some(CtxAction::OpenTerminal);
+                }
+                ui.add_space(sp::XS);
+                ui.separator();
+                ui.add_space(sp::XS);
+                if ui.button("Copy").clicked() {
+                    action = Some(CtxAction::Copy);
+                }
+                if ui.button("Cut").clicked() {
+                    action = Some(CtxAction::Cut);
+                }
+                if ui.button("Copy as path").clicked() {
+                    action = Some(CtxAction::CopyPath);
+                }
+                if is_dir {
+                    if pinned {
+                        if ui.button("Unpin from Quick access").clicked() {
+                            action = Some(CtxAction::Unpin);
+                        }
+                    } else if ui.button("Pin to Quick access").clicked() {
+                        action = Some(CtxAction::Pin);
+                    }
+                }
+                if ui.button("Rename\u{2026}").clicked() {
+                    action = Some(CtxAction::Rename);
+                }
+                ui.add_space(sp::XS);
+                ui.separator();
+                ui.add_space(sp::XS);
+                if ui.button("Move to trash").clicked() {
+                    action = Some(CtxAction::Delete);
+                }
+                if ui.button("Delete permanently\u{2026}").clicked() {
+                    action = Some(CtxAction::DeleteForever);
+                }
+            });
 
         // `show` returns `None` once the popup is closed, which is the only
         // reliable signal: egui closes the popup *after* drawing it, so on the
@@ -2347,6 +2477,9 @@ impl Xplor {
         }
 
         let Some(action) = action else { return };
+        // A click inside the menu does not close it on its own, so an item
+        // that ran must put it away itself.
+        self.menu.close();
         match action {
             CtxAction::OpenEditor => self.open_path(&path),
             CtxAction::OpenExternal => {
@@ -2401,22 +2534,32 @@ impl Xplor {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        // Name, in the same place the document header puts it.
-        let (head, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
-        let name_g = widgets::layout(ui, name, theme::bold_font(tfs::BODY), c::TEXT);
-        let loc_g = widgets::layout_elided(
+        // The same centred header the editor uses: glyph and name as one
+        // block, the location beneath. The old layout drew the name in one
+        // strip and the path a row lower, offset by the name's width, with the
+        // folder glyph colliding with the path text — nothing shared an axis.
+        let width = ui.available_width();
+        let header_h = HEADER_TITLE_H + HEADER_PATH_H;
+        let (header, _) = ui.allocate_exact_size(Vec2::new(width, header_h), Sense::hover());
+        let title_row = Rect::from_min_max(
+            header.min,
+            Pos2::new(header.right(), header.top() + HEADER_TITLE_H),
+        );
+        panel_header(
             ui,
+            header,
+            title_row,
+            if is_dir { Icon::Folder } else { Icon::File },
+            name,
             path.parent().unwrap_or(&path).to_string_lossy().to_string(),
-            theme::ui_font(tfs::SMALL),
-            c::TEXT_GHOST,
-            (ui.available_width() - name_g.size().x - 40.0).max(40.0),
+            false,
+            false,
+            0.0,
         );
 
-        // Icon or thumbnail on top, then the facts.
+        // Thumbnail or a centred glyph, then the facts.
         let preview_h = 168.0f32;
-        let (art, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), preview_h), Sense::hover());
+        let (art, _) = ui.allocate_exact_size(Vec2::new(width, preview_h), Sense::hover());
         let thumb = if is_dir {
             None
         } else {
@@ -2424,19 +2567,6 @@ impl Xplor {
         };
 
         let painter = ui.painter();
-        widgets::galley_at(
-            painter,
-            Pos2::new(head.left(), head.center().y - name_g.size().y * 0.5),
-            &name_g,
-            c::TEXT,
-        );
-        let name_x = art.left() + 2.0;
-        widgets::galley_at(
-            painter,
-            Pos2::new(name_x + name_g.size().x + 8.0, art.top() + 2.0),
-            &loc_g,
-            c::TEXT_GHOST,
-        );
         match thumb {
             Some(tex) => {
                 let src = tex.size_vec2();
@@ -2447,20 +2577,16 @@ impl Xplor {
                     .paint_at(ui, Rect::from_center_size(art.center(), size));
             }
             None => {
-                let glyph = if is_dir {
+                let (size, color) = if is_dir {
                     (sp::ICON, c::TEXT)
                 } else {
                     (56.0, c::TEXT_FAINT)
                 };
-                let rect = if is_dir {
-                    Rect::from_min_size(Pos2::new(name_x, art.top() + 2.0), Vec2::splat(glyph.0))
-                } else {
-                    Rect::from_center_size(art.center(), Vec2::splat(glyph.0))
-                };
+                let rect = Rect::from_center_size(art.center(), Vec2::splat(size));
                 if is_dir {
-                    Icon::Folder.paint(painter, rect, glyph.1);
+                    Icon::Folder.paint(painter, rect, color);
                 } else {
-                    Icon::File.paint(painter, rect, glyph.1);
+                    Icon::File.paint(painter, rect, color);
                 }
             }
         }
@@ -2543,14 +2669,12 @@ impl Xplor {
         // the folder sits underneath in quiet grey, and the actions are
         // pictograms on the right. At 300px wide a single line could not hold
         // all three without the path collapsing to a single character.
-        let title_h = 28.0f32;
-        let path_h = 19.0f32;
-        let header_h = title_h + path_h;
+        let header_h = HEADER_TITLE_H + HEADER_PATH_H;
         let header =
             Rect::from_min_size(ui.min_rect().min, Vec2::new(ui.available_width(), header_h));
         let title_row = Rect::from_min_max(
             header.min,
-            Pos2::new(header.right(), header.top() + title_h),
+            Pos2::new(header.right(), header.top() + HEADER_TITLE_H),
         );
 
         // Actions first, so the title knows how much room is left.
@@ -2645,104 +2769,17 @@ impl Xplor {
             }
         }
 
-        {
-            let painter = ui.painter();
-            painter.hline(
-                header.left()..=header.right(),
-                header.max.y - 0.5,
-                Stroke::new(1.0, c::BORDER),
-            );
-            // Title: glyph, name, and a dot when there are unsaved changes,
-            // centred as one block in whatever the action buttons leave.
-            //
-            // Centring the icon and the name *together* matters. Centring the
-            // name alone would slide the glyph off to the left, further from
-            // the words the further apart they are, and the pair stops reading
-            // as a single title.
-            let cy = title_row.center().y;
-            let title_room = Rect::from_min_max(
-                Pos2::new(title_row.left() + sp::SM, title_row.top()),
-                Pos2::new(title_row.right() - actions_w - sp::SM, title_row.bottom()),
-            );
-            let name_g = widgets::layout_elided(
-                ui,
-                file_name.clone(),
-                if dirty {
-                    theme::bold_font(tfs::BODY)
-                } else {
-                    theme::ui_font(tfs::BODY)
-                },
-                c::TEXT,
-                (title_room.width() - HEADER_ICON - HEADER_GAP - if dirty { 11.0 } else { 0.0 })
-                    .max(24.0),
-            );
-            let group_w =
-                HEADER_ICON + HEADER_GAP + name_g.size().x + if dirty { 11.0 } else { 0.0 };
-            let group_x = title_room.center().x - group_w * 0.5;
-            let icon = Rect::from_center_size(
-                Pos2::new(group_x + HEADER_ICON * 0.5, cy),
-                Vec2::splat(HEADER_ICON),
-            );
-            let glyph_color = if dirty { c::TEXT_DIM } else { c::TEXT_GHOST };
-            if is_md {
-                Icon::Markdown.paint(painter, icon, glyph_color);
-            } else {
-                Icon::File.paint(painter, icon, glyph_color);
-            }
-            let name_x = icon.right() + HEADER_GAP;
-            widgets::galley_at(
-                painter,
-                Pos2::new(name_x, cy - name_g.size().y * 0.5),
-                &name_g,
-                c::TEXT,
-            );
-            if dirty {
-                painter.circle_filled(
-                    Pos2::new(name_x + name_g.size().x + 6.0, cy),
-                    2.5,
-                    c::ACCENT,
-                );
-            }
-
-            // Path underneath, centred on the same axis and elided in the
-            // middle so the folder name survives a narrow panel.
-            let path_row = Rect::from_min_max(
-                Pos2::new(header.left(), title_row.bottom()),
-                Pos2::new(header.right(), header.bottom()),
-            );
-            let read_only_w = if read_only { 58.0 } else { 0.0 };
-            let path_room = (path_row.width() - sp::SM * 2.0 - read_only_w).max(24.0);
-            let loc = widgets::layout_elided_middle(
-                ui,
-                location,
-                theme::ui_font(tfs::SMALL),
-                c::TEXT_FAINT,
-                path_room,
-            );
-            widgets::galley_at(
-                painter,
-                Pos2::new(
-                    path_row.center().x - loc.size().x * 0.5,
-                    path_row.center().y - loc.size().y * 0.5,
-                ),
-                &loc,
-                c::TEXT_FAINT,
-            );
-            if read_only {
-                let g = widgets::layout(
-                    ui,
-                    "read only".to_owned(),
-                    theme::ui_font(tfs::SMALL),
-                    c::DANGER,
-                );
-                widgets::text_right(
-                    painter,
-                    Pos2::new(path_row.right() - sp::SM, path_row.center().y),
-                    &g,
-                    c::DANGER,
-                );
-            }
-        }
+        panel_header(
+            ui,
+            header,
+            title_row,
+            if is_md { Icon::Markdown } else { Icon::File },
+            file_name.clone(),
+            location,
+            dirty,
+            read_only,
+            actions_w,
+        );
         if preview {
             self.preview_visible = !self.preview_visible;
         }
@@ -5662,6 +5699,20 @@ mod tests {
         m.open(Some(Pos2::new(1.0, 1.0)), PathBuf::from("/a"));
         assert!(m.take_open(), "the click should open the menu");
         assert!(!m.take_open(), "opening was re-asserted on a later frame");
+    }
+
+    #[test]
+    fn reopening_the_menu_for_its_own_folder_is_a_no_op() {
+        // The press opens the menu and the release that follows would open it
+        // again. Without this guard the second opening burns a new popup id
+        // and drops any hover state inside the menu.
+        let mut m = MenuState::default();
+        assert!(m.open(Some(Pos2::new(5.0, 6.0)), PathBuf::from("/work")));
+        let id = m.id();
+        assert!(!m.open(Some(Pos2::new(7.0, 8.0)), PathBuf::from("/work")));
+        assert_eq!(m.id(), id, "the id moved under an open menu");
+        assert_eq!(m.anchor(), Some(Pos2::new(5.0, 6.0)), "the anchor moved");
+        assert!(m.take_open(), "the first opening was lost");
     }
 
     #[test]
