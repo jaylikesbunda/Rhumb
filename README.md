@@ -15,18 +15,21 @@ binary, no runtime to install.
 - **Tabs**, like Windows 11 Explorer: `Ctrl+T` opens a new tab on the file
   list, opening a file turns that tab into the document, and `Ctrl+Tab` moves
   between them. Unsaved tabs show a dot and ask before closing.
-- **Three views** — details with sortable columns, a compact list, and large
-  icons with real image thumbnails. `Ctrl+1`, `Ctrl+2`, `Ctrl+3`, or the
-  switch in the bottom-right corner.
+- **Three views** — details with sortable, drag-to-resize columns, a compact
+  list, and large icons with real image thumbnails. `Ctrl+1`, `Ctrl+2`,
+  `Ctrl+3`, or the switch in the bottom-right corner. Columns give way to the
+  name in a narrow pane, and come back when there is room.
 - **Search as you type**, in this folder or in everything below it, with the
   search cancellable and never blocking the window.
 - **Edit text and code** with syntax highlighting, bracket matching, auto-close,
   comment toggling and soft wrap.
 - **Preview Markdown** side by side with the source: headings, lists, task
   lists, tables, quotes, code blocks, links, inline code and images.
+- **A details pane** with the file's facts and a preview of its contents: the
+  thumbnail for an image, the first lines for a text file.
 - **File operations** with real progress and a cancel button: copy, cut, paste,
-  rename, delete to the recycle bin or permanently, compress to ZIP, and undo
-  with `Ctrl+Z`.
+  rename, delete to the recycle bin or permanently, compress to ZIP, copy a
+  path, open in a terminal, and undo with `Ctrl+Z`.
 - **Drag and drop**, both files from the desktop and rows onto folders, to move
   or (with `Ctrl`) copy.
 

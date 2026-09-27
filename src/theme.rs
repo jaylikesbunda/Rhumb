@@ -109,10 +109,19 @@ pub mod sp {
     pub const LG_I: i8 = 16;
 }
 
-/// Column widths in the file list. Fixed so numbers and dates always line up.
+/// Column widths in the file list. Fixed so numbers and dates always line up,
+/// and both are draggable in the header, within these limits.
 pub mod col {
     /// Right-aligned modified-date column.
     pub const DATE: f32 = 132.0;
+    /// Right-aligned size column.
+    pub const SIZE: f32 = 92.0;
+    /// Narrowest a draggable column may become.
+    pub const MIN: f32 = 48.0;
+    /// Widest a draggable column may become.
+    pub const MAX: f32 = 320.0;
+    /// Half-width of the grab area around a divider.
+    pub const GRAB: f32 = 4.0;
 }
 
 /// Type scale (logical pixels).

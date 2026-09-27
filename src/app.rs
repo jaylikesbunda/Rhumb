@@ -47,6 +47,8 @@ const ID_TITLE_DRAG: &str = "title_drag";
 /// can be elided to exactly the space that is left.
 const DOC_BUTTONS_W: f32 = 250.0;
 const ID_LIST: &str = "file_list";
+const ID_COL_SIZE: &str = "col_size";
+const ID_COL_DATE: &str = "col_date";
 const ID_SEARCH: &str = "search_box";
 const EDITOR_ID: &str = "xplor-editor";
 
@@ -322,6 +324,8 @@ enum WinAction {
 
 enum CtxAction {
     OpenEditor,
+    CopyPath,
+    OpenTerminal,
     OpenExternal,
     OpenNewWindow,
     Reveal,
@@ -384,6 +388,9 @@ pub struct Xplor {
     view: ViewMode,
     /// Type-ahead find: letters jump to the next matching row.
     typeahead: TypeAhead,
+    /// Widths of the two right-hand columns, dragged in the header.
+    col_size: f32,
+    col_date: f32,
     /// Set by Alt+F; the toolbar button opens its menu and clears the flag.
     new_menu: bool,
     /// Tab the "unsaved changes" prompt is about, when it came from a tab cross.
@@ -446,6 +453,10 @@ pub struct Xplor {
     last_change: Option<Instant>,
     /// Decoded image thumbnails, filled on demand by the icon view.
     thumbs: Thumbs,
+    /// Head of the text file the details pane is showing, with its path.
+    peek: Option<(PathBuf, String)>,
+    /// Path whose head is being read, so it is only requested once.
+    peek_pending: Option<PathBuf>,
     /// Folder the pointer is over while dragging, if any.
     drop_target: Option<PathBuf>,
     /// Paths being dragged inside the app.
@@ -492,6 +503,8 @@ impl Xplor {
             entries: Vec::new(),
             view: ViewMode::default(),
             typeahead: TypeAhead::default(),
+            col_size: theme::col::SIZE,
+            col_date: theme::col::DATE,
             new_menu: false,
             pending_close: None,
             details: true,
@@ -535,6 +548,8 @@ impl Xplor {
             watch_target: None,
             last_change: None,
             thumbs: Thumbs::new(tx.clone()),
+            peek: None,
+            peek_pending: None,
             drop_target: None,
             drag_payload: Vec::new(),
             search_typed: None,
@@ -608,6 +623,12 @@ impl Xplor {
                 _ => SortKey::Name,
             };
         }
+        if let Some(v) = map.get("col_size").and_then(|v| v.parse::<f32>().ok()) {
+            self.col_size = v.clamp(theme::col::MIN, theme::col::MAX);
+        }
+        if let Some(v) = map.get("col_date").and_then(|v| v.parse::<f32>().ok()) {
+            self.col_date = v.clamp(theme::col::MIN, theme::col::MAX);
+        }
         if let Some(name) = map.get("view") {
             self.view = match *name {
                 "List" => ViewMode::List,
@@ -637,7 +658,8 @@ impl Xplor {
         }
         let body = format!(
             "sidebar={}\nsidebar_w={}\ndoc_w={}\nsplit={}\nsort={}\nascending={}\n\
-             show_hidden={}\nwrap={}\npreview_visible={}\nview={}\ndetails={}\ncwd={}\nwindow={}\n",
+             show_hidden={}\nwrap={}\ncol_size={}\ncol_date={}\npreview_visible={}\n\
+             view={}\ndetails={}\ncwd={}\nwindow={}\n",
             self.sidebar,
             self.sidebar_w,
             self.doc_w,
@@ -646,6 +668,8 @@ impl Xplor {
             self.ascending,
             self.show_hidden,
             self.wrap,
+            self.col_size,
+            self.col_date,
             self.preview_visible,
             self.view.label(),
             self.details,
@@ -1543,15 +1567,20 @@ impl Xplor {
             let header_h = 26.0f32;
             // Allocated, so the rows below start underneath it.
             let (header, _) = ui.allocate_exact_size(Vec2::new(width, header_h), Sense::hover());
-            layout = RowLayout::new(header);
-            widgets::list_header(ui, header, self.sort, self.ascending);
+            let (fit_size, fit_date) = fit_columns(width, self.col_size, self.col_date);
+            layout = RowLayout::new(header, fit_size, fit_date);
+            widgets::list_header(ui, header, self.sort, self.ascending, fit_size, fit_date);
 
             let mut header_click = None;
-            let targets = [
-                (SortKey::Name, layout.name.x, false),
-                (SortKey::Size, layout.size.x - 36.0, true),
-                (SortKey::Modified, layout.date.x - 60.0, true),
-            ];
+            // A dropped column has no header to click either.
+            let mut targets: Vec<(SortKey, f32, bool)> =
+                vec![(SortKey::Name, layout.name.x, false)];
+            if layout.shows_size() {
+                targets.push((SortKey::Size, layout.size_left() + 8.0, true));
+            }
+            if layout.shows_date() {
+                targets.push((SortKey::Modified, layout.date_left() + 8.0, true));
+            }
             for (key, x, right) in targets {
                 let r = if right {
                     Rect::from_min_max(
@@ -1561,7 +1590,7 @@ impl Xplor {
                 } else {
                     Rect::from_min_max(
                         Pos2::new(header.left(), header.top()),
-                        Pos2::new(x + 62.0, header.bottom()),
+                        Pos2::new(layout.size_left(), header.bottom()),
                     )
                 };
                 if ui
@@ -1571,6 +1600,56 @@ impl Xplor {
                     header_click = Some(key);
                 }
             }
+
+            // Drag the dividers to resize, the way Explorer does. The grab area
+            // is wider than the line it draws, so it is easy to catch. A column
+            // that was dropped for want of room has no divider to grab.
+            let mut dividers: Vec<(&str, f32)> = Vec::with_capacity(2);
+            if layout.shows_size() {
+                dividers.push((ID_COL_SIZE, layout.size_left()));
+            }
+            if layout.shows_date() {
+                dividers.push((ID_COL_DATE, layout.date_left()));
+            }
+            for (id, x) in dividers {
+                let grab = Rect::from_center_size(
+                    Pos2::new(x, header.center().y),
+                    Vec2::new(theme::col::GRAB * 2.0, header.height()),
+                );
+                let resp = ui.interact(grab, Id::new(id), Sense::drag());
+                if resp.hovered() || resp.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    ui.painter().vline(
+                        x,
+                        header.y_range(),
+                        Stroke::new(
+                            1.0,
+                            if resp.dragged() {
+                                c::ACCENT
+                            } else {
+                                c::TEXT_GHOST
+                            },
+                        ),
+                    );
+                }
+                if resp.dragged() {
+                    let delta = resp.drag_delta().x;
+                    // Dragging left widens the column, so the delta is negated.
+                    let limit = |other: f32| col_limit(&layout, other);
+                    if id == ID_COL_SIZE {
+                        self.col_size =
+                            (self.col_size - delta).clamp(theme::col::MIN, limit(self.col_date));
+                    } else {
+                        self.col_date =
+                            (self.col_date - delta).clamp(theme::col::MIN, limit(self.col_size));
+                    }
+                    // The name column and every row's shaped text change width.
+                    self.row_cache.clear();
+                    let (s, d) = fit_columns(width, self.col_size, self.col_date);
+                    layout = RowLayout::new(header, s, d);
+                }
+            }
+
             if let Some(key) = header_click {
                 if self.sort == key {
                     self.ascending = !self.ascending;
@@ -1825,6 +1904,9 @@ impl Xplor {
             if ui.button("Show in file manager").clicked() {
                 action = Some(CtxAction::Reveal);
             }
+            if ui.button("Open in Terminal").clicked() {
+                action = Some(CtxAction::OpenTerminal);
+            }
             ui.add_space(sp::XS);
             ui.separator();
             ui.add_space(sp::XS);
@@ -1833,6 +1915,9 @@ impl Xplor {
             }
             if ui.button("Cut").clicked() {
                 action = Some(CtxAction::Cut);
+            }
+            if ui.button("Copy as path").clicked() {
+                action = Some(CtxAction::CopyPath);
             }
             if ui.button("Rename\u{2026}").clicked() {
                 action = Some(CtxAction::Rename);
@@ -1863,6 +1948,8 @@ impl Xplor {
             }
             CtxAction::Reveal => editor::reveal_in_file_manager(&path),
             CtxAction::Copy => self.copy_selection(false),
+            CtxAction::CopyPath => self.copy_as_path(&path),
+            CtxAction::OpenTerminal => self.open_in_terminal(&path),
             CtxAction::Cut => self.copy_selection(true),
             CtxAction::Rename => self.start_rename(&path),
             CtxAction::Delete => self.delete_selection(false),
@@ -1953,6 +2040,52 @@ impl Xplor {
 
         ui.add_space(sp::XS);
         properties_ui(ui, &path);
+
+        // Text files get their first lines, the way Explorer's pane does.
+        if !is_dir && fs_model::is_editable_text(&path) {
+            ui.add_space(sp::SM);
+            self.text_preview(ui, &path);
+        }
+    }
+
+    /// Shows the head of a text file, read on a worker thread.
+    fn text_preview(&mut self, ui: &mut Ui, path: &Path) {
+        section_header(ui, "PREVIEW");
+        let ready = self.peek.as_ref().is_some_and(|(p, _)| p == path);
+        if !ready {
+            if self.peek_pending.as_deref() != Some(path) {
+                self.peek_pending = Some(path.to_path_buf());
+                let p = path.to_path_buf();
+                let tx = self.tx.clone();
+                let _ = std::thread::Builder::new()
+                    .name("xplor-peek".into())
+                    .spawn(move || {
+                        let _ = tx.send(Msg::Peek {
+                            text: ops::peek_text(&p),
+                            path: p,
+                        });
+                    });
+            }
+            widgets::empty_state(ui, "Reading\u{2026}", "First lines of the file");
+            return;
+        }
+        let Some((_, text)) = self.peek.as_ref() else {
+            return;
+        };
+        // Only the lines that fit; the rest is behind the editor.
+        let width = ui.available_width();
+        let line_h = theme::fs::MONO * 1.45;
+        let room = (ui.available_height() / line_h).floor().max(1.0) as usize;
+        let body: Vec<&str> = text.lines().take(room).collect();
+        let g = widgets::layout_wrapped(
+            ui,
+            body.join("\n"),
+            theme::mono_font(theme::fs::SMALL),
+            c::TEXT_DIM,
+            width,
+        );
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, g.size().y + 2.0), Sense::hover());
+        widgets::galley_at(ui.painter(), rect.min, &g, c::TEXT_DIM);
     }
 
     // ---- editor / preview pane --------------------------------------------
@@ -3647,6 +3780,14 @@ impl Xplor {
                         self.row_cache.clear();
                     }
                 }
+                Msg::Peek { path, text } => {
+                    if self.peek_pending.as_deref() == Some(path.as_path()) {
+                        self.peek_pending = None;
+                    }
+                    if let Some(text) = text {
+                        self.peek = Some((path, text));
+                    }
+                }
                 Msg::Thumb {
                     path,
                     px,
@@ -4099,6 +4240,59 @@ impl Xplor {
             return;
         }
         self.start_transfer(paths, dest.to_path_buf(), !copy);
+    }
+
+    /// Puts one path on the clipboard as text, which is what a shell expects.
+    fn copy_as_path(&mut self, path: &Path) {
+        let Ok(mut cb) = arboard::Clipboard::new() else {
+            self.toast_err("No clipboard available".into());
+            return;
+        };
+        if cb.set_text(path.to_string_lossy().into_owned()).is_err() {
+            self.toast_err("Could not write to the clipboard".into());
+        }
+    }
+
+    /// Opens a terminal in the folder that holds `path`.
+    ///
+    /// Each platform gets the terminal it actually ships with, because a wrong
+    /// guess would silently do nothing.
+    fn open_in_terminal(&mut self, path: &Path) {
+        let dir = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        };
+        let candidates: &[(&str, &[&str])] = if cfg!(windows) {
+            &[
+                ("wt.exe", &["-d", "."]),
+                ("powershell.exe", &["-NoExit", "-Command", "Set-Location ."]),
+                ("cmd.exe", &["/k", "cd ."]),
+            ]
+        } else if cfg!(target_os = "macos") {
+            &[("open", &["-a", "Terminal", "."])]
+        } else {
+            &[
+                ("x-terminal-emulator", &["./"]),
+                ("gnome-terminal", &["./"]),
+                ("konsole", &["./"]),
+                ("xterm", &["./"]),
+            ]
+        };
+        let mut launched = false;
+        for (program, args) in candidates {
+            let r = std::process::Command::new(program)
+                .args(*args)
+                .current_dir(&dir)
+                .spawn();
+            if r.is_ok() {
+                launched = true;
+                break;
+            }
+        }
+        if !launched {
+            self.toast_err("No terminal found on this system".into());
+        }
     }
 
     /// Compresses the selection into a zip beside it.
@@ -4635,6 +4829,60 @@ fn section_header(ui: &mut Ui, title: &str) {
     );
 }
 
+/// The narrowest the name column is ever allowed to become.
+const MIN_NAME_COL: f32 = 120.0;
+/// The narrowest a column can be before its own text would collide with the
+/// one beside it. Both are sized from the widest value each column ever shows.
+const MIN_SIZE_COL: f32 = 60.0;
+const MIN_DATE_COL: f32 = 84.0;
+
+/// Resolves the two right-hand column widths for a pane of `width`.
+///
+/// A dragged width is a preference, not a promise: in a narrow pane the columns
+/// give way to the name, and the date goes first because it is the least useful
+/// one to have. A dropped column comes back as soon as there is room again.
+fn fit_columns(width: f32, want_size: f32, want_date: f32) -> (f32, f32) {
+    // The icon, its gap, the padding in front of the columns and the right
+    // margin: everything the columns cannot have.
+    let chrome = sp::SM + sp::ICON + sp::SM + sp::MD + sp::MD + sp::SM;
+    let budget = (width - chrome - MIN_NAME_COL).max(0.0);
+    let wanted = want_size + want_date;
+    if wanted <= budget {
+        return (want_size, want_date);
+    }
+    // Take from the date column first, then the size column, keeping whatever
+    // stays wide enough to hold its own text.
+    let mut excess = wanted - budget;
+    let mut date = want_date;
+    let take = excess.min((date - MIN_DATE_COL).max(0.0));
+    date -= take;
+    excess -= take;
+    let mut size = want_size;
+    let take = excess.min((size - MIN_SIZE_COL).max(0.0));
+    size -= take;
+
+    // Even at their minimums the two columns do not fit, so they go: the name
+    // is the one thing that has to stay readable. Size survives longest.
+    if size + date > budget {
+        return if budget >= MIN_SIZE_COL {
+            (MIN_SIZE_COL, 0.0)
+        } else {
+            (0.0, 0.0)
+        };
+    }
+    (size, date)
+}
+
+/// The widest a draggable column may become without squeezing the name.
+///
+/// The date column owns the space to its right, so its width and the other
+/// column's width together decide how much room the name has left.
+fn col_limit(layout: &RowLayout, other: f32) -> f32 {
+    // name room = date_right - sp::MD - other - this_col - sp::MD - name_x
+    let room = layout.date.x - sp::MD - other - sp::MD - layout.name.x;
+    (room - MIN_NAME_COL).clamp(theme::col::MIN, theme::col::MAX)
+}
+
 fn click_kind(ui: &Ui) -> ClickKind {
     ui.input(|i| {
         if i.modifiers.ctrl || i.modifiers.command {
@@ -4922,5 +5170,66 @@ mod tests {
         t[1].doc.text.push_str("edited");
         t[1].doc.version += 1;
         assert_eq!(t.first_dirty(), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod col_tests {
+    use super::*;
+
+    const WIDE: f32 = 900.0;
+    const NARROW: f32 = 330.0;
+
+    #[test]
+    fn a_wide_pane_keeps_both_columns_at_their_dragged_width() {
+        assert_eq!(fit_columns(WIDE, 92.0, 132.0), (92.0, 132.0));
+    }
+
+    #[test]
+    fn a_narrow_pane_keeps_the_name_readable() {
+        let (size, date) = fit_columns(NARROW, 92.0, 132.0);
+        // Whatever happens, the name keeps its minimum, so the columns must
+        // have given way rather than the name being squeezed to nothing.
+        let chrome = sp::SM + sp::ICON + sp::SM + sp::MD + sp::MD + sp::SM;
+        let name_room = NARROW - chrome - size - date;
+        assert!(
+            name_room >= MIN_NAME_COL,
+            "name left only {name_room}px with columns {size}/{date}"
+        );
+    }
+
+    #[test]
+    fn the_date_column_is_dropped_before_the_size_one() {
+        // Ask for far more than any pane holds, then narrow the pane until only
+        // one column can stay: the size survives, because a size is more useful
+        // at a glance than a timestamp.
+        let (size, date) = fit_columns(300.0, 300.0, 300.0);
+        assert!(date == 0.0, "the date should go first, got {date}");
+        assert!(size >= MIN_SIZE_COL, "the size should stay, got {size}");
+    }
+
+    #[test]
+    fn a_very_narrow_pane_drops_the_columns_entirely() {
+        let (size, date) = fit_columns(200.0, 92.0, 132.0);
+        assert_eq!((size, date), (0.0, 0.0), "nothing fits, so nothing shows");
+    }
+
+    #[test]
+    fn widening_the_pane_brings_a_dropped_column_back() {
+        // A column that was dropped is not forgotten: it returns with the room.
+        let (_, narrow_date) = fit_columns(320.0, 92.0, 132.0);
+        let (_, wide_date) = fit_columns(900.0, 92.0, 132.0);
+        assert!(narrow_date <= wide_date);
+        assert_eq!(wide_date, 132.0, "the preference is intact");
+    }
+
+    #[test]
+    fn the_drag_limit_respects_the_readable_minimum() {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(WIDE, 26.0));
+        let l = RowLayout::new(rect, 92.0, 132.0);
+        // Widening the date as far as the limit allows still leaves the name.
+        let limit = col_limit(&l, 92.0);
+        let at_limit = RowLayout::new(rect, 92.0, limit);
+        assert!(at_limit.name_limit() - at_limit.name.x >= MIN_NAME_COL - 0.01);
     }
 }

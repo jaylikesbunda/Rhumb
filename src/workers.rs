@@ -26,6 +26,12 @@ pub enum Msg {
     },
     /// A filesystem watch event fired somewhere.
     Watch(PathBuf),
+    /// The head of a text file, for the details pane.
+    Peek {
+        path: PathBuf,
+        /// `None` when the file could not be read as text.
+        text: Option<String>,
+    },
     /// A thumbnail finished decoding: raw RGBA, ready for a texture.
     Thumb {
         path: PathBuf,

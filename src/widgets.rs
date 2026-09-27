@@ -16,7 +16,7 @@ use egui::{
 };
 
 use crate::fs_model::{self, Entry};
-use crate::theme::{bold_font, c, col, fs as tfs, mono_font, sp, ui_font};
+use crate::theme::{bold_font, c, fs as tfs, mono_font, sp, ui_font};
 
 /// Monochrome line icons, drawn rather than bitmapped so they stay crisp at any
 /// size and always match the current text colour.
@@ -248,6 +248,10 @@ pub struct RowLayout {
     pub name: Pos2,
     pub size: Pos2,
     pub date: Pos2,
+    /// The widths the two right-hand columns ended up with. Zero means the
+    /// column was dropped because the pane was too narrow to hold it.
+    size_w: f32,
+    date_w: f32,
 }
 
 impl Default for RowLayout {
@@ -258,30 +262,61 @@ impl Default for RowLayout {
             name: Pos2::ZERO,
             size: Pos2::ZERO,
             date: Pos2::ZERO,
+            size_w: 0.0,
+            date_w: 0.0,
         }
     }
 }
 
 impl RowLayout {
-    pub fn new(rect: Rect) -> RowLayout {
+    /// Column geometry for `rect`, with the two right-aligned columns at the
+    /// widths the caller resolved for this pane.
+    pub fn new(rect: Rect, col_size: f32, col_date: f32) -> RowLayout {
         let icon = Rect::from_min_size(
             Pos2::new(rect.left() + sp::SM, rect.center().y - sp::ICON * 0.5),
             Vec2::splat(sp::ICON),
         );
-        let date_right = rect.right() - sp::SM;
-        let size_right = date_right - sp::MD - col::DATE;
+        let right = rect.right() - sp::SM;
+        // A dropped date column hands its space to the size column.
+        let size_right = if col_date > 0.0 {
+            right - sp::MD - col_date
+        } else {
+            right
+        };
         let name_x = icon.right() + sp::SM;
         RowLayout {
             icon,
             name: Pos2::new(name_x, rect.center().y),
             size: Pos2::new(size_right, rect.center().y),
-            date: Pos2::new(date_right, rect.center().y),
+            date: Pos2::new(right, rect.center().y),
+            size_w: col_size,
+            date_w: col_date,
         }
+    }
+
+    /// Whether the date column has room and should be drawn.
+    pub fn shows_date(&self) -> bool {
+        self.date_w > 0.0
+    }
+
+    /// Whether the size column has room and should be drawn.
+    pub fn shows_size(&self) -> bool {
+        self.size_w > 0.0
     }
 
     /// Rightmost x the name may occupy.
     pub fn name_limit(&self) -> f32 {
-        self.size.x - sp::MD
+        self.size_left() - sp::MD
+    }
+
+    /// The left edge of the size column, which is where its divider sits.
+    pub fn size_left(&self) -> f32 {
+        self.size.x - self.size_w
+    }
+
+    /// The left edge of the date column, which is where its divider sits.
+    pub fn date_left(&self) -> f32 {
+        self.date.x - self.date_w
     }
 }
 
@@ -560,20 +595,25 @@ pub fn paint_row(
     if !columns {
         return;
     }
-    let size_size = galleys.size.size();
-    galley_at(
-        painter,
-        Pos2::new(cols.size.x - size_size.x, cy - size_size.y * 0.5),
-        &galleys.size,
-        meta_color,
-    );
-    let date_size = galleys.date.size();
-    galley_at(
-        painter,
-        Pos2::new(cols.date.x - date_size.x, cy - date_size.y * 0.5),
-        &galleys.date,
-        meta_color,
-    );
+    // A column dropped for want of room is not drawn at all.
+    if cols.shows_size() {
+        let size_size = galleys.size.size();
+        galley_at(
+            painter,
+            Pos2::new(cols.size.x - size_size.x, cy - size_size.y * 0.5),
+            &galleys.size,
+            meta_color,
+        );
+    }
+    if cols.shows_date() {
+        let date_size = galleys.date.size();
+        galley_at(
+            painter,
+            Pos2::new(cols.date.x - date_size.x, cy - date_size.y * 0.5),
+            &galleys.date,
+            meta_color,
+        );
+    }
 }
 
 /// Shapes a single-line galley, no wrapping.
@@ -581,6 +621,29 @@ pub fn layout(ui: &Ui, text: String, font: FontId, color: Color32) -> Arc<Galley
     let mut job = LayoutJob::default();
     job.append(&text, 0.0, egui::text::TextFormat::simple(font, color));
     job.wrap = TextWrapping::no_max_width();
+    ui.ctx().fonts_mut(|f| f.layout_job(job))
+}
+
+/// Shapes text wrapped to `max_width`, keeping every line break the caller put
+/// in it. Used where a whole block of text is shown rather than one label.
+pub fn layout_wrapped(
+    ui: &Ui,
+    text: String,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> Arc<Galley> {
+    let mut job = LayoutJob {
+        break_on_newline: true,
+        wrap: TextWrapping {
+            max_width: max_width.max(20.0),
+            // Wrap between any characters so a long path in a preview still fits.
+            break_anywhere: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    job.append(&text, 0.0, egui::text::TextFormat::simple(font, color));
     ui.ctx().fonts_mut(|f| f.layout_job(job))
 }
 
@@ -600,8 +663,15 @@ pub fn layout_elided(
 }
 
 /// The file-list column headers, with the active sort highlighted.
-pub fn list_header(ui: &Ui, rect: Rect, sort: fs_model::SortKey, ascending: bool) {
-    let cols = RowLayout::new(rect);
+pub fn list_header(
+    ui: &Ui,
+    rect: Rect,
+    sort: fs_model::SortKey,
+    ascending: bool,
+    col_size: f32,
+    col_date: f32,
+) {
+    let cols = RowLayout::new(rect, col_size, col_date);
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::ZERO, c::PANEL);
     painter.hline(
@@ -642,18 +712,22 @@ pub fn list_header(ui: &Ui, rect: Rect, sort: fs_model::SortKey, ascending: bool
         false,
         sort == fs_model::SortKey::Name,
     );
-    paint_col(
-        fs_model::SortKey::Size.label(),
-        cols.size,
-        true,
-        sort == fs_model::SortKey::Size,
-    );
-    paint_col(
-        fs_model::SortKey::Modified.label(),
-        cols.date,
-        true,
-        sort == fs_model::SortKey::Modified,
-    );
+    if cols.shows_size() {
+        paint_col(
+            fs_model::SortKey::Size.label(),
+            cols.size,
+            true,
+            sort == fs_model::SortKey::Size,
+        );
+    }
+    if cols.shows_date() {
+        paint_col(
+            fs_model::SortKey::Modified.label(),
+            cols.date,
+            true,
+            sort == fs_model::SortKey::Modified,
+        );
+    }
 
     if ascending {
         let x = match sort {
@@ -810,6 +884,7 @@ pub fn text_right(painter: &Painter, right: Pos2, galley: &Arc<Galley>, color: C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::col;
     use egui::vec2;
 
     #[test]
@@ -861,7 +936,7 @@ mod tests {
     #[test]
     fn columns_are_ordered_and_the_name_stops_before_the_size() {
         let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(600.0, 26.0));
-        let l = RowLayout::new(rect);
+        let l = RowLayout::new(rect, col::SIZE, col::DATE);
         // Reading order, left to right.
         assert!(l.icon.left() < l.name.x);
         assert!(l.name.x < l.size.x);
@@ -877,9 +952,68 @@ mod tests {
     #[test]
     fn the_icon_sits_on_the_row_and_inside_it() {
         let rect = Rect::from_min_size(Pos2::new(10.0, 100.0), vec2(400.0, sp::ROW));
-        let l = RowLayout::new(rect);
+        let l = RowLayout::new(rect, col::SIZE, col::DATE);
         assert!((l.icon.center().y - rect.center().y).abs() < 0.01);
         assert!(l.icon.left() >= rect.left());
         assert!(l.icon.right() < rect.right());
+    }
+
+    #[test]
+    fn dragging_a_divider_moves_only_its_own_column() {
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 26.0));
+        let base = RowLayout::new(rect, col::SIZE, col::DATE);
+        // Widening the size column pushes its left edge left, and takes the
+        // name's room with it, while the date column stays where it was.
+        let wider = RowLayout::new(rect, col::SIZE + 40.0, col::DATE);
+        assert!(wider.size_left() < base.size_left());
+        assert!((wider.date_left() - base.date_left()).abs() < 0.01);
+        assert!((wider.date.x - base.date.x).abs() < 0.01);
+        assert!(wider.name_limit() < base.name_limit());
+    }
+
+    #[test]
+    fn both_columns_at_their_maximum_would_starve_the_name() {
+        // This is why the app clamps a drag: the raw geometry has no idea how
+        // much room the name needs, so the limit lives with the caller.
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 26.0));
+        let l = RowLayout::new(rect, col::MAX, col::MAX);
+        assert!(
+            l.name_limit() < l.name.x,
+            "the unclamped layout is expected to overrun; the drag limit fixes it"
+        );
+    }
+
+    /// The app clamps a drag against this, so the name always keeps room.
+    const MIN_NAME: f32 = 120.0;
+
+    fn col_limit(l: &RowLayout, other: f32) -> f32 {
+        let room = l.date.x - sp::MD - other - sp::MD - l.name.x;
+        (room - MIN_NAME).clamp(col::MIN, col::MAX)
+    }
+
+    #[test]
+    fn the_drag_limit_leaves_the_name_enough_room() {
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 26.0));
+        let other = col::MAX;
+        let limit = col_limit(&RowLayout::new(rect, col::SIZE, other), other);
+        // At the limit, the name still has its minimum.
+        let at_limit = RowLayout::new(rect, limit, other);
+        assert!(
+            at_limit.name_limit() - at_limit.name.x >= MIN_NAME - 0.01,
+            "limit {} starves the name",
+            limit
+        );
+        // One pixel more would break it, so the clamp is tight.
+        let over = RowLayout::new(rect, limit + 1.0, other);
+        assert!(over.name_limit() - over.name.x < MIN_NAME);
+    }
+
+    #[test]
+    fn a_narrow_pane_still_allows_a_drag() {
+        // A very narrow list: the limit must not fall below the minimum width,
+        // or the column would freeze instead of resizing.
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 26.0));
+        let l = RowLayout::new(rect, col::SIZE, col::DATE);
+        assert!(col_limit(&l, col::DATE) >= col::MIN);
     }
 }

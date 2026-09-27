@@ -598,6 +598,29 @@ pub fn move_now(src: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Reads the head of a text file for the details pane.
+///
+/// Capped so a huge file costs the same as a small one, and lossy so a stray
+/// byte cannot fail the whole read.
+pub fn peek_text(path: &Path) -> Option<String> {
+    /// Enough for a screenful of preview lines.
+    const CAP: usize = 8 * 1024;
+    let mut buf = Vec::with_capacity(CAP);
+    let file = fs::File::open(path).ok()?;
+    // Read one byte past the cap so a cut multi-byte character is detectable.
+    file.take((CAP + 1) as u64).read_to_end(&mut buf).ok()?;
+    if buf.len() > CAP {
+        buf.truncate(CAP);
+    }
+    let text = String::from_utf8_lossy(&buf);
+    // A file with no line breaks would be one very long line; cut it too.
+    let mut out: String = text.chars().take(4000).collect();
+    if out.len() < text.len() {
+        out.push('\u{2026}');
+    }
+    Some(out)
+}
+
 /// Sends items to the OS recycle bin / trash. Nothing is destroyed.
 pub fn send_to_trash(paths: &[PathBuf]) -> Result<(), String> {
     // A vanished file is not an error: the goal (it is gone) is met.
