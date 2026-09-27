@@ -38,6 +38,8 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const WATCH_COOLDOWN: Duration = Duration::from_millis(1500);
 /// How long a toast stays on screen.
 const TOAST_TTL: Duration = Duration::from_secs(4);
+/// How often the window looks for a second launch asking it to open a path.
+const INSTANCE_POLL: Duration = Duration::from_millis(250);
 /// Sidebar width bounds.
 const SIDEBAR_MIN: f32 = 150.0;
 const SIDEBAR_MAX: f32 = 340.0;
@@ -1125,6 +1127,11 @@ impl Xplor {
         self.pump_search();
         self.expire_toasts();
         self.handle_watch_debounce();
+        // A second launch arrives as a file, so something has to look. A
+        // quarter-second tick is fast enough to feel instant and slow enough
+        // to cost nothing while idle.
+        self.take_instance_signal(ctx);
+        ctx.request_repaint_after(INSTANCE_POLL);
         self.close_guard(ctx);
 
         egui::containers::Panel::top("titlebar")
@@ -1405,7 +1412,8 @@ impl Xplor {
         // left. Below the floor, the address bar collapses to a Go button.
         let controls_w = 208.0f32; // New + sort + filter popups
         let search_w = (total * 0.24).clamp(110.0, 240.0);
-        let nav_w = 4.0 * 26.0 + 3.0 * 2.0;
+        // Sidebar toggle, back, forward, up, and refresh.
+        let nav_w = 5.0 * 26.0 + 3.0 * 2.0;
         let address_w = (total - nav_w - search_w - controls_w - sp::SM * 4.0).max(60.0);
 
         ui.horizontal(|ui| {
@@ -1426,6 +1434,10 @@ impl Xplor {
 
             ui.add_space(sp::SM);
             self.address_bar(ui, address_w);
+            ui.add_space(sp::XS);
+            if widgets::icon_button(ui, Icon::Refresh, "Refresh (F5)").clicked() {
+                self.request_listing();
+            }
             ui.add_space(sp::SM);
 
             self.search_box(ui, search_w);
@@ -4298,6 +4310,33 @@ impl Xplor {
     }
 
     // ---- messages -----------------------------------------------------------
+
+    /// Folds in anything a second launch handed this window.
+    ///
+    /// Checked on the slow tick rather than every frame: it is a file
+    /// existence test, and launches are rare. Either opens the path or just
+    /// brings the window forward, either way the window ends up focused.
+    fn take_instance_signal(&mut self, ctx: &Context) {
+        let Some(request) = crate::instance::take_signal() else {
+            return;
+        };
+        match request {
+            Some(p) if p.is_file() => {
+                if let Some(parent) = p.parent() {
+                    self.navigate(parent);
+                }
+                self.open_path(&p);
+            }
+            Some(p) if p.is_dir() => self.navigate(&p),
+            // No path: the user just wants the window they already have.
+            _ => {}
+        }
+        // Raise it if it was minimised, then focus it.
+        if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
 
     /// Applies everything the workers have finished. Nothing here touches the
     /// disk, so a busy copy or search never stalls a frame.

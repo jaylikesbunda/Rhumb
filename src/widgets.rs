@@ -47,6 +47,8 @@ pub enum Icon {
     Expand,
     /// A diagonal double arrow pointing in: go back to side by side.
     Shrink,
+    /// A circular arrow, for re-reading the folder.
+    Refresh,
 }
 
 impl Icon {
@@ -308,6 +310,24 @@ impl Icon {
                     ],
                     stroke,
                 );
+            }
+            Icon::Refresh => {
+                // An open circle with a gap at the top right, where an arrow
+                // head points back down into it.
+                let h = s * 0.34;
+                let stroke = Stroke::new(1.2, color);
+                // Three quarters of a circle, drawn as a polyline so the gap
+                // is a real gap rather than a covered-up stroke.
+                let mut pts = Vec::with_capacity(9);
+                for k in 0..=8 {
+                    // From 40° round to 330°: leaves the top-right open.
+                    let a = 0.35 + (k as f32 / 8.0) * 4.9;
+                    pts.push(Pos2::new(ctr.x + a.cos() * h, ctr.y + a.sin() * h));
+                }
+                p.add(egui::Shape::line(pts, stroke));
+                let head = Pos2::new(ctr.x + h * 0.94, ctr.y - h * 0.34);
+                p.line_segment([head, Pos2::new(head.x - 2.4, head.y - 0.4)], stroke);
+                p.line_segment([head, Pos2::new(head.x + 0.4, head.y + 2.2)], stroke);
             }
             Icon::Expand | Icon::Shrink => {
                 // Two arrowheads on one diagonal: outwards to fill the

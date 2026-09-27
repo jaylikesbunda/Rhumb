@@ -8,6 +8,7 @@ mod clip;
 mod editing;
 mod editor;
 mod fs_model;
+mod instance;
 mod markdown;
 mod ops;
 mod search;
@@ -25,6 +26,15 @@ const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
 fn main() -> eframe::Result {
     init_logging();
+
+    // One window per user. A second launch hands its path to the first and
+    // exits, rather than opening a second window with its own history and
+    // search box.
+    let start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    if !instance::claim(start.as_deref()) {
+        log::info!("another instance is running; handed the path and exiting");
+        return Ok(());
+    }
 
     let icon = load_icon();
     let viewport = ViewportBuilder::default()
