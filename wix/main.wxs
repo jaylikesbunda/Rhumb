@@ -1,13 +1,20 @@
 <?xml version="1.0" encoding="windows-1252"?>
 <!--
-  WiX v3 source for the Xplor MSI, driven by cargo-wix.
+  WiX v3 source for the Xplor MSI.
 
-  `cargo wix` substitutes the @@_*@@ placeholders from Cargo.toml before
-  running candle/light, so the version, authors and licence always match the
-  manifest. Run it with:
+  Built by tools/build_msi.sh, which reads the version out of Cargo.toml and
+  hands it to candle as a preprocessor variable. Driving candle and light
+  directly keeps the version in step with the manifest without a template
+  engine in the way.
 
-      cargo install cargo-wix --locked
-      cargo wix --nocapture
+  Paths are relative to the repository root, which is where the script runs the
+  compiler from. Run it with:
+
+      tools/build_msi.sh
+
+  Note for editors: an XML comment may not contain a double hyphen, and the
+  preprocessor substitutes variables inside comments too, so neither appears
+  in the prose above.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Product
@@ -17,11 +24,16 @@
         Language="1033"
         Codepage="1252"
         Manufacturer="Xplor"
-        Version="@@PKG_VERSION@@">
+        Version="$(var.PkgVersion)">
 
+        <!--
+          The package is 64-bit. That is declared with candle's arch switch
+          rather than here, because the Template Summary property is what ICE80
+          reads and the switch is the only supported way to set it.
+        -->
         <Package Id="*"
                  Keywords="Installer"
-                 Description="Xplor @@PKG_VERSION@@ file explorer"
+                 Description="Xplor, a minimal file explorer with a Markdown preview"
                  InstallerVersion="500"
                  Languages="1033"
                  Compressed="yes"
@@ -29,33 +41,57 @@
                  SummaryCodepage="1252"
                  Manufacturer="Xplor"/>
 
+        <!-- A newer build replaces an older one in place; downgrades are refused. -->
         <MajorUpgrade Schedule="afterInstallInitialize"
                       DowngradeErrorMessage="A newer version of Xplor is already installed."/>
-        <MediaTemplate EmbedCab="yes"/>
+        <MediaTemplate EmbedCab="yes" />
 
-        <!-- Everything installs under one folder, with no per-user state, so
-             uninstalling leaves nothing behind. -->
-        <Property Id="ARPPRODUCTICON" Value="ProductIcon"/>
+        <!-- Repairs would need the original binaries, so they are not offered. -->
         <Property Id="ARPNOREPAIR" Value="1"/>
-        <Icon Id="ProductIcon" SourceFile="@@PKG_RESOURCES_DIR@@\icon.ico"/>
+        <Property Id="ARPPRODUCTICON" Value="ProductIcon"/>
+        <Icon Id="ProductIcon" SourceFile="assets\icon.ico"/>
 
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="ProgramFiles64Folder">
                 <Directory Id="APPLICATIONFOLDER" Name="Xplor">
-                    <Component Id="MainExecutable" Guid="*">
+                    <!--
+                      Win64 is required on every component: without it a
+                      package under ProgramFiles64Folder is validated as
+                      32-bit and lands in Program Files (x86) on a 64-bit
+                      machine. ICE80 fails the link if this is missing.
+                    -->
+                    <Component Id="MainExecutable" Guid="*" Win64="yes">
                         <File Id="XplorExe"
                               Name="xplor.exe"
-                              Source="@@PKG_BINARIES@@\xplor.exe"
+                              Source="target\release\xplor.exe"
                               KeyPath="yes">
                             <Shortcut Id="StartMenuShortcut"
-                                      Directory="ProgramMenuFolder"
+                                      Directory="ApplicationProgramsFolder"
                                       Name="Xplor"
-                                      Description="A minimal file explorer"
-                                      Advertise="yes"/>
+                                      Description="A minimal file explorer with a Markdown preview"
+                                      Advertise="yes"
+                                      WorkingDirectory="APPLICATIONFOLDER"/>
                         </File>
+                        <!-- Uninstall leaves no empty Start menu folder behind. -->
+                        <RemoveFolder Id="RemoveApplicationProgramsFolder"
+                                      Directory="ApplicationProgramsFolder"
+                                      On="uninstall"/>
+                        <RemoveFile Id="RemoveStartMenuShortcut"
+                                    Name="Xplor.lnk"
+                                    Directory="ApplicationProgramsFolder"
+                                    On="uninstall"/>
                     </Component>
-                    <Component Id="Readme" Guid="*">
-                        <File Id="ReadmeTxt" Name="README.md" Source="@@PKG_ROOT@@\README.md" KeyPath="yes"/>
+                    <Component Id="Readme" Guid="*" Win64="yes">
+                        <File Id="ReadmeMd"
+                              Name="README.md"
+                              Source="README.md"
+                              KeyPath="yes"/>
+                    </Component>
+                    <Component Id="License" Guid="*" Win64="yes">
+                        <File Id="LicenseTxt"
+                              Name="LICENSE"
+                              Source="LICENSE"
+                              KeyPath="yes"/>
                     </Component>
                 </Directory>
             </Directory>
@@ -64,12 +100,24 @@
             </Directory>
         </Directory>
 
-        <Feature Id="MainFeature" Title="Xplor" Level="1" ConfigurableDirectory="APPLICATIONFOLDER">
+        <Feature Id="MainFeature"
+                 Title="Xplor"
+                 Level="1"
+                 ConfigurableDirectory="APPLICATIONFOLDER"
+                 Display="expand">
             <ComponentRef Id="MainExecutable"/>
             <ComponentRef Id="Readme"/>
+            <ComponentRef Id="License"/>
         </Feature>
 
-        <UIRef Id="WixUI_FeatureTree"/>
-        <WixVariable Id="WixUILicenseRtf" Value="@@PKG_ROOT_DIR@@\wix\License.rtf"/>
+        <!--
+          No WixUI here on purpose. The WixUI library is not part of the WiX
+          binaries payload, only of the full installer, so depending on it
+          would make the build fail on any machine that has candle and light
+          without the complete toolset. With no UIRef the package gets the core
+          dialogs, which are enough for one feature and a Start menu shortcut,
+          and the licence is installed next to the program. Add a WixUI UIRef
+          later if a feature chooser or a welcome page is wanted.
+        -->
     </Product>
 </Wix>

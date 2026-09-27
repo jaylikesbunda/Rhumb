@@ -44,19 +44,32 @@ jobs:
     needs: check
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The runner image already ships the WiX toolset that cargo-wix drives.
-      - name: Install cargo-wix
-        run: cargo install cargo-wix --locked
+      - run: cargo build --release
+      # The WiX binaries are fetched rather than taken from the runner image, so
+      # the build does not depend on what that image happens to carry, and needs
+      # no administrator rights. This is the same payload used locally.
+      - name: Fetch the WiX toolset
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\wix.zip"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" `
+            -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\wix" -Force
+          "$env:RUNNER_TEMP\wix" >> $env:GITHUB_PATH
       - name: Build the MSI
-        run: cargo wix --nocapture
+        run: tools/build_msi.sh
       - uses: actions/upload-artifact@v4
         with:
           name: xplor-msi
-          path: target/wix/xplor.msi
+          path: dist/*.msi
           if-no-files-found: error
 
   appimage:
@@ -103,8 +116,8 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME}"
-          mv dist/xplor.msi "dist/xplor-${tag}-x64.msi"
-          mv dist/xplor.AppImage "dist/xplor-${tag}-x86_64.AppImage"
+          for f in dist/*.msi;  do mv "$f" "dist/xplor-${tag}-x64.msi";  done
+          for f in dist/*.AppImage; do mv "$f" "dist/xplor-${tag}-x86_64.AppImage"; done
           ls -l dist
       - uses: softprops/action-gh-release@v2
         with:

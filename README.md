@@ -11,7 +11,8 @@ binary, no runtime to install.
 ## What it does
 
 - **Browse** with a lazy, Explorer-style tree in the sidebar, an address bar of
-  clickable path segments, and a sortable list.
+  clickable path segments, and a sortable list. Folders load their subfolders on
+  a worker thread, only when expanded.
 - **Tabs**, like Windows 11 Explorer: `Ctrl+T` opens a new tab on the file
   list, opening a file turns that tab into the document, and `Ctrl+Tab` moves
   between them. Unsaved tabs show a dot and ask before closing.
@@ -35,20 +36,17 @@ binary, no runtime to install.
 
 ## Install
 
-Grab a build from the releases page:
+Grab a build from the releases page, or build one yourself (see below).
 
-| Platform | File |
-|:---------|:-----|
-| Windows  | `xplor-<version>-x64.msi` |
-| Linux    | `xplor-<version>-x86_64.AppImage` |
+| Platform | File | Notes |
+|:---------|:-----|:------|
+| Windows  | `xplor-<version>-x64.msi` | Installs to `C:\Program Files\Xplor`, adds a Start-menu shortcut |
+| Windows  | `xplor-<version>-windows-portable.zip` | No install: unzip and run `xplor.exe` anywhere |
+| Linux    | `xplor-<version>-x86_64.AppImage` | `chmod +x` then run it |
 
-The MSI is a normal installer with a Start-menu shortcut. The AppImage is
-self-contained:
-
-```sh
-chmod +x xplor-*.AppImage
-./xplor-*.AppImage
-```
+Neither build needs a runtime, and the portable one needs no installer at all.
+Settings persist in `%LOCALAPPDATA%\xplor\prefs.txt`; delete that file to go
+back to defaults.
 
 ## Build from source
 
@@ -57,13 +55,37 @@ Needs a Rust toolchain (1.85 or newer).
 ```sh
 git clone https://github.com/you/xplor
 cd xplor
-cargo build --release      # target/release/xplor
-cargo test                 # 111 unit tests
-cargo clippy --all-targets # lints
+cargo build --release       # target/release/xplor
+cargo test                  # 114 unit tests
+cargo clippy --all-targets  # lints
 ```
 
 The release profile is tuned for size and speed: `opt-level=3`, thin LTO, one
 codegen unit, `panic=abort` and stripped symbols, which lands around 15 MB.
+
+### The MSI
+
+`tools/build_msi.sh` compiles `wix/main.wxs` with candle and light, taking the
+version straight from `Cargo.toml`. It needs the WiX Toolset v3 on `PATH`; the
+[binaries zip](https://github.com/wixtoolset/wix3/releases) is enough and needs
+no administrator rights.
+
+```sh
+cargo build --release
+tools/build_msi.sh          # dist/xplor-<version>-x64.msi
+```
+
+### The AppImage
+
+`tools/make_appdir.sh` lays out the `AppDir` — binary, `.desktop` file, icon
+and a wrapper that keeps XDG paths writable on a read-only mount — and
+`appimagetool` turns that into the final image.
+
+```sh
+cargo build --release
+tools/make_appdir.sh        # target/xplor.AppDir
+```
+
 
 ## Keyboard
 

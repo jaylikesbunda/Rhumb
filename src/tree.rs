@@ -281,3 +281,73 @@ mod tests {
         assert_eq!(rows[2].label, "2026");
     }
 }
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    /// The sidebar paints exactly the rows the tree hands it, in order. A
+    /// regression here is invisible in the tree itself and very visible on
+    /// screen: a folder's children appear at the bottom of the list instead of
+    /// under their parent.
+    #[test]
+    fn a_child_comes_immediately_after_its_parent() {
+        let mut tree = Tree::default();
+        tree.set_roots(&[PathBuf::from("/home"), PathBuf::from("/media")]);
+        tree.expand_root(Path::new("/home"));
+        tree.set_children(
+            Path::new("/home"),
+            vec![PathBuf::from("/home/docs"), PathBuf::from("/home/pics")],
+        );
+        let order: Vec<(PathBuf, bool)> = tree
+            .rows()
+            .iter()
+            .map(|r| (r.path.clone(), r.is_root))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (PathBuf::from("/home"), true),
+                (PathBuf::from("/home/docs"), false),
+                (PathBuf::from("/home/pics"), false),
+                (PathBuf::from("/media"), true),
+            ],
+            "roots and descendants must be interleaved in tree order"
+        );
+    }
+
+    #[test]
+    fn roots_come_back_when_a_folder_is_collapsed() {
+        let mut tree = Tree::default();
+        tree.set_roots(&[PathBuf::from("/home"), PathBuf::from("/media")]);
+        tree.expand_root(Path::new("/media"));
+        tree.set_children(Path::new("/media"), vec![PathBuf::from("/media/x")]);
+        assert_eq!(tree.rows().len(), 3);
+        tree.collapse_root(Path::new("/media"));
+        assert_eq!(tree.rows().len(), 2);
+        assert!(tree.rows().iter().all(|r| r.is_root));
+    }
+
+    #[test]
+    fn nested_folders_unwind_in_the_right_order() {
+        let mut tree = Tree::default();
+        tree.set_roots(&[PathBuf::from("/a"), PathBuf::from("/b")]);
+        tree.expand_root(Path::new("/a"));
+        tree.set_children(Path::new("/a"), vec![PathBuf::from("/a/x")]);
+        tree.expand_root(Path::new("/a/x"));
+        tree.set_children(Path::new("/a/x"), vec![PathBuf::from("/a/x/deep")]);
+        let paths: Vec<&Path> = tree.rows().iter().map(|r| r.path.as_path()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                Path::new("/a"),
+                Path::new("/a/x"),
+                Path::new("/a/x/deep"),
+                Path::new("/b"),
+            ]
+        );
+        // Depths line up with how deeply nested each one is.
+        let depths: Vec<usize> = tree.rows().iter().map(|r| r.depth).collect();
+        assert_eq!(depths, vec![0, 1, 2, 0]);
+    }
+}

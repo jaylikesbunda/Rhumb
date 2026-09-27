@@ -1,1 +1,4 @@
 /target
+
+# Build output: run tools/build_msi.sh or tools/make_appdir.sh to fill this in
+/dist

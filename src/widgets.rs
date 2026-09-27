@@ -40,6 +40,13 @@ pub enum Icon {
 impl Icon {
     /// Draws the icon centred in `rect`.
     pub fn paint(self, p: &Painter, rect: Rect, color: Color32) {
+        self.paint_with(p, rect, color, false)
+    }
+
+    /// Draws the icon, with `open` telling the chevron which way to point.
+    ///
+    /// Only the chevron cares; every other icon draws the same either way.
+    pub fn paint_with(self, p: &Painter, rect: Rect, color: Color32, open: bool) {
         let s = sp::ICON.min(rect.height()).min(rect.width());
         let r = Rect::from_center_size(rect.center(), Vec2::splat(s));
         let stroke = Stroke::new(1.3, color);
@@ -81,21 +88,24 @@ impl Icon {
                 );
             }
             Icon::Chevron => {
+                // The glyph points right when closed and turns to point down
+                // when the folder is open, which is what makes the tree read.
                 let h = s * 0.26;
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - h * 0.6, ctr.y - h),
-                        Pos2::new(ctr.x + h * 0.6, ctr.y),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x + h * 0.6, ctr.y),
-                        Pos2::new(ctr.x - h * 0.6, ctr.y + h),
-                    ],
-                    stroke,
-                );
+                let a = Pos2::new(ctr.x - h * 0.6, ctr.y - h);
+                let b = Pos2::new(ctr.x + h * 0.6, ctr.y);
+                let c = Pos2::new(ctr.x - h * 0.6, ctr.y + h);
+                let (a, b, c) = if open {
+                    // A quarter turn clockwise about the centre.
+                    let turn = |p: Pos2| {
+                        let d = p - ctr;
+                        Pos2::new(ctr.x - d.y, ctr.y + d.x)
+                    };
+                    (turn(a), turn(b), turn(c))
+                } else {
+                    (a, b, c)
+                };
+                p.line_segment([a, b], stroke);
+                p.line_segment([b, c], stroke);
             }
             Icon::Folder => {
                 // A folder outline: left edge, tab, top edge, right edge, base.

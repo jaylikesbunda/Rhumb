@@ -1331,30 +1331,34 @@ impl Xplor {
         let paths: Vec<PathBuf> = roots.iter().map(|(_, p, _)| p.clone()).collect();
         self.sidebar_tree.tree.set_roots(&paths);
 
-        // Roots first, then every visible descendant, in tree order.
-        let mut lines: Vec<(String, PathBuf, usize, bool, bool)> = roots
+        // The tree already holds the rows in the right order, roots and
+        // descendants interleaved. Walk it in that order and only swap in the
+        // friendly label and device flag for the root rows - appending the
+        // descendants afterwards would pile every folder's children up at the
+        // bottom of the list instead of under their parent.
+        let friendly: std::collections::HashMap<&Path, (&str, bool)> = roots
             .iter()
-            .map(|(label, path, device)| {
-                (
-                    label.clone(),
-                    path.clone(),
-                    0usize,
-                    self.sidebar_tree.tree.is_expanded(path),
-                    *device,
-                )
-            })
+            .map(|(label, path, device)| (path.as_path(), (label.as_str(), *device)))
             .collect();
+        let mut lines: Vec<(String, PathBuf, usize, bool, bool)> = Vec::new();
         for row in self.sidebar_tree.tree.rows() {
-            if row.is_root {
-                continue;
+            if let Some((label, device)) = friendly.get(row.path.as_path()) {
+                lines.push((
+                    (*label).to_owned(),
+                    row.path.clone(),
+                    0,
+                    row.expanded,
+                    *device,
+                ));
+            } else {
+                lines.push((
+                    row.label.clone(),
+                    row.path.clone(),
+                    row.depth,
+                    row.expanded,
+                    false,
+                ));
             }
-            lines.push((
-                row.label.clone(),
-                row.path.clone(),
-                row.depth,
-                row.expanded,
-                false,
-            ));
         }
 
         for (label, path, depth, expanded, is_device) in lines {
@@ -1447,10 +1451,11 @@ impl Xplor {
             if loading {
                 Icon::Sort.paint(painter, chevron, c::TEXT_GHOST);
             } else if !is_device {
-                Icon::Chevron.paint(
+                Icon::Chevron.paint_with(
                     painter,
                     chevron,
                     if expanded { c::TEXT_DIM } else { c::TEXT_GHOST },
+                    expanded,
                 );
             }
 
