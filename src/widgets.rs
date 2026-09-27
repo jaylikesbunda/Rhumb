@@ -1221,11 +1221,24 @@ mod tests {
         assert!(l.icon.left() < l.name.x);
         assert!(l.name.x < l.size.x);
         assert!(l.size.x < l.date.x);
-        // The date column is inset by the standard right padding, and the size
+        // The date column ends with air before the next panel, and the size
         // column sits to its left with a gap.
-        assert!((rect.right() - l.date.x - sp::SM).abs() < 0.01);
+        assert!((rect.right() - l.date.x - sp::SM - sp::XS).abs() < 0.01);
         assert!(l.date.x - l.size.x > col::DATE * 0.5);
         // The name has room to draw without colliding with the size column.
+        assert!(l.name_limit() > l.name.x + 40.0);
+    }
+
+    #[test]
+    fn a_columnless_layout_still_places_icon_and_name() {
+        // List view builds its layout from the cell with both columns
+        // dropped. Zero widths must not collapse the icon and name to the
+        // panel edge: that painted every row on top of the border.
+        let rect = Rect::from_min_size(Pos2::new(12.0, 200.0), vec2(500.0, sp::ROW));
+        let l = RowLayout::new(rect, 0.0, 0.0);
+        assert!(!l.shows_size() && !l.shows_date());
+        assert!(l.icon.left() > rect.left(), "icon at the panel edge");
+        assert!(l.name.x > l.icon.right(), "name left of the icon");
         assert!(l.name_limit() > l.name.x + 40.0);
     }
 

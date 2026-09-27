@@ -4,6 +4,7 @@
 #![warn(clippy::all)]
 
 mod app;
+mod clip;
 mod editing;
 mod editor;
 mod fs_model;

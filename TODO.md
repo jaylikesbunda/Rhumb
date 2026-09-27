@@ -4,9 +4,9 @@ Backlog, roughly in priority order. Items are unchecked until done.
 
 ## Now — small, high value, no COM
 
-- [ ] Clipboard CF_HDROP — read + write. Fixes all three cross-app paste
+- [x] Clipboard CF_HDROP — read + write. Fixes all three cross-app paste
       failures. ~80 lines.
-- [ ] Fix the ▼ tofu glyph on the New button.
+- [x] Fix the ▼ tofu glyph on the New button.
 - [ ] Refresh button in the toolbar (F5 already works).
 - [ ] Registry shell verbs — Directory\Background, Drive, Folder\Open\command.
       ~40 lines, opt-in + uninstaller.

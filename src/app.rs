@@ -1446,7 +1446,10 @@ impl Xplor {
     /// The "New" menu: folder, text document, or a compressed copy of the
     /// selection, which is what Explorer's own menu offers.
     fn new_button(&mut self, ui: &mut Ui) {
-        let resp = widgets::flat_button(ui, "New \u{25BE}", "Create something (Alt+F)");
+        // U+25BC, not U+25BE: Inter has no small triangle and neither does
+        // egui's fallback, so the latter renders as a tofu box. Pinned by
+        // `every_ui_symbol_is_in_the_font`.
+        let resp = widgets::flat_button(ui, "New \u{25BC}", "Create something (Alt+F)");
         // Alt+F asks for the menu, so it is opened by id rather than by click.
         let id = resp.id.with("menu");
         if std::mem::take(&mut self.new_menu) {
@@ -4817,6 +4820,9 @@ impl Xplor {
                 .join("\n");
             let _ = cb.set_text(text);
         }
+        // Explorer cannot read the text above, so offer CF_HDROP too. Cut or
+        // copied travels in "Preferred DropEffect".
+        crate::clip::write_hdrop(&paths, cut);
         let n = paths.len();
         self.clip = Some(Clipboard { paths, cut });
         self.toast(format!(
@@ -4826,15 +4832,19 @@ impl Xplor {
     }
 
     fn paste(&mut self) {
-        let sources: Vec<PathBuf> = match self.clip.clone() {
-            Some(clip) if clip.paths.iter().any(|p| p.exists()) => clip.paths,
-            _ => self.system_paths(),
+        // Our own copy wins; otherwise take Explorer's files (CF_HDROP) or,
+        // failing that, lines of text that name files.
+        let (sources, cut): (Vec<PathBuf>, bool) = match self.clip.clone() {
+            Some(clip) if clip.paths.iter().any(|p| p.exists()) => (clip.paths, clip.cut),
+            _ => match crate::clip::read_hdrop() {
+                Some(hdrop) => (hdrop.paths, hdrop.cut),
+                None => (self.system_paths(), false),
+            },
         };
         if sources.is_empty() {
             self.toast("Clipboard holds no files".into());
             return;
         }
-        let cut = self.clip.as_ref().is_some_and(|c| c.cut);
         self.start_transfer(sources, self.cwd.clone(), cut);
         if cut {
             self.clip = None;

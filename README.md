@@ -1,136 +1,133 @@
 # Xplor
 
-A minimal, fast, dark file explorer with a built-in text editor and a live
-Markdown preview. Native Rust and [egui](https://github.com/emilk/egui), one
-binary, no runtime to install.
+A dark file explorer with a built-in text and Markdown editor. Native Rust and
+[egui](https://github.com/emilk/egui) — one binary, nothing to install.
 
-<p align="center">
-  <img src="assets/icon.png" width="96" alt="Xplor icon">
-</p>
+![Xplor](assets/screenshot.png)
 
 ## What it does
 
-- **Browse** with a lazy, Explorer-style tree in the sidebar, an address bar of
-  clickable path segments, and a sortable list. Folders load their subfolders on
-  a worker thread, only when expanded.
-- **Tabs**, like Windows 11 Explorer: `Ctrl+T` opens a new tab on the file
-  list, opening a file turns that tab into the document, and `Ctrl+Tab` moves
-  between them. Unsaved tabs show a dot and ask before closing.
-- **Three views** — details with sortable, drag-to-resize columns, a compact
-  list, and large icons with real image thumbnails. `Ctrl+1`, `Ctrl+2`,
-  `Ctrl+3`, or the switch in the bottom-right corner. Columns give way to the
-  name in a narrow pane, and come back when there is room.
-- **Search as you type**, in this folder or in everything below it, with the
-  search cancellable and never blocking the window.
-- **Edit text and code** with syntax highlighting, bracket matching, auto-close,
-  comment toggling and soft wrap.
-- **Preview Markdown** side by side with the source: headings, lists, task
-  lists, tables, quotes, code blocks, links, inline code and images.
-- **A details pane** with the file's facts and a preview of its contents: the
-  thumbnail for an image, the first lines for a text file.
-- **File operations** with real progress and a cancel button: copy, cut, paste,
-  rename, delete to the recycle bin or permanently, compress to ZIP, copy a
-  path, open in a terminal, and undo with `Ctrl+Z`.
-- **Drag and drop**, both files from the desktop and rows onto folders, to move
-  or (with `Ctrl`) copy.
+- Lazy Explorer-style tree, clickable path segments, sortable drag-to-resize
+  columns
+- Tabs, like Windows 11 Explorer
+- Three views: details, compact list, large icons with image thumbnails
+- Search as you type, in this folder or everything below it, cancellable and
+  never blocking the window
+- Text and code editing: syntax highlighting, bracket matching, auto-close,
+  comment toggling, soft wrap
+- Live Markdown preview beside the source
+- Details pane: image thumbnail, or the first lines of a text file
+- Properties, including a background size count for folders
+- Copy, cut, paste, rename, trash, permanent delete, ZIP, copy path, open in
+  terminal, undo
+- Drag and drop, to move or (`Ctrl`) copy
+
+Copy and paste speak the same clipboard formats as Explorer, so files move
+between Xplor and any other program in both directions.
+
+Folders are read, searched and copied on worker threads, and only the rows
+intersecting the viewport are built. The status bar reports the measured cost of
+each update, so you can check that claim yourself.
+
+## Why not just use Explorer
+
+One binary, about 15 MB, no runtime, no installer required, no ads, no sync nag,
+no tips, no telemetry. It starts instantly and holds a folder with tens of
+thousands of entries without breaking a sweat.
+
+And it has something Explorer does not have at all: opening a `.md` file puts
+the source and a rendered preview in the same tab, with the editor already
+there. Opening a `.rs` or `.py` file gives you a real editor instead of
+Notepad. Explorer has no answer to any of that.
+
+## Measured
+
+One machine, one method, stated so you can check it. Not a benchmark suite.
+
+| | Xplor | explorer.exe |
+|:--|--:|--:|
+| On disk | 14.7 MB | 3.3 MB (system component) |
+| Cold start to first window | _unmeasured_ | _unmeasured_ |
+| Idle CPU, one folder open | _unmeasured_ | _unmeasured_ |
+| Memory, one folder open | _unmeasured_ | _unmeasured_ |
+| Open a folder of ~20,000 files | _unmeasured_ | _unmeasured_ |
+| Runtime to install | none | — |
+
+The blank cells are deliberate. Run `tools/measure.ps1` from a fresh login with
+nothing else open, and read the folder-open figure off Xplor's own status bar,
+median of five. An earlier run on a busy machine — a browser playing video, a
+dozen tabs — put Explorer at 10.6% CPU and 341 MB, but that was media decode and
+thumbnail work for the browser's windows, not Explorer browsing files. Those
+numbers are not in the table because they would not survive a second look.
+
+Two things worth knowing about the comparison when you fill it in.
+`explorer.exe` is one shared process for the whole desktop: it draws the
+desktop and the taskbar and hosts every registered shell extension, so part of
+its memory is work Xplor does not do and does not need to. The comparison is
+fair for browsing files; it is not a claim that Explorer does less work. And
+Xplor's numbers are reproducible by you, because the status bar prints the cost
+of every update as it happens.
+
+## Not wired up yet
+
+Everything above works on its own. These are the edges where Xplor doesn't yet
+reach the rest of Windows:
+
+- **No shell registration.** Xplor is not yet the handler for folders, drives,
+  or the desktop right-click, so double-clicking a folder elsewhere on the
+  system still opens Explorer.
+- **No extraction.** It writes ZIPs; it does not unpack ZIP, 7z, RAR or tar.
+- **Thumbnails cover PNG, JPEG, GIF, BMP and WebP.** Everything else falls back
+  to a generic icon.
+- **The Recycle Bin cannot be browsed.** Items can be sent to it, but there is
+  no view to restore from.
+- **Paths over 260 characters are not handled yet.**
 
 ## Install
 
-Grab a build from the releases page, or build one yourself (see below).
+Take a build from the releases page, or compile it yourself.
 
-| Platform | File | Notes |
-|:---------|:-----|:------|
-| Windows  | `xplor-<version>-x64.msi` | Installs to `C:\Program Files\Xplor`, adds a Start-menu shortcut |
-| Windows  | `xplor-<version>-windows-portable.zip` | No install: unzip and run `xplor.exe` anywhere |
-| Linux    | `xplor-<version>-x86_64.AppImage` | `chmod +x` then run it |
+| Platform | File |
+|:---------|:-----|
+| Windows  | `xplor-<version>-x64.msi` |
+| Windows  | `xplor-<version>-windows-portable.zip` |
+| Linux    | `xplor-<version>-x86_64.AppImage` — `chmod +x`, then run |
 
-Neither build needs a runtime, and the portable one needs no installer at all.
-Settings persist in `%LOCALAPPDATA%\xplor\prefs.txt`; delete that file to go
-back to defaults.
+Settings persist in `%LOCALAPPDATA%\xplor\prefs.txt`. Delete it to reset.
 
-## Build from source
+## Build
 
-Needs a Rust toolchain (1.85 or newer).
+Needs Rust 1.85 or newer.
 
-```sh
-git clone https://github.com/you/xplor
-cd xplor
-cargo build --release       # target/release/xplor
-cargo test                  # 114 unit tests
-cargo clippy --all-targets  # lints
-```
+    cargo build --release        # target/release/xplor, about 15 MB
+    cargo test
+    cargo clippy --all-targets
 
-The release profile is tuned for size and speed: `opt-level=3`, thin LTO, one
-codegen unit, `panic=abort` and stripped symbols, which lands around 15 MB.
+`tools/build_msi.sh` and `tools/make_appdir.sh` produce the installer and the
+AppImage. Both need extra tooling on `PATH` (WiX v3, `appimagetool`).
 
-### The MSI
+`tools/measure.ps1` fills in the table above.
 
-`tools/build_msi.sh` compiles `wix/main.wxs` with candle and light, taking the
-version straight from `Cargo.toml`. It needs the WiX Toolset v3 on `PATH`; the
-[binaries zip](https://github.com/wixtoolset/wix3/releases) is enough and needs
-no administrator rights.
-
-```sh
-cargo build --release
-tools/build_msi.sh          # dist/xplor-<version>-x64.msi
-```
-
-### The AppImage
-
-`tools/make_appdir.sh` lays out the `AppDir` — binary, `.desktop` file, icon
-and a wrapper that keeps XDG paths writable on a read-only mount — and
-`appimagetool` turns that into the final image.
-
-```sh
-cargo build --release
-tools/make_appdir.sh        # target/xplor.AppDir
-```
-
-
-## Keyboard
+## Keys
 
 | Shortcut | Action |
 |:---------|:-------|
 | `Ctrl+1` / `2` / `3` | Details / list / large-icon view |
 | `Ctrl+Shift+V` | Cycle the view |
-| `Ctrl+B` | Toggle the sidebar |
-| `Alt+P` | Toggle the details pane |
+| `Ctrl+B`, `Alt+P` | Toggle sidebar / details pane |
 | `Alt+Left` / `Right` / `Up` | Back, forward, up one folder |
-| `Ctrl+L` | Type a path |
-| `Ctrl+F` | Focus the search box |
+| `Ctrl+L`, `Ctrl+F` | Type a path / focus search |
 | `Ctrl+H` | Show hidden items |
 | `Ctrl+N` / `Ctrl+Shift+N` | New text document / folder |
-| `Ctrl+T` | New tab showing files |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, `Ctrl+V` | Selection and clipboard |
-| `F2` | Rename |
-| `Delete` / `Shift+Delete` | Trash / delete permanently |
+| `Ctrl+T`, `Ctrl+Tab` | Next / new tab |
+| `Ctrl+A`, `C`, `X`, `V` | Selection and clipboard |
+| `F2`, `Delete`, `Shift+Delete` | Rename, trash, delete permanently |
 | `Ctrl+Z` | Undo the last file operation |
 | `Alt+Enter` | Properties |
 | `Ctrl+S`, `Ctrl+W` | Save, close the tab |
-| `Tab` / `Shift+Tab` | Indent or outdent |
-| `Ctrl+/` | Toggle a line comment |
+| `Tab` / `Shift+Tab`, `Ctrl+/` | Indent, toggle line comment |
 | `F5` | Reload the folder |
 | `/` or `?` | Shortcut help |
-
-## How it stays fast
-
-- Folders are read, searched, copied and decoded on worker threads; the window
-  never waits on the disk.
-- Row text is shaped once and cached, so scrolling a folder with tens of
-  thousands of entries repaints without re-laying-out any text.
-- The Markdown preview parses to a block tree and shapes each block once; typing
-  debounces the re-render by 120 ms, so the editor never waits on the preview.
-- Only the rows that intersect the viewport are built, in all three views.
-- The status bar shows the real cost of each update, so the claim is checkable.
-
-## Design
-
-The interface is monochrome by construction: every colour in the palette has
-identical red, green and blue channels, and a unit test fails the build if that
-ever stops being true. The only exception is the tint on destructive actions.
-Spacing comes from one scale, so panels, rows, dialogs and the status bar all
-share the same rhythm.
 
 ## Licence
 

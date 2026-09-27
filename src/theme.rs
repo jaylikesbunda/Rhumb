@@ -351,6 +351,45 @@ mod tests {
     }
 
     #[test]
+    fn every_ui_symbol_is_in_the_font() {
+        // A symbol no font in the chain covers renders as a tofu box, and it
+        // looks fine in code review. Only glyphs the UI actually uses belong
+        // below: the New button once used U+25BE, which neither Inter nor the
+        // fallback covers, and now uses U+25BC. This walks the real family
+        // chain, so a glyph that renders is proven to render.
+        const SYMBOLS: &[(&str, char)] = &[
+            ("disclosure triangle", '\u{25BC}'),
+            ("sort ascending", '\u{2191}'),
+            ("sort descending", '\u{2193}'),
+            ("symlink arrow", '\u{2192}'),
+            ("filter on", '\u{25CF}'),
+            ("filter off", '\u{25CB}'),
+            ("ellipsis", '\u{2026}'),
+            ("em dash", '\u{2014}'),
+        ];
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts());
+        // egui builds its font set lazily on the first run, and `fonts_mut`
+        // panics before that, so give it one empty frame first. The glyph
+        // lookups then allocate atlas textures, which have to be cleared
+        // before the context drops or epaint complains about them.
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let id = ui_font(fs::BODY);
+        let missing: Vec<&str> = SYMBOLS
+            .iter()
+            .filter(|(_, ch)| !ctx.fonts_mut(|f| f.has_glyph(&id, *ch)))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "no font in the chain covers: {}",
+            missing.join(", ")
+        );
+    }
+
+    #[test]
     fn palette_is_exactly_monochrome() {
         // Every palette entry has identical channels. Anything with a cast
         // belongs in the one `DANGER` exception, not here.
