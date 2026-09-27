@@ -527,9 +527,16 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// True when the file looks like text we can safely show in the editor.
+/// Whether these bytes are probably not text.
+///
+/// A NUL byte in the first few KB is the usual giveaway. The exception is
+/// a UTF-16 byte-order mark: that is text, and every second byte in it is
+/// NUL, so without this a UTF-16 file reads as binary and loses the editor.
 pub fn is_probably_binary(bytes: &[u8]) -> bool {
     let probe = &bytes[..bytes.len().min(8192)];
+    if probe.starts_with(&[0xFF, 0xFE]) || probe.starts_with(&[0xFE, 0xFF]) {
+        return false;
+    }
     probe.contains(&0)
 }
 
@@ -648,6 +655,27 @@ pub fn is_editable_text(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16_text_is_not_mistaken_for_binary() {
+        // "hi" as UTF-16 LE with a BOM: every second byte is NUL, so a plain
+        // NUL sniff would refuse the editor to a text file.
+        let utf16 = [0xFF, 0xFE, b'h', 0, b'i', 0, 0, 0];
+        assert!(!is_probably_binary(&utf16));
+        let utf16_be = [0xFE, 0xFF, 0, b'h', 0, b'i'];
+        assert!(!is_probably_binary(&utf16_be));
+    }
+
+    #[test]
+    fn nul_bytes_mean_binary() {
+        assert!(is_probably_binary(b"MZ\x90\0\0\0"));
+        assert!(!is_probably_binary(b"plain ascii"));
+        assert!(!is_probably_binary("héllo, wörld".as_bytes()));
+        // A NUL past the probe window is not enough to call it binary.
+        let mut late = vec![b'a'; 9000];
+        late[8500] = 0;
+        assert!(!is_probably_binary(&late));
+    }
 
     #[test]
     fn natural_sort_orders_numbers_numerically() {

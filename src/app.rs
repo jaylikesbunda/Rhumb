@@ -301,6 +301,17 @@ fn panel_header(
     }
 }
 
+/// Whether a queued search request is old enough to start.
+///
+/// `None` means nothing is queued. That is the case on almost every frame,
+/// because the search is pumped from the frame loop rather than from the
+/// keystroke, and a gate that only rejected *young* requests restarted the
+/// walk every frame — clearing the results as fast as the worker delivered
+/// them, so the list read "Searching" and never showed a hit.
+fn search_due(typed: Option<Instant>, debounce: Duration) -> bool {
+    typed.is_some_and(|t| t.elapsed() >= debounce)
+}
+
 /// Narrowest the editor or the preview may be squeezed to.
 const SPLIT_MIN_PANE: f32 = 160.0;
 
@@ -2428,7 +2439,9 @@ impl Xplor {
     fn context_menu(&mut self, ui: &mut Ui, path: &Path) {
         let path = path.to_path_buf();
         let is_dir = path.is_dir();
-        let editable = !is_dir && fs_model::is_editable_text(&path);
+        // Every file can be opened in the editor now, so this is only used to
+        // decide whether the item reads as text.
+        let editable = !is_dir;
         let pinned = self.is_pinned(&path);
         let mut action: Option<CtxAction> = None;
 
@@ -4373,25 +4386,36 @@ impl Xplor {
                     self.watch(&cwd);
                 }
                 Msg::Loaded {
-                    path, text, error, ..
+                    path, doc, error, ..
                 } => {
                     if self.loading.as_deref() != Some(path.as_path()) {
                         continue;
                     }
                     self.loading = None;
-                    match error {
-                        Some(e) => self.toast_err(e),
-                        None => {
-                            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                            let doc = Doc::from_parts(
-                                path.clone(),
-                                text,
-                                editor::doc_kind(&path),
-                                mtime,
-                                false,
-                            );
+                    match (error, doc) {
+                        (Some(e), _) => self.toast_err(e),
+                        (None, Some(doc)) => {
+                            // Opening is never refused, so say why the buffer
+                            // is not editable when the file was not text.
+                            if doc.looks_binary {
+                                self.toast(format!(
+                                    "{} does not look like text; opened read-only",
+                                    doc.path.file_name().map_or_else(
+                                        || doc.path.to_string_lossy().into_owned(),
+                                        |n| n.to_string_lossy().into_owned(),
+                                    )
+                                ));
+                            } else if doc.too_large {
+                                self.toast(format!(
+                                    "{} is too large to edit here",
+                                    doc.path.file_name().map_or_else(
+                                        || doc.path.to_string_lossy().into_owned(),
+                                        |n| n.to_string_lossy().into_owned(),
+                                    )
+                                ));
+                            }
                             // The tab was created when the read started, so the
-                            // text goes into the tab that is already on screen.
+                            // document goes into the tab already on screen.
                             match self.tab_index(&path) {
                                 Some(i) => {
                                     self.tabs.focus(i);
@@ -4412,6 +4436,7 @@ impl Xplor {
                             self.render_version = 1;
                             self.preview.reset();
                         }
+                        (None, None) => {}
                     }
                 }
                 Msg::Progress(p) => {
@@ -4545,9 +4570,12 @@ impl Xplor {
         if self.scope != SearchScope::Below || self.filter.trim().is_empty() {
             return;
         }
-        if let Some(typed) = self.search_typed
-            && typed.elapsed() < SEARCH_DEBOUNCE
-        {
+        // Nothing queued is the common case, and this runs every frame. A
+        // gate that only rejected *young* requests fell through to `start` here
+        // and restarted the walk on every frame, clearing the results the
+        // previous walk was still delivering — so the list showed "Searching"
+        // and never showed a single hit.
+        if !search_due(self.search_typed, SEARCH_DEBOUNCE) {
             return;
         }
         self.search_typed = None;
@@ -4743,13 +4771,10 @@ impl Xplor {
             self.focus_tab(i);
             return;
         }
-        // Not something we can read: hand it to the desktop and add no tab.
-        if !fs_model::is_editable_text(path) {
-            if let Err(e) = editor::open_externally(path) {
-                self.toast_err(e);
-            }
-            return;
-        }
+        // Any file opens. The extension is not a gate: a `.xyz` config is text
+        // more often than not, and a file that turns out not to be text comes
+        // back from the reader read-only with a warning rather than being
+        // refused. Anything too large to hold is handled the same way.
 
         // A folder tab becomes the document, so one tab never shows two things.
         let on_folder_tab = self
@@ -4779,12 +4804,8 @@ impl Xplor {
         let _ = std::thread::Builder::new()
             .name("xplor-read".into())
             .spawn(move || {
-                let result = Doc::read(&read_path);
-                let _ = tx.send(Msg::Loaded {
-                    path: result.0,
-                    text: result.1,
-                    error: result.2,
-                });
+                let (path, doc, error) = Doc::read(&read_path);
+                let _ = tx.send(Msg::Loaded { path, doc, error });
             });
         if let Some(dir) = watch_dir {
             self.watch(&dir);
@@ -5848,6 +5869,20 @@ mod tests {
     }
 
     /// A frame of input for a mouse button at `at`.
+    #[test]
+    fn a_search_only_starts_when_one_is_queued_and_due() {
+        // Nothing queued: this runs every frame, and starting anyway would
+        // restart the walk and wipe the results as they arrive.
+        assert!(!search_due(None, SEARCH_DEBOUNCE));
+        // Queued but still inside the pause: wait, so typing does not thrash.
+        assert!(!search_due(Some(Instant::now()), SEARCH_DEBOUNCE));
+        // Queued and settled: go.
+        assert!(search_due(
+            Some(Instant::now() - SEARCH_DEBOUNCE - Duration::from_millis(20)),
+            SEARCH_DEBOUNCE
+        ));
+    }
+
     #[test]
     fn pins_keep_the_order_they_were_added_in() {
         let mut p = Pins::default();

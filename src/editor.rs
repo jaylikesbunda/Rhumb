@@ -32,6 +32,10 @@ pub struct Doc {
     pub externally_changed: bool,
     /// Reload suggestion, i.e. the file is bigger than we want to edit.
     pub too_large: bool,
+    /// The bytes did not look like text. The file is still shown, decoded
+    /// lossily, but it opens read-only so nobody can write mangled bytes over
+    /// a real file. The app warns when this is set.
+    pub looks_binary: bool,
     pub read_only: bool,
 }
 
@@ -52,13 +56,15 @@ impl Doc {
                 saved_mtime: md.modified().ok(),
                 externally_changed: false,
                 too_large: true,
+                looks_binary: false,
                 read_only: false,
             });
         }
         let bytes = fs::read(path).map_err(|e| format!("{}: {e}", display(path)))?;
-        if fs_model::is_probably_binary(&bytes) {
-            return Err(format!("{} looks like a binary file", display(path)));
-        }
+        // Anything opens. A file that does not look like text is shown anyway,
+        // decoded lossily, but read-only: writing lossy-decoded bytes back over
+        // a real file would destroy it silently.
+        let looks_binary = fs_model::is_probably_binary(&bytes);
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let hash = hash(&text);
         Ok(Doc {
@@ -70,15 +76,21 @@ impl Doc {
             saved_mtime: md.modified().ok(),
             externally_changed: false,
             too_large: false,
-            read_only: is_read_only(path, &md),
+            looks_binary,
+            read_only: looks_binary || is_read_only(path, &md),
         })
     }
 
-    /// Worker-thread read: `(path, text, error)` for the message bus.
-    pub fn read(path: &Path) -> (PathBuf, String, Option<String>) {
+    /// Worker-thread read, for the message bus.
+    ///
+    /// The whole `Doc` travels, not just its text. Flattening it to a string
+    /// dropped `read_only` and `too_large` on the floor, and the app rebuilt
+    /// the document as editable — so a large file arrived as an *empty editable
+    /// buffer*, and saving it overwrote the file with nothing.
+    pub fn read(path: &Path) -> (PathBuf, Option<Doc>, Option<String>) {
         match Doc::open(path) {
-            Ok(doc) => (doc.path, doc.text, None),
-            Err(e) => (path.to_path_buf(), String::new(), Some(e)),
+            Ok(doc) => (doc.path.clone(), Some(doc), None),
+            Err(e) => (path.to_path_buf(), None, Some(e)),
         }
     }
 
@@ -108,6 +120,7 @@ impl Doc {
             saved_mtime,
             externally_changed: false,
             too_large: false,
+            looks_binary: false,
             read_only,
         }
     }
@@ -327,12 +340,60 @@ mod tests {
     }
 
     #[test]
-    fn binary_files_are_refused() {
+    fn a_binary_file_opens_read_only_instead_of_being_refused() {
         let dir = std::env::temp_dir().join("xplor-doc-bin");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("a.bin");
         fs::write(&path, [0u8, 1, 2, 3]).unwrap();
-        assert!(Doc::open(&path).is_err());
+        let mut doc = Doc::open(&path).expect("any file should open");
+        assert!(doc.looks_binary, "the warning flag was not set");
+        // The point of opening it at all: you can look at it, but not save
+        // lossy decoding over the original.
+        assert!(doc.read_only, "a binary file must not be writable");
+        let before = fs::read(&path).unwrap();
+        assert!(doc.save().is_err(), "saving a binary file was allowed");
+        assert_eq!(fs::read(&path).unwrap(), before, "the file was changed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_large_file_cannot_be_saved_over_with_an_empty_buffer() {
+        let dir = std::env::temp_dir().join("xplor-doc-large");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("big.log");
+        // One byte over the cap, so the size guard is what decides.
+        let big = vec![b'x'; crate::fs_model::MAX_EDIT_BYTES as usize + 1];
+        fs::write(&path, &big).unwrap();
+        let mut doc = Doc::open(&path).expect("a large file should still open");
+        assert!(doc.too_large);
+        assert!(
+            doc.text.is_empty(),
+            "a huge file should not be loaded into memory"
+        );
+        // This is the data-loss case: an empty buffer that must never be
+        // written back over the real file.
+        assert!(doc.save().is_err(), "saving a too-large file was allowed");
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            big.len() as u64,
+            "the file was clobbered"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_worker_read_carries_the_flags_the_app_needs() {
+        // `read` used to flatten the document to a string, which silently
+        // dropped `read_only` and `too_large`; the app then rebuilt it as an
+        // editable buffer.
+        let dir = std::env::temp_dir().join("xplor-doc-read");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("a.bin");
+        fs::write(&path, [0u8, 1, 2, 3]).unwrap();
+        let (_p, doc, err) = Doc::read(&path);
+        assert!(err.is_none());
+        let doc = doc.expect("the document should travel whole");
+        assert!(doc.looks_binary && doc.read_only, "flags lost in transit");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -21,7 +21,8 @@ pub enum Msg {
     /// A file finished loading into the editor.
     Loaded {
         path: PathBuf,
-        text: String,
+        /// The document as the reader produced it, flags and all.
+        doc: Option<crate::editor::Doc>,
         error: Option<String>,
     },
     /// A filesystem watch event fired somewhere.
