@@ -713,6 +713,10 @@ pub struct Xplor {
     tabs: Tabs,
     loading: Option<PathBuf>,
     preview: Preview,
+    /// The document text last handed to the preview, so an idle frame does not
+    /// copy the whole buffer again.
+    preview_buffer: String,
+    preview_buffer_version: u64,
     render_version: u64,
     last_edit: Option<Instant>,
     wrap: bool,
@@ -827,6 +831,9 @@ impl Xplor {
             tabs: Tabs::default(),
             loading: None,
             preview: Preview::new(),
+            preview_buffer: String::new(),
+            // Nothing has been synced yet, so the first frame must copy.
+            preview_buffer_version: u64::MAX,
             render_version: 0,
             last_edit: None,
             wrap: false,
@@ -2993,9 +3000,11 @@ impl Xplor {
 
     /// The code editor.
     fn editor_ui(&mut self, ui: &mut Ui, rect: Rect) {
-        let Some((path, before_chars)) =
-            self.doc().map(|d| (d.path.clone(), d.text.chars().count()))
-        else {
+        // `len()`, not `chars().count()`: this runs every frame, and counting
+        // characters walks the whole buffer. The only question this answers is
+        // "did one keystroke land", and every character auto-format cares
+        // about is ASCII, so byte length answers it the same way in O(1).
+        let Some((path, before_len)) = self.doc().map(|d| (d.path.clone(), d.text.len())) else {
             return;
         };
         let wrap = self.wrap;
@@ -3042,6 +3051,8 @@ impl Xplor {
                     // The crate ignores wrapping while line numbers are on, so
                     // wrapping means giving up the gutter. There is no way to
                     // have both; the toggle says so.
+                    let bench = std::env::var_os("XPLOR_BENCH").is_some();
+                    let t0 = std::time::Instant::now();
                     let mut ce = egui_code_editor::CodeEditor::default()
                         .id_source(EDITOR_ID)
                         .with_theme(editor_theme())
@@ -3052,7 +3063,12 @@ impl Xplor {
                         .with_wrap(wrap)
                         .with_clickable_links(true)
                         .with_rows(14);
-                    ce.show(ui, &mut doc.text as &mut dyn egui::TextBuffer, &syntax)
+                    let out = ce.show(ui, &mut doc.text as &mut dyn egui::TextBuffer, &syntax);
+                    let dt = t0.elapsed().as_secs_f32() * 1000.0;
+                    if bench && dt > 4.0 {
+                        log::info!("BENCH ce.show {dt:.2} ms  bytes={}", doc.text.len());
+                    }
+                    out
                 },
             );
             child.inner
@@ -3061,8 +3077,8 @@ impl Xplor {
         let id = output.response.id;
         let range = output.cursor_range;
         self.editor_caret = range.map(|r| r.primary.index.0);
-        let after_chars = self.doc().map_or(0, |d| d.text.chars().count());
-        let typed_one = after_chars == before_chars + 1;
+        let after_len = self.doc().map_or(0, |d| d.text.len());
+        let typed_one = after_len == before_len + 1;
         if let Some(target) = skip_to {
             self.set_text_cursor(ui.ctx(), id, target);
         } else if typed_one {
@@ -3088,8 +3104,14 @@ impl Xplor {
             self.render_version = doc.version;
         }
         let version = self.render_version;
-        let text = self.doc().map(|d| d.text.clone()).unwrap_or_default();
-        self.preview.sync(&text, version);
+        // Copying the document every frame is a full memcpy of the buffer, and
+        // the preview is idle on almost all of them: the version only moves
+        // when there is something new to render.
+        if version != self.preview_buffer_version {
+            self.preview_buffer = self.doc().map(|d| d.text.clone()).unwrap_or_default();
+            self.preview_buffer_version = version;
+        }
+        self.preview.sync(&self.preview_buffer, version);
 
         let indent = sp::LG;
         // The `Ui` we were handed is already anchored to `rect`, so the scroll
