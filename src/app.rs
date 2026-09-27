@@ -175,6 +175,10 @@ impl MenuState {
     }
 }
 
+/// Glyph size in the document header, and the gap between it and the text.
+const HEADER_ICON: f32 = 15.0;
+const HEADER_GAP: f32 = 6.0;
+
 /// Narrowest the editor or the preview may be squeezed to.
 const SPLIT_MIN_PANE: f32 = 160.0;
 
@@ -2162,6 +2166,12 @@ impl Xplor {
                         if resp.double_clicked() {
                             click = Some((i, ClickKind::Open));
                         }
+                        // Only the release opens the menu. egui reports a click
+                        // when the button comes up, and a popup that was not
+                        // already up on the previous frame is exempt from being
+                        // closed by that click. Opening on the press instead
+                        // means the menu is up for the release, which closes
+                        // it again: visible only while the button is held.
                         if resp.secondary_clicked() {
                             context = Some(entry.path.clone());
                             click = Some((i, ClickKind::Plain));
@@ -2642,18 +2652,18 @@ impl Xplor {
                 header.max.y - 0.5,
                 Stroke::new(1.0, c::BORDER),
             );
-            // Title: glyph, name, and a dot when there are unsaved changes.
-            let x = header.left() + sp::SM;
+            // Title: glyph, name, and a dot when there are unsaved changes,
+            // centred as one block in whatever the action buttons leave.
+            //
+            // Centring the icon and the name *together* matters. Centring the
+            // name alone would slide the glyph off to the left, further from
+            // the words the further apart they are, and the pair stops reading
+            // as a single title.
             let cy = title_row.center().y;
-            let icon = Rect::from_center_size(Pos2::new(x + 7.0, cy), Vec2::splat(15.0));
-            let glyph_color = if dirty { c::TEXT_DIM } else { c::TEXT_GHOST };
-            if is_md {
-                Icon::Markdown.paint(painter, icon, glyph_color);
-            } else {
-                Icon::File.paint(painter, icon, glyph_color);
-            }
-            let name_x = x + 21.0;
-            let name_room = (title_row.right() - actions_w - sp::SM - name_x - 10.0).max(24.0);
+            let title_room = Rect::from_min_max(
+                Pos2::new(title_row.left() + sp::SM, title_row.top()),
+                Pos2::new(title_row.right() - actions_w - sp::SM, title_row.bottom()),
+            );
             let name_g = widgets::layout_elided(
                 ui,
                 file_name.clone(),
@@ -2663,8 +2673,23 @@ impl Xplor {
                     theme::ui_font(tfs::BODY)
                 },
                 c::TEXT,
-                name_room,
+                (title_room.width() - HEADER_ICON - HEADER_GAP - if dirty { 11.0 } else { 0.0 })
+                    .max(24.0),
             );
+            let group_w =
+                HEADER_ICON + HEADER_GAP + name_g.size().x + if dirty { 11.0 } else { 0.0 };
+            let group_x = title_room.center().x - group_w * 0.5;
+            let icon = Rect::from_center_size(
+                Pos2::new(group_x + HEADER_ICON * 0.5, cy),
+                Vec2::splat(HEADER_ICON),
+            );
+            let glyph_color = if dirty { c::TEXT_DIM } else { c::TEXT_GHOST };
+            if is_md {
+                Icon::Markdown.paint(painter, icon, glyph_color);
+            } else {
+                Icon::File.paint(painter, icon, glyph_color);
+            }
+            let name_x = icon.right() + HEADER_GAP;
             widgets::galley_at(
                 painter,
                 Pos2::new(name_x, cy - name_g.size().y * 0.5),
@@ -2679,22 +2704,25 @@ impl Xplor {
                 );
             }
 
-            // Path underneath, elided in the middle so the folder name survives.
+            // Path underneath, centred on the same axis and elided in the
+            // middle so the folder name survives a narrow panel.
             let path_row = Rect::from_min_max(
                 Pos2::new(header.left(), title_row.bottom()),
                 Pos2::new(header.right(), header.bottom()),
             );
+            let read_only_w = if read_only { 58.0 } else { 0.0 };
+            let path_room = (path_row.width() - sp::SM * 2.0 - read_only_w).max(24.0);
             let loc = widgets::layout_elided_middle(
                 ui,
                 location,
                 theme::ui_font(tfs::SMALL),
                 c::TEXT_FAINT,
-                (path_row.width() - sp::SM * 2.0).max(24.0),
+                path_room,
             );
             widgets::galley_at(
                 painter,
                 Pos2::new(
-                    path_row.left() + sp::SM,
+                    path_row.center().x - loc.size().x * 0.5,
                     path_row.center().y - loc.size().y * 0.5,
                 ),
                 &loc,
@@ -5652,6 +5680,7 @@ mod tests {
         assert!(!m.take_open());
     }
 
+    /// A frame of input for a mouse button at `at`.
     #[test]
     fn pins_keep_the_order_they_were_added_in() {
         let mut p = Pins::default();
