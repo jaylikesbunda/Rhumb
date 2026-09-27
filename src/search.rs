@@ -230,6 +230,7 @@ fn skip_entry(path: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn filter_matches_all_terms_anywhere() {
@@ -256,5 +257,98 @@ mod tests {
         assert!(matches("Notes.MD", "notes md"));
         assert!(matches("notes", "NOTES"));
         assert!(!matches("notes", "notes other"));
+    }
+
+    /// Builds a small tree and returns its root.
+    fn tree(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("xplor-search-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"").unwrap();
+        std::fs::write(root.join("src/main.rs"), b"").unwrap();
+        std::fs::write(root.join("src/deep/notes.md"), b"").unwrap();
+        // Noise that must never be searched.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/hidden.rs"), b"").unwrap();
+        root
+    }
+
+    /// Runs a search to completion and collects the names it reported.
+    fn run(root: &Path, query: &str) -> Vec<String> {
+        let (tx, rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start(root, query, tx);
+        let mut names = Vec::new();
+        for _ in 0..600 {
+            match rx.try_recv() {
+                Ok(Msg::Search(chunk)) => {
+                    for e in &chunk.found {
+                        names.push(e.name.clone());
+                    }
+                    if chunk.done {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_walk_finds_files_in_subfolders_and_skips_noise() {
+        let root = tree("walk");
+        let found = run(&root, "rs");
+        assert!(found.contains(&"main.rs".to_owned()), "{found:?}");
+        // The .git directory is skipped, so its contents never appear.
+        assert!(!found.contains(&"hidden.rs".to_owned()), "{found:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_term_must_match_somewhere_in_the_name() {
+        let root = tree("terms");
+        // "notes md" only matches the nested markdown file.
+        assert_eq!(run(&root, "notes md"), vec!["notes.md".to_owned()]);
+        assert!(run(&root, "cargo zzz").is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_query_never_starts_a_walk() {
+        let root = tree("empty");
+        let (tx, _rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start(&root, "   ", tx);
+        assert!(!s.running, "a blank query must not walk the disk");
+        assert!(s.results.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_root_is_a_no_op() {
+        let (tx, _rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start(Path::new("no-such-folder-anywhere"), "x", tx);
+        assert!(!s.running);
+    }
+
+    #[test]
+    fn cancelling_stops_the_worker() {
+        let root = tree("cancel");
+        let (tx, rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start(&root, "rs", tx);
+        assert!(s.running);
+        s.cancel();
+        assert!(!s.running);
+        // Draining what already arrived must not panic or block.
+        while rx.try_recv().is_ok() {}
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

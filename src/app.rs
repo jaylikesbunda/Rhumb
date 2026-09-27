@@ -237,6 +237,8 @@ pub struct Xplor {
     view: ViewMode,
     /// Type-ahead find: letters jump to the next matching row.
     typeahead: TypeAhead,
+    /// Set by Alt+F; the toolbar button opens its menu and clears the flag.
+    new_menu: bool,
     /// Whether the details pane is offered when nothing is open.
     details: bool,
     visible: Vec<usize>,
@@ -340,6 +342,7 @@ impl Xplor {
             entries: Vec::new(),
             view: ViewMode::default(),
             typeahead: TypeAhead::default(),
+            new_menu: false,
             details: true,
             visible: Vec::new(),
             listing: Listing::Loading,
@@ -533,6 +536,15 @@ impl Xplor {
             .frame(toolbar_frame())
             .show(root, |ui| self.toolbar(ui));
 
+        // The status bar claims the full window width, so it is shown before the
+        // side panels: a panel only gets what the earlier ones left behind, and
+        // Explorer's status bar runs edge to edge under everything.
+        egui::containers::Panel::bottom("status")
+            .exact_size(sp::STATUS)
+            .resizable(false)
+            .frame(status_frame())
+            .show(root, |ui| self.status_ui(ui));
+
         if self.sidebar {
             let sidebar_w = self.sidebar_w;
             egui::containers::Panel::left("sidebar")
@@ -573,12 +585,6 @@ impl Xplor {
                     }
                 });
         }
-
-        egui::containers::Panel::bottom("status")
-            .exact_size(sp::STATUS)
-            .resizable(false)
-            .frame(status_frame())
-            .show(root, |ui| self.status_ui(ui));
 
         egui::CentralPanel::default()
             .frame(Frame::central_panel(&theme::style()))
@@ -814,10 +820,15 @@ impl Xplor {
     /// selection, which is what Explorer's own menu offers.
     fn new_button(&mut self, ui: &mut Ui) {
         let resp = widgets::flat_button(ui, "New \u{25BE}", "Create something (Alt+F)");
+        // Alt+F asks for the menu, so it is opened by id rather than by click.
+        let id = resp.id.with("menu");
+        if std::mem::take(&mut self.new_menu) {
+            egui::Popup::open_id(ui.ctx(), id);
+        }
         let mut folder = false;
         let mut document = false;
         let mut from_selection = false;
-        egui::Popup::menu(&resp).show(|ui| {
+        egui::Popup::menu(&resp).id(id).show(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(sp::SM, 2.0);
             ui.set_min_width(190.0);
             if ui.button("Folder").clicked() {
@@ -2178,14 +2189,16 @@ impl Xplor {
             Some(d) => {
                 let stats = self.preview.stats();
                 let kb = d.text.len() as f32 / 1024.0;
+                // Kept short on purpose: the status bar has a view switch to
+                // its right, and an elided number helps nobody.
                 format!(
-                    "{kb:.1} KB  \u{00B7}  {:.0} us render  \u{00B7}  {:.2} ms update",
+                    "{kb:.1} KB  \u{00B7}  {:.0} us parse  \u{00B7}  {:.1} ms",
                     stats.parse_us as f32, self.perf.update_ms
                 )
             }
-            None => format!("{:.2} ms update", self.perf.update_ms),
+            None => format!("{:.1} ms", self.perf.update_ms),
         };
-        let g = widgets::layout_elided(ui, info, theme::ui_font(tfs::SMALL), c::TEXT_GHOST, 200.0);
+        let g = widgets::layout_elided(ui, info, theme::ui_font(tfs::SMALL), c::TEXT_GHOST, 210.0);
         widgets::text_right(
             painter,
             Pos2::new(right_x, rect.center().y),
@@ -2758,6 +2771,10 @@ impl Xplor {
         }
         if k.toggle_sidebar {
             self.sidebar = !self.sidebar;
+        }
+        if k.new_menu {
+            // Consumed by the toolbar's New button, which owns the popup id.
+            self.new_menu = true;
         }
         if k.toggle_details {
             self.details = !self.details;

@@ -774,3 +774,80 @@ pub fn text_right(painter: &Painter, right: Pos2, galley: &Arc<Galley>, color: C
         color,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::vec2;
+
+    #[test]
+    fn cycling_visits_every_view_and_returns() {
+        let mut v = ViewMode::Details;
+        let mut seen = vec![v];
+        for _ in 0..2 {
+            v = v.next();
+            seen.push(v);
+        }
+        assert_eq!(
+            seen,
+            vec![ViewMode::Details, ViewMode::List, ViewMode::Large]
+        );
+        // Three steps come back to the start.
+        assert_eq!(v.next(), ViewMode::Details);
+    }
+
+    #[test]
+    fn ctrl_digits_pick_a_view_directly() {
+        assert_eq!(ViewMode::from_digit(1), Some(ViewMode::Details));
+        assert_eq!(ViewMode::from_digit(2), Some(ViewMode::List));
+        assert_eq!(ViewMode::from_digit(3), Some(ViewMode::Large));
+        assert_eq!(ViewMode::from_digit(0), None);
+        assert_eq!(ViewMode::from_digit(9), None);
+    }
+
+    #[test]
+    fn only_details_has_columns_and_only_large_is_a_grid() {
+        assert!(ViewMode::Details.has_columns());
+        assert!(!ViewMode::List.has_columns());
+        assert!(!ViewMode::Large.has_columns());
+        assert!(!ViewMode::Details.is_grid());
+        assert!(!ViewMode::List.is_grid());
+        assert!(ViewMode::Large.is_grid());
+    }
+
+    #[test]
+    fn every_view_has_a_distinct_label() {
+        let mut labels: Vec<&str> = ViewMode::ALL.iter().map(|v| v.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), ViewMode::ALL.len(), "labels must differ");
+        for v in ViewMode::ALL {
+            assert!(!v.hint().is_empty(), "{v:?} needs a tooltip");
+        }
+    }
+
+    #[test]
+    fn columns_are_ordered_and_the_name_stops_before_the_size() {
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(600.0, 26.0));
+        let l = RowLayout::new(rect);
+        // Reading order, left to right.
+        assert!(l.icon.left() < l.name.x);
+        assert!(l.name.x < l.size.x);
+        assert!(l.size.x < l.date.x);
+        // The date column is inset by the standard right padding, and the size
+        // column sits to its left with a gap.
+        assert!((rect.right() - l.date.x - sp::SM).abs() < 0.01);
+        assert!(l.date.x - l.size.x > col::DATE * 0.5);
+        // The name has room to draw without colliding with the size column.
+        assert!(l.name_limit() > l.name.x + 40.0);
+    }
+
+    #[test]
+    fn the_icon_sits_on_the_row_and_inside_it() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 100.0), vec2(400.0, sp::ROW));
+        let l = RowLayout::new(rect);
+        assert!((l.icon.center().y - rect.center().y).abs() < 0.01);
+        assert!(l.icon.left() >= rect.left());
+        assert!(l.icon.right() < rect.right());
+    }
+}
