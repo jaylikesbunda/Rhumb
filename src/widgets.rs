@@ -43,6 +43,10 @@ pub enum Icon {
     Save,
     /// A pushpin, for quick access.
     Pin,
+    /// A diagonal double arrow pointing out: fill the window with this.
+    Expand,
+    /// A diagonal double arrow pointing in: go back to side by side.
+    Shrink,
 }
 
 impl Icon {
@@ -305,6 +309,32 @@ impl Icon {
                     stroke,
                 );
             }
+            Icon::Expand | Icon::Shrink => {
+                // Two arrowheads on one diagonal: outwards to fill the
+                // window, inwards to go back to side by side.
+                let h = s * 0.36;
+                let out = matches!(self, Icon::Expand);
+                let stroke = Stroke::new(1.2, color);
+                for end in [1.0, -1.0] {
+                    let tip = Pos2::new(
+                        ctr.x + end * if out { h } else { h * 0.25 },
+                        ctr.y - end * if out { h } else { h * 0.25 },
+                    );
+                    let tail = Pos2::new(
+                        ctr.x + end * if out { h * 0.25 } else { h },
+                        ctr.y - end * if out { h * 0.25 } else { h },
+                    );
+                    p.line_segment([tail, tip], stroke);
+                    let wing = 2.6;
+                    if end > 0.0 {
+                        p.line_segment([tip, Pos2::new(tip.x - wing, tip.y)], stroke);
+                        p.line_segment([tip, Pos2::new(tip.x, tip.y + wing)], stroke);
+                    } else {
+                        p.line_segment([tip, Pos2::new(tip.x + wing, tip.y)], stroke);
+                        p.line_segment([tip, Pos2::new(tip.x, tip.y - wing)], stroke);
+                    }
+                }
+            }
             Icon::Save => {
                 let h = s * 0.34;
                 let stroke = Stroke::new(1.2, color);
@@ -415,7 +445,8 @@ impl RowLayout {
             Pos2::new(rect.left() + sp::SM, rect.center().y - sp::ICON * 0.5),
             Vec2::splat(sp::ICON),
         );
-        let right = rect.right() - sp::SM;
+        // Air between the last column and whatever panel comes next.
+        let right = rect.right() - sp::SM - sp::XS;
         // A dropped date column hands its space to the size column.
         let size_right = if col_date > 0.0 {
             right - sp::MD - col_date

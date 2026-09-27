@@ -637,6 +637,8 @@ struct Keys {
     toggle_details: bool,
     search_go: bool,
     escape: bool,
+    /// F11 fills the window with the open file, keeping the sidebar.
+    focus_mode: bool,
 }
 
 /// The application state.
@@ -682,6 +684,9 @@ pub struct Xplor {
     sidebar_w: f32,
     doc_w: f32,
     split: f32,
+    /// The open file fills the window: the file list steps aside, the sidebar
+    /// stays. On by default; the header button or F11 brings the list back.
+    focus: bool,
     row_cache: RowCache,
 
     // Recursive search
@@ -797,7 +802,8 @@ impl Xplor {
             filter: String::new(),
             search_focus: false,
             sidebar: true,
-            sidebar_w: 196.0,
+            focus: true,
+            sidebar_w: 224.0,
             doc_w: DOC_DEFAULT,
             split: 0.5,
             row_cache: RowCache::default(),
@@ -899,6 +905,9 @@ impl Xplor {
         if let Some(v) = b("preview_visible") {
             self.preview_visible = v;
         }
+        if let Some(v) = b("focus") {
+            self.focus = v;
+        }
         if let Some(name) = map.get("sort") {
             self.sort = match *name {
                 "size" => SortKey::Size,
@@ -965,7 +974,7 @@ impl Xplor {
         let body = format!(
             "sidebar={}\nsidebar_w={}\ndoc_w={}\nsplit={}\nsort={}\nascending={}\n\
              show_hidden={}\nwrap={}\ncol_size={}\ncol_date={}\npreview_visible={}\n\
-             view={}\ndetails={}\ncwd={}\nwindow={}\n{pins}",
+             view={}\ndetails={}\ncwd={}\nwindow={}\nfocus={}\n{pins}",
             self.sidebar,
             self.sidebar_w,
             self.doc_w,
@@ -980,6 +989,7 @@ impl Xplor {
             self.view.label(),
             self.details,
             self.cwd.to_string_lossy(),
+            self.focus,
             self.window_rect
                 .map(|[x, y, w, h]| format!("{x},{y},{w},{h}"))
                 .unwrap_or_else(|| "-".to_owned()),
@@ -1169,9 +1179,14 @@ impl Xplor {
                 });
         }
 
+        // Focus mode fills the window with the open file: the file list steps
+        // aside and the editor takes the centre. The sidebar stays where it
+        // is. With no file open, or focus off, the usual list applies.
+        let focus_mode = self.focus && self.shows_file_tab();
+
         // The right-hand pane is either the editor or, when nothing is open,
         // the details pane for the current selection. One pane, two jobs.
-        if self.shows_file_tab() || (self.details && !self.sel.is_empty()) {
+        if (self.shows_file_tab() || (self.details && !self.sel.is_empty())) && !focus_mode {
             let doc_w = self.doc_w;
             egui::containers::Panel::right("doc_panel")
                 .resizable(true)
@@ -1194,7 +1209,13 @@ impl Xplor {
 
         egui::CentralPanel::default()
             .frame(Frame::central_panel(&theme::style()))
-            .show(root, |ui| self.list_ui(ui));
+            .show(root, |ui| {
+                if focus_mode {
+                    self.doc_ui(ui);
+                } else {
+                    self.list_ui(ui);
+                }
+            });
 
         self.handle_file_drop(ctx);
         self.resize_edges(ctx);
@@ -1382,7 +1403,7 @@ impl Xplor {
         let total = ui.available_width();
         // Reserve room for the fixed clusters, then give the address bar what is
         // left. Below the floor, the address bar collapses to a Go button.
-        let controls_w = 152.0f32; // New + sort + filter popups
+        let controls_w = 208.0f32; // New + sort + filter popups
         let search_w = (total * 0.24).clamp(110.0, 240.0);
         let nav_w = 4.0 * 26.0 + 3.0 * 2.0;
         let address_w = (total - nav_w - search_w - controls_w - sp::SM * 4.0).max(60.0);
@@ -1516,7 +1537,7 @@ impl Xplor {
         let resp = compact_button(
             ui,
             &format!(
-                "{} {}",
+                "Sort: {} {}",
                 self.sort.label(),
                 if self.ascending {
                     "\u{2191}"
@@ -1524,7 +1545,7 @@ impl Xplor {
                     "\u{2193}"
                 }
             ),
-            "Sort order",
+            "Sort order (click to change)",
         );
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_width(150.0);
@@ -1569,7 +1590,7 @@ impl Xplor {
         } else {
             "\u{25CB} Filter"
         };
-        let resp = compact_button(ui, glyph, "View options");
+        let resp = compact_button(ui, glyph, "Filter: hidden files and search scope");
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_width(190.0);
             if ui
@@ -1606,11 +1627,14 @@ impl Xplor {
         let running = self.search.running;
         let searched = self.search_shown && !self.search.results.is_empty();
 
+        // The inner response is the text field's, not the frame's: reading
+        // `.response` off the frame instead meant typing never reached the
+        // filter and the box reset on every frame.
         let out = Frame::new()
             .fill(c::CODE_BG)
             .stroke(Stroke::new(1.0, c::BORDER))
             .corner_radius(CornerRadius::same(sp::RADIUS))
-            .inner_margin(Margin::symmetric(sp::SM_I, 3))
+            .inner_margin(Margin::symmetric(sp::SM_I, 4))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(sp::XS, 0.0);
                 let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
@@ -1635,7 +1659,7 @@ impl Xplor {
                     .show(ui)
                     .response
             })
-            .response;
+            .inner;
 
         if self.search_focus {
             out.request_focus();
@@ -2267,12 +2291,19 @@ impl Xplor {
                                 thumb.as_ref(),
                             );
                         } else {
+                            // Views without columns never built a layout, so
+                            // their icon and name rects were zero and every row
+                            // painted at the panel's edge. Build one from the
+                            // cell itself: only its x and width matter here.
+                            let plain = RowLayout::new(cell, 0.0, 0.0);
+                            let rl = if view.has_columns() { layout } else { plain };
+                            let room = (rl.name_limit() - rl.name.x).max(40.0);
                             let galleys: &widgets::RowGalleys =
-                                self.row_cache.get_or_build(ui, i, entry, name_w);
+                                self.row_cache.get_or_build(ui, i, entry, room);
                             widgets::paint_row(
                                 ui,
                                 entry,
-                                &layout,
+                                &rl,
                                 cell,
                                 sel.contains(&entry.path),
                                 resp.hovered(),
@@ -2682,8 +2713,10 @@ impl Xplor {
         let mut wrap = false;
         let mut preview = false;
         let mut close = false;
+        let mut focus_toggle = false;
+        let focused = self.focus;
         let btn = 26.0f32;
-        let action_count = 3 + usize::from(is_md) + usize::from(dirty);
+        let action_count = 4 + usize::from(is_md) + usize::from(dirty);
         let actions_w = btn * action_count as f32;
         {
             let spot = Rect::from_min_max(
@@ -2708,6 +2741,28 @@ impl Xplor {
             );
             if crr.on_hover_text("Close (Ctrl+W)").clicked() {
                 close = true;
+            }
+            // Focus fills the window with the file; the same button brings
+            // the list back. Next to Close, where window controls live.
+            let (fr, frr) = bar.allocate_exact_size(Vec2::splat(btn), Sense::click());
+            if frr.hovered() {
+                bar.painter()
+                    .rect_filled(fr, CornerRadius::same(sp::RADIUS), c::HOVER);
+            }
+            (if focused { Icon::Shrink } else { Icon::Expand }).paint(
+                bar.painter(),
+                fr,
+                if frr.hovered() { c::TEXT } else { c::TEXT_DIM },
+            );
+            if frr
+                .on_hover_text(if focused {
+                    "Show the file list (F11)"
+                } else {
+                    "Fill the window with the file (F11)"
+                })
+                .clicked()
+            {
+                focus_toggle = true;
             }
             if is_md {
                 let (r, rr) = bar.allocate_exact_size(Vec2::splat(btn), Sense::click());
@@ -2753,7 +2808,10 @@ impl Xplor {
                     c::TEXT_DIM
                 },
             );
-            if wrr.on_hover_text("Soft wrap long lines").clicked() {
+            if wrr
+                .on_hover_text("Soft wrap long lines (hides line numbers)")
+                .clicked()
+            {
                 wrap = true;
             }
             if dirty {
@@ -2783,6 +2841,9 @@ impl Xplor {
         if preview {
             self.preview_visible = !self.preview_visible;
         }
+        if focus_toggle {
+            self.focus = !self.focus;
+        }
         if close {
             self.close_doc();
         }
@@ -2792,12 +2853,6 @@ impl Xplor {
         }
         if wrap {
             self.wrap = !self.wrap;
-        }
-        if preview {
-            self.preview_visible = !self.preview_visible;
-        }
-        if close {
-            self.close_doc();
         }
 
         // External change prompt.
@@ -2956,11 +3011,14 @@ impl Xplor {
                     .layout(egui::Layout::top_down(egui::Align::LEFT))
                     .id_salt("editor"),
                 |ui| {
+                    // The crate ignores wrapping while line numbers are on, so
+                    // wrapping means giving up the gutter. There is no way to
+                    // have both; the toggle says so.
                     let mut ce = egui_code_editor::CodeEditor::default()
                         .id_source(EDITOR_ID)
                         .with_theme(editor_theme())
                         .with_fontsize(theme::fs::MONO)
-                        .with_numlines(true)
+                        .with_numlines(!wrap)
                         .with_numlines_only_natural(true)
                         .with_numlines_shift(-1)
                         .with_wrap(wrap)
@@ -3680,6 +3738,7 @@ impl Xplor {
             k.new_menu = i.consume_key(egui::Modifiers::ALT, Key::F);
             k.toggle_details = i.consume_key(egui::Modifiers::ALT, Key::P);
             k.escape = i.consume_key(egui::Modifiers::NONE, Key::Escape);
+            k.focus_mode = i.consume_key(egui::Modifiers::NONE, Key::F11);
             // Ctrl+1..3 pick the list layout, the way Explorer does.
             for (digit, key) in [(1u8, Key::Num1), (2, Key::Num2), (3, Key::Num3)] {
                 if i.consume_key(egui::Modifiers::CTRL, key)
@@ -3736,6 +3795,9 @@ impl Xplor {
         }
         if k.toggle_details {
             self.details = !self.details;
+        }
+        if k.focus_mode && self.shows_file_tab() {
+            self.focus = !self.focus;
         }
         if k.close_file {
             self.close_doc();
@@ -5526,7 +5588,12 @@ fn title_frame() -> Frame {
 fn toolbar_frame() -> Frame {
     Frame::new()
         .fill(c::PANEL)
-        .inner_margin(Margin::symmetric(sp::SM_I, 0))
+        .inner_margin(Margin {
+            left: sp::SM_I,
+            right: sp::SM_I,
+            top: 4,
+            bottom: 0,
+        })
         .outer_margin(Margin::ZERO)
 }
 
