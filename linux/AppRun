@@ -4,4 +4,4 @@
 HERE="$(dirname "$(readlink -f "$0")")"
 export PATH="$HERE:${PATH}"
 export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"
-exec "$HERE/usr/bin/xplor" "$@"
+exec "$HERE/usr/bin/rhumb" "$@"

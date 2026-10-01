@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     /// The window is undecorated, so this bar owns moving, maximising and
     /// closing it, plus the resize edges along the bottom and right.
     pub(super) fn title_bar(&mut self, ui: &mut Ui) {
@@ -11,7 +11,7 @@ impl Xplor {
         let rect = Rect::from_min_size(ui.min_rect().min, Vec2::new(ui.available_width(), height));
 
         // App mark.
-        let mark = widgets::layout(ui, "xplor".to_owned(), theme::bold_font(11.5), c::TEXT_DIM);
+        let mark = widgets::layout(ui, "rhumb".to_owned(), theme::bold_font(11.5), c::TEXT_DIM);
         widgets::galley_at(
             ui.painter(),
             Pos2::new(rect.left() + sp::SM, rect.center().y - mark.size().y * 0.5),

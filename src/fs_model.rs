@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn unique_dest_avoids_collisions() {
-        let dir = std::env::temp_dir().join("xplor-test-unique");
+        let dir = std::env::temp_dir().join("rhumb-test-unique");
         let _ = fs::create_dir_all(&dir);
         let base = dir.join("a.txt");
         let _ = fs::write(&base, "x");

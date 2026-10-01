@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="windows-1252"?>
 <!--
-  WiX v3 source for the Xplor MSI.
+  WiX v3 source for the Rhumb MSI.
 
   Built by tools/build_msi.sh, which reads the version out of Cargo.toml and
   hands it to candle as a preprocessor variable. Driving candle and light
@@ -19,11 +19,11 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Product
         Id="*"
-        Name="Xplor"
+        Name="Rhumb"
         UpgradeCode="7C1E1F0A-9C0B-4C7E-9E4A-2C0B4E1D5A31"
         Language="1033"
         Codepage="1252"
-        Manufacturer="Xplor"
+        Manufacturer="Rhumb"
         Version="$(var.PkgVersion)">
 
         <!--
@@ -33,17 +33,17 @@
         -->
         <Package Id="*"
                  Keywords="Installer"
-                 Description="Xplor, a minimal file explorer with a Markdown preview"
+                 Description="Rhumb, a minimal file explorer with a Markdown preview"
                  InstallerVersion="500"
                  Languages="1033"
                  Compressed="yes"
                  InstallScope="perMachine"
                  SummaryCodepage="1252"
-                 Manufacturer="Xplor"/>
+                 Manufacturer="Rhumb"/>
 
         <!-- A newer build replaces an older one in place; downgrades are refused. -->
         <MajorUpgrade Schedule="afterInstallInitialize"
-                      DowngradeErrorMessage="A newer version of Xplor is already installed."/>
+                      DowngradeErrorMessage="A newer version of Rhumb is already installed."/>
         <MediaTemplate EmbedCab="yes" />
 
         <!-- Repairs would need the original binaries, so they are not offered. -->
@@ -53,7 +53,7 @@
 
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="ProgramFiles64Folder">
-                <Directory Id="APPLICATIONFOLDER" Name="Xplor">
+                <Directory Id="APPLICATIONFOLDER" Name="Rhumb">
                     <!--
                       Win64 is required on every component: without it a
                       package under ProgramFiles64Folder is validated as
@@ -61,13 +61,13 @@
                       machine. ICE80 fails the link if this is missing.
                     -->
                     <Component Id="MainExecutable" Guid="*" Win64="yes">
-                        <File Id="XplorExe"
-                              Name="xplor.exe"
-                              Source="target\release\xplor.exe"
+                        <File Id="RhumbExe"
+                              Name="rhumb.exe"
+                              Source="target\release\rhumb.exe"
                               KeyPath="yes">
                             <Shortcut Id="StartMenuShortcut"
                                       Directory="ApplicationProgramsFolder"
-                                      Name="Xplor"
+                                      Name="Rhumb"
                                       Description="A minimal file explorer with a Markdown preview"
                                       Advertise="yes"
                                       WorkingDirectory="APPLICATIONFOLDER"/>
@@ -77,7 +77,7 @@
                                       Directory="ApplicationProgramsFolder"
                                       On="uninstall"/>
                         <RemoveFile Id="RemoveStartMenuShortcut"
-                                    Name="Xplor.lnk"
+                                    Name="Rhumb.lnk"
                                     Directory="ApplicationProgramsFolder"
                                     On="uninstall"/>
                     </Component>
@@ -96,12 +96,12 @@
                 </Directory>
             </Directory>
             <Directory Id="ProgramMenuFolder">
-                <Directory Id="ApplicationProgramsFolder" Name="Xplor"/>
+                <Directory Id="ApplicationProgramsFolder" Name="Rhumb"/>
             </Directory>
         </Directory>
 
         <Feature Id="MainFeature"
-                 Title="Xplor"
+                 Title="Rhumb"
                  Level="1"
                  ConfigurableDirectory="APPLICATIONFOLDER"
                  Display="expand">

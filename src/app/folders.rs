@@ -52,7 +52,7 @@ impl FolderTab {
     }
 }
 
-impl Xplor {
+impl Rhumb {
     /// Everything about the folder on screen that a tab keeps.
     pub(super) fn folder_view(&self) -> FolderView {
         FolderView {

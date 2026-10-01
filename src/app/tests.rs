@@ -7,7 +7,7 @@ fn file(name: &str) -> Tab {
 /// The split geometry as the app assembles it, over a real `Ui`, so a drag can
 /// be driven through it with real events.
 ///
-/// A copy rather than a call, because `split_ui` needs a whole `Xplor` to reach.
+/// A copy rather than a call, because `split_ui` needs a whole `Rhumb` to reach.
 /// The parts that matter are copied exactly: the two child rects, the divider,
 /// and the one line that writes the fraction back — because the bug this is
 /// looking for is a disagreement between where the divider is *drawn* and where

@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     /// The file list. One code path serves all three views: only the cell
     /// geometry and the painter change.
     pub(super) fn list_ui(&mut self, ui: &mut Ui) {
@@ -680,7 +680,7 @@ impl Xplor {
                 let p = path.to_path_buf();
                 let tx = self.tx.clone();
                 let _ = std::thread::Builder::new()
-                    .name("xplor-peek".into())
+                    .name("rhumb-peek".into())
                     .spawn(move || {
                         let _ = tx.send(Msg::Peek {
                             text: ops::peek_text(&p),

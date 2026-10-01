@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     /// Routes this frame's clipboard shortcut to the file list.
     ///
     /// Ctrl+C, Ctrl+X and Ctrl+V never arrive as key presses: the window layer

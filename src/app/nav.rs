@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     /// Folds in anything a second launch handed this window.
     ///
     /// Checked on the slow tick rather than every frame: it is a file
@@ -348,7 +348,7 @@ impl Xplor {
         self.listing = Listing::Loading;
         self.row_cache.clear();
         let _ = std::thread::Builder::new()
-            .name("xplor-list".into())
+            .name("rhumb-list".into())
             .spawn(move || {
                 let (entries, error) = match fs_model::read_dir(&path, show_hidden) {
                     Ok(e) => (e, None),

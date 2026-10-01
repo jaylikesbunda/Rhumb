@@ -128,7 +128,7 @@ impl Search {
         self.indexed = true;
         let (scope, query) = (scope.to_path_buf(), query.to_owned());
         let spawned = std::thread::Builder::new()
-            .name("xplor-index-search".into())
+            .name("rhumb-index-search".into())
             .spawn(move || {
                 let (found, truncated) = index.search(&scope, &query, MAX_RESULTS);
                 let _ = tx.send(Msg::Search(SearchChunk {
@@ -168,7 +168,7 @@ impl Search {
         let root = root.to_path_buf();
 
         std::thread::Builder::new()
-            .name("xplor-search".into())
+            .name("rhumb-search".into())
             .spawn(move || {
                 let started = Instant::now();
                 let mut found: Vec<Entry> = Vec::new();
@@ -311,7 +311,7 @@ mod tests {
 
     /// Builds a small tree and returns its root.
     fn tree(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("xplor-search-{name}"));
+        let root = std::env::temp_dir().join(format!("rhumb-search-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src/deep")).unwrap();
         std::fs::write(root.join("Cargo.toml"), b"").unwrap();

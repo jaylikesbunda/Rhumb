@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     pub(super) fn status_ui(&mut self, ui: &mut Ui) {
         let rect = Rect::from_min_size(
             ui.min_rect().min,

@@ -77,16 +77,16 @@ jobs:
         run: |
           tools/build_msi.sh
           mkdir -p stage
-          cp target/release/xplor.exe stage/
+          cp target/release/rhumb.exe stage/
           cp LICENSE README.md stage/
-          7z a "dist/xplor-${VERSION}-windows-portable.zip" ./stage/*
+          7z a "dist/rhumb-${VERSION}-windows-portable.zip" ./stage/*
           ls -l dist
 
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
-          name: Xplor ${{ inputs.version }}
+          name: Rhumb ${{ inputs.version }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true

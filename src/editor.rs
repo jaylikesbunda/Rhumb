@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn a_windows_file_is_edited_as_newlines_and_saved_as_windows_again() {
-        let dir = std::env::temp_dir().join("xplor-doc-crlf");
+        let dir = std::env::temp_dir().join("rhumb-doc-crlf");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("win.txt");
         fs::write(&path, "one\r\ntwo\r\nthree").unwrap();
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn save_and_dirty_round_trip() {
-        let dir = std::env::temp_dir().join("xplor-doc-test");
+        let dir = std::env::temp_dir().join("rhumb-doc-test");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("a.md");
         fs::write(&path, "# hi").unwrap();
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn a_binary_file_opens_read_only_instead_of_being_refused() {
-        let dir = std::env::temp_dir().join("xplor-doc-bin");
+        let dir = std::env::temp_dir().join("rhumb-doc-bin");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("a.bin");
         fs::write(&path, [0u8, 1, 2, 3]).unwrap();
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn a_large_file_cannot_be_saved_over_with_an_empty_buffer() {
-        let dir = std::env::temp_dir().join("xplor-doc-large");
+        let dir = std::env::temp_dir().join("rhumb-doc-large");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("big.log");
         // One byte over the cap, so the size guard is what decides.
@@ -492,7 +492,7 @@ mod tests {
         // `read` used to flatten the document to a string, which silently
         // dropped `read_only` and `too_large`; the app then rebuilt it as an
         // editable buffer.
-        let dir = std::env::temp_dir().join("xplor-doc-read");
+        let dir = std::env::temp_dir().join("rhumb-doc-read");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("a.bin");
         fs::write(&path, [0u8, 1, 2, 3]).unwrap();

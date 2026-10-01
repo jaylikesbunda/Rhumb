@@ -1,5 +1,5 @@
 [package]
-name = "xplor"
+name = "rhumb"
 version = "0.1.0"
 edition = "2024"
 # The floor is set by let-chains, not by the edition.
@@ -11,7 +11,7 @@ categories = ["gui", "filesystem"]
 keywords = ["file-explorer", "markdown", "editor", "gui", "dark"]
 
 [[bin]]
-name = "xplor"
+name = "rhumb"
 path = "src/main.rs"
 
 [dependencies]

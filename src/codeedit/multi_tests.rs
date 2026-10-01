@@ -1954,7 +1954,7 @@ fn typing_at_a_thousand_carets_is_still_a_quick_frame() {
     }
     let mean = total / 8;
     assert_eq!(h.text().matches('x').count(), 8000);
-    let (limit_mean, limit_worst) = if std::env::var("XPLOR_STRICT_SPEED").is_ok() {
+    let (limit_mean, limit_worst) = if std::env::var("RHUMB_STRICT_SPEED").is_ok() {
         (8, 16)
     } else {
         (40, 400)
@@ -1977,7 +1977,7 @@ fn moving_a_thousand_carets_is_a_quick_frame() {
     }
     let each = t.elapsed() / 20;
     assert_eq!(h.cursor_count(), 1000);
-    let limit = if std::env::var("XPLOR_STRICT_SPEED").is_ok() {
+    let limit = if std::env::var("RHUMB_STRICT_SPEED").is_ok() {
         8
     } else {
         60
@@ -1996,7 +1996,7 @@ fn undoing_an_edit_at_a_thousand_carets_is_quick() {
     let took = t.elapsed();
     assert_eq!(h.text(), doc);
     assert_eq!(h.cursor_count(), 1000);
-    let limit = if std::env::var("XPLOR_STRICT_SPEED").is_ok() {
+    let limit = if std::env::var("RHUMB_STRICT_SPEED").is_ok() {
         16
     } else {
         200

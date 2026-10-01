@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Xplor MSI.
+# Builds the Rhumb MSI.
 #
 # Drives candle and light directly rather than going through cargo-wix, so the
 # version in the installer always comes from Cargo.toml with no template engine
@@ -11,7 +11,7 @@
 # windows-latest runner it is already installed; elsewhere install it, or
 # download the binaries zip and add its folder to PATH.
 #
-# Output: dist/xplor-<version>-x64.msi
+# Output: dist/rhumb-<version>-x64.msi
 
 set -euo pipefail
 
@@ -26,8 +26,8 @@ for tool in candle light; do
     fi
 done
 
-if [ ! -f "target/release/xplor.exe" ]; then
-    echo "error: target/release/xplor.exe is missing." >&2
+if [ ! -f "target/release/rhumb.exe" ]; then
+    echo "error: target/release/rhumb.exe is missing." >&2
     echo "Run 'cargo build --release' first." >&2
     exit 1
 fi
@@ -53,7 +53,7 @@ build="target/msi"
 rm -rf "$build"
 mkdir -p "$build" dist
 
-echo "Building xplor $msi_version from $version"
+echo "Building rhumb $msi_version from $version"
 
 # -arch x64 is what puts x64 in the Template Summary property, which ICE80
 # checks against the 64-bit components. Without it the link fails.
@@ -64,8 +64,8 @@ candle -nologo \
     wix/main.wxs
 
 light -nologo \
-    -out "dist/xplor-${version}-x64.msi" \
+    -out "dist/rhumb-${version}-x64.msi" \
     "$build/main.wxs"
 
-echo "Wrote dist/xplor-${version}-x64.msi"
-ls -l "dist/xplor-${version}-x64.msi"
+echo "Wrote dist/rhumb-${version}-x64.msi"
+ls -l "dist/rhumb-${version}-x64.msi"

@@ -75,7 +75,7 @@ pub enum Icon {
 }
 
 /// The font family the icons are drawn from.
-pub const ICON_FAMILY: &str = "xplor-icons";
+pub const ICON_FAMILY: &str = "rhumb-icons";
 
 impl Icon {
     /// The glyph that draws this icon, with `open` telling the chevron which way to point.

@@ -1,14 +1,14 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Xplor
+Name=Rhumb
 GenericName=File Manager
 Comment=A minimal, fast, dark file explorer with a built-in text and Markdown editor
-Exec=xplor %f
-Icon=xplor
+Exec=rhumb %f
+Icon=rhumb
 Terminal=false
 Categories=Utility;FileManager;FileTools;
 MimeType=inode/directory;text/plain;text/markdown;text/x-markdown;
 Keywords=file;manager;explorer;markdown;editor;preview;
 StartupNotify=true
-StartupWMClass=xplor
+StartupWMClass=rhumb

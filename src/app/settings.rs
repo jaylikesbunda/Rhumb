@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     /// Reads `prefs.txt` from the user config directory. Missing or malformed
     /// entries simply fall back to the defaults, so a bad file can never stop
     /// the app from starting.

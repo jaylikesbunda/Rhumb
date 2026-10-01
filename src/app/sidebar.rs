@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     /// Adds a folder to Quick access, telling the user why if it cannot.
     ///
     /// Returns whether the list changed, so the caller can say so.
@@ -417,7 +417,7 @@ impl Xplor {
         let tx = self.tx.clone();
         let path = path.to_path_buf();
         let _ = std::thread::Builder::new()
-            .name("xplor-tree".into())
+            .name("rhumb-tree".into())
             .spawn(move || {
                 let dirs = tree::read_dirs(&path);
                 let _ = tx.send(Msg::TreeLoaded { path, dirs });

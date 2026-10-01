@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 pub struct App {
     ctx: Context,
-    app: Xplor,
+    app: Rhumb,
     time: f64,
     /// How long the last frame asked to wait before the next one.
     repaint_in: Duration,
@@ -16,12 +16,12 @@ impl App {
         // A preferences file that does not exist, so the app starts as it does for
         // someone who has never run it, whatever is saved on this machine.
         let nowhere = std::env::temp_dir()
-            .join(format!("xplor-test-prefs-{}", std::process::id()))
+            .join(format!("rhumb-test-prefs-{}", std::process::id()))
             .join("prefs.txt");
         PREFS_OVERRIDE.with(|p| *p.borrow_mut() = Some(nowhere));
         let ctx = Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let mut app = Xplor::new(&cc);
+        let mut app = Rhumb::new(&cc);
         app.navigate(dir);
         let mut a = App {
             ctx,
@@ -163,7 +163,7 @@ fn percentiles(mut ms: Vec<f64>) -> (f64, f64, f64) {
 
 #[test]
 fn typing_into_an_opened_file_reaches_the_buffer_and_marks_it_modified() {
-    let (dir, src) = workspace("xplor-app-typing", 5, 50);
+    let (dir, src) = workspace("rhumb-app-typing", 5, 50);
     let mut a = App::new(&dir);
     a.open_and_focus(&src);
     assert!(
@@ -193,7 +193,7 @@ const FRAME_240_MS: f64 = 4.2;
 
 /// Times `n` calls of `f`, in milliseconds, as `(median, worst)`, and holds them to
 /// the 240 fps budget: the median must be under `median_ms`, always, and the worst
-/// under a frame at 240 fps when `XPLOR_STRICT_SPEED` is set, for a run on a quiet
+/// under a frame at 240 fps when `RHUMB_STRICT_SPEED` is set, for a run on a quiet
 /// machine. Otherwise the worst only has to be short of a freeze, since the whole
 /// test suite shares the CPU and another test can take a frame from this one.
 #[track_caller]
@@ -212,7 +212,7 @@ fn at_240fps(what: &str, n: usize, median_ms: f64, mut f: impl FnMut() -> Durati
     eprintln!(
         "  {what:44} median {median:6.3} ms  worst {worst:6.3} ms   (frame at 240 fps: {FRAME_240_MS} ms)"
     );
-    let strict = std::env::var_os("XPLOR_STRICT_SPEED").is_some();
+    let strict = std::env::var_os("RHUMB_STRICT_SPEED").is_some();
     let slow = if cfg!(debug_assertions) { 30.0 } else { 1.0 };
     let worst_budget = if strict {
         FRAME_240_MS * slow
@@ -228,7 +228,7 @@ fn at_240fps(what: &str, n: usize, median_ms: f64, mut f: impl FnMut() -> Durati
 
 #[test]
 fn typing_in_the_whole_app_fits_in_a_frame_at_240_fps() {
-    let (dir, src) = workspace("xplor-app-240-typing", 3_000, 20_000);
+    let (dir, src) = workspace("rhumb-app-240-typing", 3_000, 20_000);
     let mut a = App::new(&dir);
     a.open_and_focus(&src);
     for _ in 0..10 {
@@ -246,7 +246,7 @@ fn typing_in_the_whole_app_fits_in_a_frame_at_240_fps() {
 
 #[test]
 fn scrolling_the_whole_app_fits_in_a_frame_at_240_fps() {
-    let (dir, src) = workspace("xplor-app-240-scroll", 3_000, 20_000);
+    let (dir, src) = workspace("rhumb-app-240-scroll", 3_000, 20_000);
     let mut a = App::new(&dir);
     a.open_and_focus(&src);
     a.hover_editor();
@@ -260,7 +260,7 @@ fn scrolling_the_whole_app_fits_in_a_frame_at_240_fps() {
 
 #[test]
 fn a_frame_of_the_whole_app_with_a_big_folder_and_a_file_open_stays_cheap() {
-    let (dir, src) = workspace("xplor-app-frames", 10_000, 2_000);
+    let (dir, src) = workspace("rhumb-app-frames", 10_000, 2_000);
     let mut a = App::new(&dir);
     a.open_and_focus(&src);
     for _ in 0..10 {
@@ -313,7 +313,7 @@ fn press(a: &mut App, key: egui::Key, modifiers: egui::Modifiers) {
 
 #[test]
 fn ctrl_comma_opens_the_settings_and_again_closes_them() {
-    let (dir, _) = workspace("xplor-settings-key", 5, 10);
+    let (dir, _) = workspace("rhumb-settings-key", 5, 10);
     let mut a = App::new(&dir);
     a.frame();
     press(&mut a, egui::Key::Comma, egui::Modifiers::CTRL);
@@ -332,7 +332,7 @@ fn ctrl_comma_opens_the_settings_and_again_closes_them() {
 
 #[test]
 fn the_settings_window_draws_every_section_without_trouble() {
-    let (dir, _) = workspace("xplor-settings-draw", 5, 10);
+    let (dir, _) = workspace("rhumb-settings-draw", 5, 10);
     let mut a = App::new(&dir);
     for section in 0..3 {
         a.app.dialog = Dialog::Settings { section };
@@ -345,7 +345,7 @@ fn the_settings_window_draws_every_section_without_trouble() {
 
 #[test]
 fn the_sidebar_starts_wide_enough_to_read_a_drive_and_what_is_free_on_it() {
-    let (dir, _) = workspace("xplor-sidebar-width", 5, 10);
+    let (dir, _) = workspace("rhumb-sidebar-width", 5, 10);
     let _ = App::new(&dir);
     const { assert!(SIDEBAR_DEFAULT >= 240.0) };
     // A width saved from before the default moved is not a choice, and follows it.
@@ -367,7 +367,7 @@ fn the_sidebar_starts_wide_enough_to_read_a_drive_and_what_is_free_on_it() {
 
 #[test]
 fn a_pinned_folder_can_be_unpinned_from_the_menu_wherever_the_menu_was_opened() {
-    let (dir, _) = workspace("xplor-unpin", 5, 10);
+    let (dir, _) = workspace("rhumb-unpin", 5, 10);
     let mut a = App::new(&dir);
     a.frame();
     assert!(a.app.pin(&dir));
@@ -430,7 +430,7 @@ fn lines_apart(a: &App) -> f32 {
 
 #[test]
 fn scrolling_the_editor_scrolls_the_preview_with_it_while_they_are_locked() {
-    let (mut a, dir, editor, _) = scroll_lock_setup("xplor-lock-editor");
+    let (mut a, dir, editor, _) = scroll_lock_setup("rhumb-lock-editor");
     assert!(a.app.sync_scroll, "locked by default");
     wheel_at(&mut a, editor, -3.0, 40);
     assert!(a.app.ed.scroll_line() > 20.0, "the editor moved");
@@ -441,7 +441,7 @@ fn scrolling_the_editor_scrolls_the_preview_with_it_while_they_are_locked() {
 
 #[test]
 fn scrolling_the_preview_scrolls_the_editor_with_it_while_they_are_locked() {
-    let (mut a, dir, _, preview) = scroll_lock_setup("xplor-lock-preview");
+    let (mut a, dir, _, preview) = scroll_lock_setup("rhumb-lock-preview");
     wheel_at(&mut a, preview, -3.0, 120);
     assert!(a.app.preview_off > 100.0, "the preview moved");
     assert!(a.app.ed.scroll_line() > 5.0, "and the editor with it");
@@ -451,7 +451,7 @@ fn scrolling_the_preview_scrolls_the_editor_with_it_while_they_are_locked() {
 
 #[test]
 fn unlocked_the_two_panes_scroll_on_their_own() {
-    let (mut a, dir, editor, preview) = scroll_lock_setup("xplor-lock-off");
+    let (mut a, dir, editor, preview) = scroll_lock_setup("rhumb-lock-off");
     a.app.sync_scroll = false;
     wheel_at(&mut a, editor, -3.0, 40);
     assert!(a.app.ed.scroll_fraction() > 0.05);
@@ -463,7 +463,7 @@ fn unlocked_the_two_panes_scroll_on_their_own() {
 
 #[test]
 fn locking_again_brings_the_preview_to_where_the_editor_is() {
-    let (mut a, dir, editor, _) = scroll_lock_setup("xplor-lock-again");
+    let (mut a, dir, editor, _) = scroll_lock_setup("rhumb-lock-again");
     a.app.sync_scroll = false;
     wheel_at(&mut a, editor, -3.0, 40);
     assert!(a.app.preview_off < 1.0);
@@ -479,7 +479,7 @@ fn locking_again_brings_the_preview_to_where_the_editor_is() {
 
 #[test]
 fn the_end_of_the_editor_is_the_end_of_the_preview_and_the_other_way_round() {
-    let (mut a, dir, _, preview) = scroll_lock_setup("xplor-lock-ends");
+    let (mut a, dir, _, preview) = scroll_lock_setup("rhumb-lock-ends");
     a.app.ed.set_scroll_fraction(1.0);
     for _ in 0..20 {
         a.frame();
@@ -498,7 +498,7 @@ fn the_end_of_the_editor_is_the_end_of_the_preview_and_the_other_way_round() {
 
 #[test]
 fn nothing_drifts_when_nothing_is_touched() {
-    let (mut a, dir, editor, _) = scroll_lock_setup("xplor-lock-still");
+    let (mut a, dir, editor, _) = scroll_lock_setup("rhumb-lock-still");
     wheel_at(&mut a, editor, -3.0, 30);
     // Until the wheel has finished easing to a stop.
     for _ in 0..400 {
@@ -522,7 +522,7 @@ fn the_editor_scrolls_exactly_as_it_does_alone_whatever_the_preview_is_doing() {
     // disturbed by that: its position per frame is the same as with the lock off.
     let mut runs: Vec<Vec<f32>> = Vec::new();
     for locked in [true, false] {
-        let (mut a, dir, editor, _) = scroll_lock_setup(&format!("xplor-lock-alone-{locked}"));
+        let (mut a, dir, editor, _) = scroll_lock_setup(&format!("rhumb-lock-alone-{locked}"));
         a.app.sync_scroll = locked;
         a.frame_with(vec![egui::Event::PointerMoved(editor)]);
         let mut ys = Vec::new();
@@ -540,7 +540,7 @@ fn the_editor_scrolls_exactly_as_it_does_alone_whatever_the_preview_is_doing() {
 
 #[test]
 fn the_preview_follows_the_editor_smoothly_frame_by_frame() {
-    let (mut a, dir, editor, _) = scroll_lock_setup("xplor-lock-smooth");
+    let (mut a, dir, editor, _) = scroll_lock_setup("rhumb-lock-smooth");
     a.frame_with(vec![egui::Event::PointerMoved(editor)]);
     let mut offs = Vec::new();
     for _ in 0..150 {
@@ -565,7 +565,7 @@ fn the_preview_follows_the_editor_smoothly_frame_by_frame() {
 
 #[test]
 fn the_editor_follows_the_preview_smoothly_frame_by_frame() {
-    let (mut a, dir, _, preview) = scroll_lock_setup("xplor-lock-smooth-back");
+    let (mut a, dir, _, preview) = scroll_lock_setup("rhumb-lock-smooth-back");
     a.frame_with(vec![egui::Event::PointerMoved(preview)]);
     let mut ys = Vec::new();
     for _ in 0..150 {
@@ -590,7 +590,7 @@ fn the_editor_follows_the_preview_smoothly_frame_by_frame() {
 
 #[test]
 fn a_heading_in_the_editor_is_at_the_top_of_the_preview_when_the_editor_is_there() {
-    let (mut a, dir, _, _) = scroll_lock_setup("xplor-lock-heading");
+    let (mut a, dir, _, _) = scroll_lock_setup("rhumb-lock-heading");
     let text = a.text();
     let target = text
         .lines()
@@ -610,7 +610,7 @@ fn a_heading_in_the_editor_is_at_the_top_of_the_preview_when_the_editor_is_there
 
 #[test]
 fn the_lock_follows_a_new_file_and_not_the_old_ones_position() {
-    let (dir, first, second) = two_notes("xplor-lock-newfile");
+    let (dir, first, second) = two_notes("rhumb-lock-newfile");
     let mut a = App::new(&dir);
     show_file(&mut a, &first);
     a.app.ed.set_scroll_line(0.0);
@@ -624,7 +624,7 @@ fn the_lock_follows_a_new_file_and_not_the_old_ones_position() {
 
 #[test]
 fn the_preview_catches_up_after_typing_pauses_and_not_on_every_keystroke() {
-    let (dir, md) = markdown_workspace("xplor-preview-debounce", 20);
+    let (dir, md) = markdown_workspace("rhumb-preview-debounce", 20);
     let mut a = App::new(&dir);
     a.open_and_focus(&md);
     for _ in 0..5 {
@@ -661,7 +661,7 @@ fn the_preview_catches_up_after_typing_pauses_and_not_on_every_keystroke() {
 #[ignore]
 fn probe_preview() {
     for sections in [50, 500, 3_000] {
-        let (dir, md) = markdown_workspace(&format!("xplor-preview-{sections}"), sections);
+        let (dir, md) = markdown_workspace(&format!("rhumb-preview-{sections}"), sections);
         let bytes = fs::metadata(&md).unwrap().len();
         let mut a = App::new(&dir);
         let opened = Instant::now();
@@ -720,7 +720,7 @@ fn probe_preview() {
 #[test]
 #[ignore]
 fn probe_whole_app_scrolling() {
-    let (dir, src) = workspace("xplor-probe-scroll", 50, 5_000);
+    let (dir, src) = workspace("rhumb-probe-scroll", 50, 5_000);
     let mut a = App::new(&dir);
     a.open_and_focus(&src);
     a.hover_editor();
@@ -771,7 +771,7 @@ fn probe_whole_app_scrolling() {
 /// not changed.
 #[test]
 fn an_idle_window_with_a_focused_editor_asks_for_no_more_than_the_caret_needs() {
-    let (dir, src) = workspace("xplor-idle-repaint", 20, 500);
+    let (dir, src) = workspace("rhumb-idle-repaint", 20, 500);
     let mut a = App::new(&dir);
     a.open_and_focus(&src);
     // Ten seconds in which the window is redrawn exactly when it asks to be.
@@ -797,7 +797,7 @@ fn an_idle_window_with_a_focused_editor_asks_for_no_more_than_the_caret_needs() 
 /// whatever else is around it must not take the click.
 #[test]
 fn a_click_in_the_blank_space_after_a_line_puts_the_caret_at_its_end() {
-    let dir = std::env::temp_dir().join(format!("xplor-eol-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rhumb-eol-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let docs: [(&str, String); 5] = [
@@ -897,7 +897,7 @@ fn a_click_in_the_blank_space_after_a_line_puts_the_caret_at_its_end() {
 /// that scales the interface, which is where a fraction of a point decides a hit.
 #[test]
 fn a_first_click_after_a_line_reaches_its_end_at_any_scale() {
-    let dir = std::env::temp_dir().join(format!("xplor-eols-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rhumb-eols-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("doc.txt");
@@ -950,7 +950,7 @@ fn a_first_click_after_a_line_reaches_its_end_at_any_scale() {
 /// the end of that row, which is not always the end of its line.
 #[test]
 fn a_click_in_the_blank_space_after_a_wrapped_row_puts_the_caret_at_its_end() {
-    let dir = std::env::temp_dir().join(format!("xplor-eolw-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rhumb-eolw-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("doc.txt");
@@ -1004,7 +1004,7 @@ fn probe_whole_app_typing() {
         ("10,000 files", 10_000, 3_000, false),
         ("10,000 files, focus mode", 10_000, 3_000, true),
     ] {
-        let (dir, src) = workspace(&format!("xplor-probe-{files}"), files, lines);
+        let (dir, src) = workspace(&format!("rhumb-probe-{files}"), files, lines);
         let mut a = App::new(&dir);
         a.open_and_focus(&src);
         if focus {
@@ -1073,7 +1073,7 @@ fn wait_for_index(a: &mut App) {
 
 #[test]
 fn showing_a_folder_starts_an_index_of_it() {
-    let root = search_tree("xplor-app-idx-start");
+    let root = search_tree("rhumb-app-idx-start");
     let mut a = App::new(&root);
     a.frame();
     assert!(a.app.indexes.any_for(&root).is_some());
@@ -1083,7 +1083,7 @@ fn showing_a_folder_starts_an_index_of_it() {
 
 #[test]
 fn navigating_into_a_folder_the_index_covers_does_not_start_another() {
-    let root = search_tree("xplor-app-idx-reuse");
+    let root = search_tree("rhumb-app-idx-reuse");
     let mut a = App::new(&root);
     a.frame();
     wait_for_index(&mut a);
@@ -1095,7 +1095,7 @@ fn navigating_into_a_folder_the_index_covers_does_not_start_another() {
 
 #[test]
 fn a_search_with_a_ready_index_comes_from_it_and_is_ranked() {
-    let root = search_tree("xplor-app-idx-ranked");
+    let root = search_tree("rhumb-app-idx-ranked");
     let mut a = App::new(&root);
     wait_for_index(&mut a);
     search_for(&mut a, "report");
@@ -1118,7 +1118,7 @@ fn a_search_with_a_ready_index_comes_from_it_and_is_ranked() {
 
 #[test]
 fn a_search_before_the_index_is_ready_still_finds_everything_by_walking() {
-    let root = search_tree("xplor-app-idx-walk");
+    let root = search_tree("rhumb-app-idx-walk");
     let mut a = App::new(&root);
     // No frame has run, so no index has been asked for yet.
     search_for(&mut a, "report");
@@ -1128,7 +1128,7 @@ fn a_search_before_the_index_is_ready_still_finds_everything_by_walking() {
 
 #[test]
 fn the_status_bar_says_when_results_came_from_an_index() {
-    let root = search_tree("xplor-app-idx-status");
+    let root = search_tree("rhumb-app-idx-status");
     let mut a = App::new(&root);
     wait_for_index(&mut a);
     search_for(&mut a, "md");
@@ -1140,7 +1140,7 @@ fn the_status_bar_says_when_results_came_from_an_index() {
 
 #[test]
 fn a_new_file_appears_in_search_results_after_the_folder_changes() {
-    let root = search_tree("xplor-app-idx-fresh");
+    let root = search_tree("rhumb-app-idx-fresh");
     let mut a = App::new(&root);
     wait_for_index(&mut a);
     search_for(&mut a, "brandnew");
@@ -1165,7 +1165,7 @@ fn a_new_file_appears_in_search_results_after_the_folder_changes() {
 
 #[test]
 fn an_answer_to_a_search_that_was_replaced_is_ignored() {
-    let root = search_tree("xplor-app-idx-stale");
+    let root = search_tree("rhumb-app-idx-stale");
     let mut a = App::new(&root);
     wait_for_index(&mut a);
     search_for(&mut a, "report");
@@ -1195,7 +1195,7 @@ fn an_answer_to_a_search_that_was_replaced_is_ignored() {
 
 #[test]
 fn clearing_the_search_box_clears_the_results() {
-    let root = search_tree("xplor-app-idx-clear");
+    let root = search_tree("rhumb-app-idx-clear");
     let mut a = App::new(&root);
     wait_for_index(&mut a);
     search_for(&mut a, "report");
@@ -1209,7 +1209,7 @@ fn clearing_the_search_box_clears_the_results() {
 
 #[test]
 fn searching_only_this_folder_does_not_use_the_index() {
-    let root = search_tree("xplor-app-idx-here");
+    let root = search_tree("rhumb-app-idx-here");
     let mut a = App::new(&root);
     wait_for_index(&mut a);
     a.app.scope = SearchScope::Here;
@@ -1302,7 +1302,7 @@ fn finish_jobs(a: &mut App) {
 
 #[test]
 fn an_archive_opens_as_a_folder_and_lists_what_is_in_it() {
-    let (dir, z) = archive_workspace("xplor-arch-open");
+    let (dir, z) = archive_workspace("rhumb-arch-open");
     let mut a = App::new(&dir);
     a.frame();
     a.app.open_path(&z);
@@ -1315,7 +1315,7 @@ fn an_archive_opens_as_a_folder_and_lists_what_is_in_it() {
 
 #[test]
 fn a_folder_inside_an_archive_opens_and_lists() {
-    let (dir, z) = archive_workspace("xplor-arch-inner");
+    let (dir, z) = archive_workspace("rhumb-arch-inner");
     let mut a = App::new(&dir);
     a.app.open_path(&z);
     listed(&mut a);
@@ -1331,7 +1331,7 @@ fn a_folder_inside_an_archive_opens_and_lists() {
 
 #[test]
 fn hidden_names_inside_an_archive_follow_the_hidden_files_setting() {
-    let (dir, z) = archive_workspace("xplor-arch-hidden");
+    let (dir, z) = archive_workspace("rhumb-arch-hidden");
     let mut a = App::new(&dir);
     a.app.show_hidden = false;
     a.app.open_path(&z);
@@ -1346,7 +1346,7 @@ fn hidden_names_inside_an_archive_follow_the_hidden_files_setting() {
 
 #[test]
 fn the_address_bar_names_the_archive_and_each_folder_inside_it() {
-    let (dir, z) = archive_workspace("xplor-arch-crumbs");
+    let (dir, z) = archive_workspace("rhumb-arch-crumbs");
     let crumbs = fs_model::breadcrumbs(&z.join("src/deep"));
     let labels: Vec<&str> = crumbs.iter().map(|(l, _)| l.as_str()).collect();
     assert_eq!(
@@ -1363,7 +1363,7 @@ fn the_address_bar_names_the_archive_and_each_folder_inside_it() {
 
 #[test]
 fn up_from_inside_an_archive_goes_one_level_and_from_its_top_to_the_folder_holding_it() {
-    let (dir, z) = archive_workspace("xplor-arch-up");
+    let (dir, z) = archive_workspace("rhumb-arch-up");
     let mut a = App::new(&dir);
     a.app.open_path(&z.join("src/deep"));
     // `open_path` on a folder inside walks there directly.
@@ -1385,7 +1385,7 @@ fn up_from_inside_an_archive_goes_one_level_and_from_its_top_to_the_folder_holdi
 
 #[test]
 fn back_and_forward_walk_in_and_out_of_an_archive() {
-    let (dir, z) = archive_workspace("xplor-arch-history");
+    let (dir, z) = archive_workspace("rhumb-arch-history");
     let mut a = App::new(&dir);
     a.app.open_path(&z);
     a.app.open_path(&z.join("src"));
@@ -1402,7 +1402,7 @@ fn back_and_forward_walk_in_and_out_of_an_archive() {
 
 #[test]
 fn a_file_inside_an_archive_opens_in_the_editor_and_cannot_be_changed() {
-    let (dir, z) = archive_workspace("xplor-arch-readfile");
+    let (dir, z) = archive_workspace("rhumb-arch-readfile");
     let mut a = App::new(&dir);
     a.app.open_path(&z);
     listed(&mut a);
@@ -1424,7 +1424,7 @@ fn a_file_inside_an_archive_opens_in_the_editor_and_cannot_be_changed() {
 
 #[test]
 fn saving_a_file_from_an_archive_does_nothing() {
-    let (dir, z) = archive_workspace("xplor-arch-nosave");
+    let (dir, z) = archive_workspace("rhumb-arch-nosave");
     let mut a = App::new(&dir);
     a.app.open_path(&z.join("readme.txt"));
     a.settle(|a| a.app.loading.is_none() && a.app.doc().is_some());
@@ -1440,7 +1440,7 @@ fn saving_a_file_from_an_archive_does_nothing() {
 
 #[test]
 fn a_file_that_is_not_in_the_archive_says_so_instead_of_opening() {
-    let (dir, z) = archive_workspace("xplor-arch-nofile");
+    let (dir, z) = archive_workspace("rhumb-arch-nofile");
     let mut a = App::new(&dir);
     a.app.open_path(&z.join("no-such-file.txt"));
     for _ in 0..200 {
@@ -1457,7 +1457,7 @@ fn a_file_that_is_not_in_the_archive_says_so_instead_of_opening() {
 
 #[test]
 fn nothing_can_be_pasted_into_an_archive() {
-    let (dir, z) = archive_workspace("xplor-arch-nopaste");
+    let (dir, z) = archive_workspace("rhumb-arch-nopaste");
     let mut a = App::new(&dir);
     a.app
         .start_transfer(vec![dir.join("plain.txt")], z.clone(), false);
@@ -1471,7 +1471,7 @@ fn nothing_can_be_pasted_into_an_archive() {
 
 #[test]
 fn nothing_inside_an_archive_can_be_deleted_renamed_or_created() {
-    let (dir, z) = archive_workspace("xplor-arch-readonly");
+    let (dir, z) = archive_workspace("rhumb-arch-readonly");
     let mut a = App::new(&dir);
     a.app.open_path(&z);
     listed(&mut a);
@@ -1500,7 +1500,7 @@ fn nothing_inside_an_archive_can_be_deleted_renamed_or_created() {
 
 #[test]
 fn files_can_be_copied_out_of_an_archive_into_a_folder() {
-    let (dir, z) = archive_workspace("xplor-arch-copyout");
+    let (dir, z) = archive_workspace("rhumb-arch-copyout");
     let dest = dir.join("out");
     fs::create_dir_all(&dest).unwrap();
     let mut a = App::new(&dir);
@@ -1522,7 +1522,7 @@ fn files_can_be_copied_out_of_an_archive_into_a_folder() {
 
 #[test]
 fn files_cannot_be_moved_out_of_an_archive() {
-    let (dir, z) = archive_workspace("xplor-arch-moveout");
+    let (dir, z) = archive_workspace("rhumb-arch-moveout");
     let dest = dir.join("out");
     fs::create_dir_all(&dest).unwrap();
     let mut a = App::new(&dir);
@@ -1541,7 +1541,7 @@ fn files_cannot_be_moved_out_of_an_archive() {
 
 #[test]
 fn extract_here_makes_a_folder_beside_the_archive_with_everything_in_it() {
-    let (dir, z) = archive_workspace("xplor-arch-extract");
+    let (dir, z) = archive_workspace("rhumb-arch-extract");
     let mut a = App::new(&dir);
     a.app.start_extract(&z);
     finish_jobs(&mut a);
@@ -1561,7 +1561,7 @@ fn extract_here_makes_a_folder_beside_the_archive_with_everything_in_it() {
 
 #[test]
 fn extracting_a_folder_from_inside_an_archive_takes_only_that_folder() {
-    let (dir, z) = archive_workspace("xplor-arch-extract-part");
+    let (dir, z) = archive_workspace("rhumb-arch-extract-part");
     let mut a = App::new(&dir);
     a.app.start_extract(&z.join("src/deep"));
     finish_jobs(&mut a);
@@ -1574,7 +1574,7 @@ fn extracting_a_folder_from_inside_an_archive_takes_only_that_folder() {
 
 #[test]
 fn a_cancelled_extraction_leaves_nothing_behind() {
-    let (dir, _) = archive_workspace("xplor-arch-cancel");
+    let (dir, _) = archive_workspace("rhumb-arch-cancel");
     let big: Vec<(String, Vec<u8>)> = (0..400)
         .map(|i| (format!("f{i}.bin"), vec![1u8; 20_000]))
         .collect();
@@ -1600,7 +1600,7 @@ fn a_cancelled_extraction_leaves_nothing_behind() {
 #[test]
 fn extracting_a_tar_gz_names_the_folder_without_either_extension() {
     use std::io::Write;
-    let (dir, _) = archive_workspace("xplor-arch-targz");
+    let (dir, _) = archive_workspace("rhumb-arch-targz");
     let p = dir.join("bundle.tar.gz");
     let f = fs::File::create(&p).unwrap();
     let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
@@ -1625,7 +1625,7 @@ fn extracting_a_tar_gz_names_the_folder_without_either_extension() {
 
 #[test]
 fn a_broken_archive_shows_as_a_folder_that_could_not_be_read() {
-    let (dir, _) = archive_workspace("xplor-arch-broken");
+    let (dir, _) = archive_workspace("rhumb-arch-broken");
     fs::write(dir.join("broken.zip"), b"definitely not a zip").unwrap();
     let mut a = App::new(&dir);
     a.app.open_path(&dir.join("broken.zip"));
@@ -1646,7 +1646,7 @@ fn a_broken_archive_shows_as_a_folder_that_could_not_be_read() {
 
 #[test]
 fn filtering_by_name_works_inside_an_archive() {
-    let (dir, z) = archive_workspace("xplor-arch-filter");
+    let (dir, z) = archive_workspace("rhumb-arch-filter");
     let mut a = App::new(&dir);
     a.app.open_path(&z.join("src"));
     listed(&mut a);
@@ -1660,7 +1660,7 @@ fn filtering_by_name_works_inside_an_archive() {
 
 #[test]
 fn a_deep_search_inside_an_archive_does_not_walk_or_index_anything() {
-    let (dir, z) = archive_workspace("xplor-arch-nosearch");
+    let (dir, z) = archive_workspace("rhumb-arch-nosearch");
     let mut a = App::new(&dir);
     a.app.open_path(&z);
     listed(&mut a);
@@ -1680,7 +1680,7 @@ fn a_deep_search_inside_an_archive_does_not_walk_or_index_anything() {
 
 #[test]
 fn sorting_applies_inside_an_archive() {
-    let (dir, z) = archive_workspace("xplor-arch-sort");
+    let (dir, z) = archive_workspace("rhumb-arch-sort");
     let mut a = App::new(&dir);
     a.app.open_path(&z.join("src"));
     listed(&mut a);
@@ -1699,7 +1699,7 @@ fn sorting_applies_inside_an_archive() {
 
 #[test]
 fn the_context_menu_for_an_archive_offers_to_extract_it() {
-    let (dir, z) = archive_workspace("xplor-arch-menu");
+    let (dir, z) = archive_workspace("rhumb-arch-menu");
     assert!(archive::is_archive_file(&z));
     assert!(archive::is_virtual(&z.join("src")));
     assert!(!archive::is_virtual(&dir.join("plain.txt")));
@@ -1715,7 +1715,7 @@ fn the_context_menu_for_an_archive_offers_to_extract_it() {
 
 #[test]
 fn archives_are_not_watched_as_if_they_were_folders() {
-    let (dir, z) = archive_workspace("xplor-arch-watch");
+    let (dir, z) = archive_workspace("rhumb-arch-watch");
     let mut a = App::new(&dir);
     a.app.open_path(&z);
     listed(&mut a);
@@ -1726,7 +1726,7 @@ fn archives_are_not_watched_as_if_they_were_folders() {
 
 #[test]
 fn a_big_archive_opens_without_stalling_the_frame() {
-    let (dir, _) = archive_workspace("xplor-arch-bigopen");
+    let (dir, _) = archive_workspace("rhumb-arch-bigopen");
     let names: Vec<String> = (0..3000).map(|i| format!("d{}/f{i}.txt", i % 30)).collect();
     let refs: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
     let z = zip_in(&dir, "big.zip", &refs);
@@ -1771,7 +1771,7 @@ fn show_file(a: &mut App, path: &Path) {
 
 #[test]
 fn the_preview_shows_the_file_that_was_opened_last_and_not_the_first() {
-    let (dir, first, second) = two_notes("xplor-preview-follow");
+    let (dir, first, second) = two_notes("rhumb-preview-follow");
     let mut a = App::new(&dir);
     show_file(&mut a, &first);
     assert!(a.app.preview_buffer.contains("first file"));
@@ -1787,7 +1787,7 @@ fn the_preview_shows_the_file_that_was_opened_last_and_not_the_first() {
 
 #[test]
 fn switching_between_tabs_changes_the_preview_each_time() {
-    let (dir, first, second) = two_notes("xplor-preview-tabs");
+    let (dir, first, second) = two_notes("rhumb-preview-tabs");
     let mut a = App::new(&dir);
     show_file(&mut a, &first);
     show_file(&mut a, &second);
@@ -1813,7 +1813,7 @@ fn switching_between_tabs_changes_the_preview_each_time() {
 
 #[test]
 fn the_preview_of_a_file_that_is_edited_in_a_second_tab_is_that_tabs_text() {
-    let (dir, first, second) = two_notes("xplor-preview-edit");
+    let (dir, first, second) = two_notes("rhumb-preview-edit");
     let mut a = App::new(&dir);
     show_file(&mut a, &first);
     show_file(&mut a, &second);
@@ -1876,7 +1876,7 @@ fn open_file(a: &mut App, path: &Path) {
 
 #[test]
 fn a_window_starts_with_one_folder_tab_named_for_where_it_opened() {
-    let dir = tabs_workspace("xplor-ftab-start");
+    let dir = tabs_workspace("rhumb-ftab-start");
     let mut a = App::new(&dir.join("one"));
     a.frame();
     assert_eq!(folder_labels(&a), vec!["one"]);
@@ -1887,7 +1887,7 @@ fn a_window_starts_with_one_folder_tab_named_for_where_it_opened() {
 
 #[test]
 fn a_new_tab_is_another_place_at_the_same_folder_and_comes_to_the_front() {
-    let dir = tabs_workspace("xplor-ftab-new");
+    let dir = tabs_workspace("rhumb-ftab-new");
     let mut a = App::new(&dir.join("one"));
     a.frame();
     a.app.new_folder_tab();
@@ -1900,7 +1900,7 @@ fn a_new_tab_is_another_place_at_the_same_folder_and_comes_to_the_front() {
 
 #[test]
 fn each_tab_keeps_its_own_folder_and_comes_back_to_it() {
-    let dir = tabs_workspace("xplor-ftab-own");
+    let dir = tabs_workspace("rhumb-ftab-own");
     let mut a = App::new(&dir.join("one"));
     a.frame();
     a.app.new_folder_tab();
@@ -1920,7 +1920,7 @@ fn each_tab_keeps_its_own_folder_and_comes_back_to_it() {
 
 #[test]
 fn the_name_of_a_tab_follows_where_it_goes() {
-    let dir = tabs_workspace("xplor-ftab-label");
+    let dir = tabs_workspace("rhumb-ftab-label");
     let mut a = App::new(&dir.join("one"));
     a.app.new_folder_tab();
     assert_eq!(folder_labels(&a), vec!["one", "one"]);
@@ -1937,7 +1937,7 @@ fn the_name_of_a_tab_follows_where_it_goes() {
 
 #[test]
 fn each_tab_has_its_own_way_back_and_forward() {
-    let dir = tabs_workspace("xplor-ftab-history");
+    let dir = tabs_workspace("rhumb-ftab-history");
     let mut a = App::new(&dir.join("one"));
     a.app.new_folder_tab();
     a.app.navigate(&dir.join("two"));
@@ -1961,7 +1961,7 @@ fn each_tab_has_its_own_way_back_and_forward() {
 
 #[test]
 fn the_selection_comes_back_with_the_tab() {
-    let dir = tabs_workspace("xplor-ftab-selection");
+    let dir = tabs_workspace("rhumb-ftab-selection");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -1988,7 +1988,7 @@ fn the_selection_comes_back_with_the_tab() {
 
 #[test]
 fn the_filter_comes_back_with_the_tab_and_a_new_tab_starts_without_one() {
-    let dir = tabs_workspace("xplor-ftab-filter");
+    let dir = tabs_workspace("rhumb-ftab-filter");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.scope = SearchScope::Here;
@@ -2009,7 +2009,7 @@ fn the_filter_comes_back_with_the_tab_and_a_new_tab_starts_without_one() {
 
 #[test]
 fn the_scroll_position_is_kept_and_put_back() {
-    let dir = tabs_workspace("xplor-ftab-scroll");
+    let dir = tabs_workspace("rhumb-ftab-scroll");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2023,7 +2023,7 @@ fn the_scroll_position_is_kept_and_put_back() {
 
 #[test]
 fn each_tab_has_its_own_open_files() {
-    let dir = tabs_workspace("xplor-ftab-files");
+    let dir = tabs_workspace("rhumb-ftab-files");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     open_file(&mut a, &dir.join("one/a.txt"));
@@ -2049,7 +2049,7 @@ fn each_tab_has_its_own_open_files() {
 
 #[test]
 fn opening_a_file_adds_no_folder_tab_and_closing_the_last_file_closes_the_editor() {
-    let dir = tabs_workspace("xplor-ftab-nofolder");
+    let dir = tabs_workspace("rhumb-ftab-nofolder");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     open_file(&mut a, &dir.join("one/a.txt"));
@@ -2063,7 +2063,7 @@ fn opening_a_file_adds_no_folder_tab_and_closing_the_last_file_closes_the_editor
 
 #[test]
 fn opening_the_same_file_again_brings_its_tab_forward_instead_of_opening_another() {
-    let dir = tabs_workspace("xplor-ftab-same-file");
+    let dir = tabs_workspace("rhumb-ftab-same-file");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     open_file(&mut a, &dir.join("one/a.txt"));
@@ -2076,7 +2076,7 @@ fn opening_the_same_file_again_brings_its_tab_forward_instead_of_opening_another
 
 #[test]
 fn the_same_file_can_be_open_in_two_folder_tabs() {
-    let dir = tabs_workspace("xplor-ftab-same-file-two");
+    let dir = tabs_workspace("rhumb-ftab-same-file-two");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     open_file(&mut a, &dir.join("one/a.txt"));
@@ -2090,7 +2090,7 @@ fn the_same_file_can_be_open_in_two_folder_tabs() {
 
 #[test]
 fn closing_the_tab_in_front_shows_its_neighbour_as_it_was() {
-    let dir = tabs_workspace("xplor-ftab-close");
+    let dir = tabs_workspace("rhumb-ftab-close");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2108,7 +2108,7 @@ fn closing_the_tab_in_front_shows_its_neighbour_as_it_was() {
 
 #[test]
 fn closing_the_first_tab_in_front_shows_the_one_after_it() {
-    let dir = tabs_workspace("xplor-ftab-close-first");
+    let dir = tabs_workspace("rhumb-ftab-close-first");
     let mut a = App::new(&dir.join("one"));
     a.app.new_folder_tab();
     a.app.navigate(&dir.join("two"));
@@ -2122,7 +2122,7 @@ fn closing_the_first_tab_in_front_shows_the_one_after_it() {
 
 #[test]
 fn closing_a_tab_that_is_not_in_front_changes_nothing_on_screen() {
-    let dir = tabs_workspace("xplor-ftab-close-other");
+    let dir = tabs_workspace("rhumb-ftab-close-other");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2140,7 +2140,7 @@ fn closing_a_tab_that_is_not_in_front_changes_nothing_on_screen() {
 
 #[test]
 fn the_last_folder_tab_cannot_be_closed() {
-    let dir = tabs_workspace("xplor-ftab-last");
+    let dir = tabs_workspace("rhumb-ftab-last");
     let mut a = App::new(&dir.join("one"));
     a.frame();
     a.app.close_folder_tab(0);
@@ -2155,7 +2155,7 @@ fn the_last_folder_tab_cannot_be_closed() {
 
 #[test]
 fn closing_a_tab_closes_the_files_that_were_open_in_it() {
-    let dir = tabs_workspace("xplor-ftab-close-files");
+    let dir = tabs_workspace("rhumb-ftab-close-files");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2168,7 +2168,7 @@ fn closing_a_tab_closes_the_files_that_were_open_in_it() {
 
 #[test]
 fn a_tab_with_unsaved_changes_is_not_closed_but_brought_forward() {
-    let dir = tabs_workspace("xplor-ftab-dirty");
+    let dir = tabs_workspace("rhumb-ftab-dirty");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2192,7 +2192,7 @@ fn a_tab_with_unsaved_changes_is_not_closed_but_brought_forward() {
 
 #[test]
 fn a_tab_with_unsaved_changes_shows_it_on_its_strip_entry() {
-    let dir = tabs_workspace("xplor-ftab-dirty-dot");
+    let dir = tabs_workspace("rhumb-ftab-dirty-dot");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2212,7 +2212,7 @@ fn a_tab_with_unsaved_changes_shows_it_on_its_strip_entry() {
 
 #[test]
 fn quitting_with_unsaved_changes_in_another_tab_brings_that_tab_forward() {
-    let dir = tabs_workspace("xplor-ftab-quit");
+    let dir = tabs_workspace("rhumb-ftab-quit");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2231,7 +2231,7 @@ fn quitting_with_unsaved_changes_in_another_tab_brings_that_tab_forward() {
 
 #[test]
 fn a_file_that_finishes_loading_after_the_tab_was_left_lands_in_its_own_tab() {
-    let dir = tabs_workspace("xplor-ftab-loading");
+    let dir = tabs_workspace("rhumb-ftab-loading");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.open_path(&dir.join("one/a.txt"));
@@ -2253,7 +2253,7 @@ fn a_file_that_finishes_loading_after_the_tab_was_left_lands_in_its_own_tab() {
 
 #[test]
 fn ctrl_w_closes_the_file_and_then_the_folder_tab() {
-    let dir = tabs_workspace("xplor-ftab-ctrlw");
+    let dir = tabs_workspace("rhumb-ftab-ctrlw");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2270,7 +2270,7 @@ fn ctrl_w_closes_the_file_and_then_the_folder_tab() {
 
 #[test]
 fn ctrl_t_opens_a_folder_tab() {
-    let dir = tabs_workspace("xplor-ftab-ctrlt");
+    let dir = tabs_workspace("rhumb-ftab-ctrlt");
     let mut a = App::new(&dir.join("one"));
     a.frame();
     press(&mut a, egui::Key::T, egui::Modifiers::CTRL);
@@ -2282,7 +2282,7 @@ fn ctrl_t_opens_a_folder_tab() {
 
 #[test]
 fn ctrl_tab_goes_round_the_folder_tabs_when_the_editor_does_not_have_the_keyboard() {
-    let dir = tabs_workspace("xplor-ftab-cycle");
+    let dir = tabs_workspace("rhumb-ftab-cycle");
     let mut a = App::new(&dir.join("one"));
     a.frame();
     a.app.new_folder_tab();
@@ -2303,7 +2303,7 @@ fn ctrl_tab_goes_round_the_folder_tabs_when_the_editor_does_not_have_the_keyboar
 
 #[test]
 fn ctrl_tab_goes_round_the_files_when_the_editor_has_the_keyboard() {
-    let dir = tabs_workspace("xplor-ftab-cycle-files");
+    let dir = tabs_workspace("rhumb-ftab-cycle-files");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2321,7 +2321,7 @@ fn ctrl_tab_goes_round_the_files_when_the_editor_has_the_keyboard() {
 
 #[test]
 fn there_is_a_limit_to_how_many_folder_tabs_can_be_opened() {
-    let dir = tabs_workspace("xplor-ftab-limit");
+    let dir = tabs_workspace("rhumb-ftab-limit");
     let mut a = App::new(&dir.join("one"));
     for _ in 0..MAX_TABS + 5 {
         a.app.new_folder_tab();
@@ -2333,7 +2333,7 @@ fn there_is_a_limit_to_how_many_folder_tabs_can_be_opened() {
 
 #[test]
 fn a_tab_whose_folder_has_gone_shows_as_unavailable_and_the_others_still_work() {
-    let dir = tabs_workspace("xplor-ftab-gone");
+    let dir = tabs_workspace("rhumb-ftab-gone");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2353,7 +2353,7 @@ fn a_tab_whose_folder_has_gone_shows_as_unavailable_and_the_others_still_work() 
 
 #[test]
 fn folder_tabs_can_be_rearranged_and_the_one_in_front_stays_in_front() {
-    let dir = tabs_workspace("xplor-ftab-move");
+    let dir = tabs_workspace("rhumb-ftab-move");
     let mut a = App::new(&dir.join("one"));
     a.app.new_folder_tab();
     a.app.navigate(&dir.join("two"));
@@ -2378,7 +2378,7 @@ fn folder_tabs_can_be_rearranged_and_the_one_in_front_stays_in_front() {
 
 #[test]
 fn switching_to_a_tab_that_does_not_exist_or_to_the_one_in_front_does_nothing() {
-    let dir = tabs_workspace("xplor-ftab-badswitch");
+    let dir = tabs_workspace("rhumb-ftab-badswitch");
     let mut a = App::new(&dir.join("one"));
     a.app.new_folder_tab();
     a.app.switch_folder(17);
@@ -2389,7 +2389,7 @@ fn switching_to_a_tab_that_does_not_exist_or_to_the_one_in_front_does_nothing() 
 
 #[test]
 fn a_search_in_one_tab_does_not_leak_into_another() {
-    let dir = tabs_workspace("xplor-ftab-search");
+    let dir = tabs_workspace("rhumb-ftab-search");
     let mut a = App::new(&dir);
     listed(&mut a);
     a.app.new_folder_tab();
@@ -2415,7 +2415,7 @@ fn a_search_in_one_tab_does_not_leak_into_another() {
 
 #[test]
 fn the_preview_of_a_markdown_file_is_that_files_in_whichever_tab_it_is_in() {
-    let dir = tabs_workspace("xplor-ftab-preview");
+    let dir = tabs_workspace("rhumb-ftab-preview");
     let mut a = App::new(&dir.join("one"));
     listed(&mut a);
     open_file(&mut a, &dir.join("one/c.md"));
@@ -2499,7 +2499,7 @@ fn file_tab_at(a: &App, i: usize) -> Pos2 {
 
 #[test]
 fn pressing_a_folder_tab_brings_it_forward() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-click", 4);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-click", 4);
     assert_eq!(a.app.active_folder, 3);
     let at = folder_tab_at(&a, 1);
     press_at(&mut a, at, egui::PointerButton::Primary);
@@ -2513,7 +2513,7 @@ fn pressing_a_folder_tab_brings_it_forward() {
 
 #[test]
 fn a_press_that_wobbles_a_few_pixels_still_selects_the_tab() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-wobble", 4);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-wobble", 4);
     let from = folder_tab_at(&a, 0);
     drag_between(&mut a, from, from + Vec2::new(9.0, 2.0));
     assert_eq!(a.app.active_folder, 0);
@@ -2527,7 +2527,7 @@ fn a_press_that_wobbles_a_few_pixels_still_selects_the_tab() {
 
 #[test]
 fn dragging_a_folder_tab_to_another_place_moves_it_there() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-drag", 4);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-drag", 4);
     let from = folder_tab_at(&a, 0);
     let to = folder_tab_at(&a, 2);
     drag_between(&mut a, from, to);
@@ -2540,7 +2540,7 @@ fn dragging_a_folder_tab_to_another_place_moves_it_there() {
 
 #[test]
 fn dragging_past_either_end_puts_the_tab_at_that_end() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-drag-ends", 4);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-drag-ends", 4);
     let from = folder_tab_at(&a, 1);
     drag_between(&mut a, from, Pos2::new(5.0, from.y));
     assert_eq!(folder_labels(&a)[0], "t1");
@@ -2553,7 +2553,7 @@ fn dragging_past_either_end_puts_the_tab_at_that_end() {
 
 #[test]
 fn the_middle_button_closes_the_folder_tab_it_is_over_and_no_other() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-middle", 4);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-middle", 4);
     let at = folder_tab_at(&a, 1);
     press_at(&mut a, at, egui::PointerButton::Middle);
     assert_eq!(folder_labels(&a), vec!["t0", "t2", "t3"]);
@@ -2565,7 +2565,7 @@ fn the_middle_button_closes_the_folder_tab_it_is_over_and_no_other() {
 
 #[test]
 fn the_cross_closes_its_own_folder_tab() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-cross", 4);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-cross", 4);
     a.app.switch_folder(2);
     a.frame();
     let r = a.app.folder_strip.rects[2];
@@ -2577,7 +2577,7 @@ fn the_cross_closes_its_own_folder_tab() {
 
 #[test]
 fn the_plus_button_opens_a_new_folder_tab_after_the_last() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-plus", 3);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-plus", 3);
     let last = *a.app.folder_strip.rects.last().unwrap();
     let plus = Pos2::new(last.right() + 14.0, last.center().y);
     press_at(&mut a, plus, egui::PointerButton::Primary);
@@ -2588,7 +2588,7 @@ fn the_plus_button_opens_a_new_folder_tab_after_the_last() {
 
 #[test]
 fn folder_tabs_that_do_not_fit_slide_instead_of_vanishing() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-overflow", 22);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-overflow", 22);
     let r = a.app.folder_strip.rects[a.app.active_folder];
     assert!(r.left() >= 0.0 && r.right() <= 1160.0, "{r:?}");
     a.app.switch_folder(0);
@@ -2604,7 +2604,7 @@ fn folder_tabs_that_do_not_fit_slide_instead_of_vanishing() {
 
 #[test]
 fn the_wheel_over_the_folder_tabs_slides_them_sideways() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-wheel", 22);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-wheel", 22);
     a.app.switch_folder(0);
     a.frame();
     let at = Pos2::new(300.0, a.app.folder_strip.rects[0].center().y);
@@ -2630,7 +2630,7 @@ fn the_wheel_over_the_folder_tabs_slides_them_sideways() {
 
 #[test]
 fn a_folder_tab_that_is_half_out_of_the_row_can_still_be_pressed() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-edge", 22);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-edge", 22);
     a.app.switch_folder(0);
     a.frame();
     let i = (0..22)
@@ -2648,7 +2648,7 @@ fn a_folder_tab_that_is_half_out_of_the_row_can_still_be_pressed() {
 
 #[test]
 fn cycling_folder_tabs_always_brings_the_tab_into_view() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-cycle", 22);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-cycle", 22);
     for _ in 0..30 {
         press(&mut a, egui::Key::Tab, egui::Modifiers::CTRL);
         a.frame();
@@ -2664,7 +2664,7 @@ fn cycling_folder_tabs_always_brings_the_tab_into_view() {
 
 #[test]
 fn closing_folder_tabs_while_slid_keeps_the_row_in_range() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-close-slid", 22);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-close-slid", 22);
     a.app.switch_folder(21);
     a.frame();
     assert!(a.app.folder_strip.scroll > 0.0);
@@ -2680,7 +2680,7 @@ fn closing_folder_tabs_while_slid_keeps_the_row_in_range() {
 
 #[test]
 fn an_idle_row_does_not_drift() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-idle", 22);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-idle", 22);
     a.app.switch_folder(11);
     for _ in 0..5 {
         a.frame();
@@ -2695,7 +2695,7 @@ fn an_idle_row_does_not_drift() {
 
 #[test]
 fn every_folder_tab_has_room_to_show_its_name() {
-    let (a, dir) = with_folder_tabs("xplor-strip-widths", 6);
+    let (a, dir) = with_folder_tabs("rhumb-strip-widths", 6);
     for r in &a.app.folder_strip.rects {
         assert!(r.width() >= 100.0, "{r:?}");
     }
@@ -2704,7 +2704,7 @@ fn every_folder_tab_has_room_to_show_its_name() {
 
 #[test]
 fn pressing_the_folder_tab_that_is_already_in_front_does_nothing_harmful() {
-    let (mut a, dir) = with_folder_tabs("xplor-strip-same", 3);
+    let (mut a, dir) = with_folder_tabs("rhumb-strip-same", 3);
     let at = folder_tab_at(&a, 2);
     for _ in 0..4 {
         press_at(&mut a, at, egui::PointerButton::Primary);
@@ -2737,7 +2737,7 @@ fn with_files(name: &str, n: usize) -> (App, PathBuf) {
 
 #[test]
 fn pressing_a_file_tab_brings_that_file_forward() {
-    let (mut a, dir) = with_files("xplor-files-click", 4);
+    let (mut a, dir) = with_files("rhumb-files-click", 4);
     assert_eq!(a.app.tabs.active, 3);
     let at = file_tab_at(&a, 1);
     press_at(&mut a, at, egui::PointerButton::Primary);
@@ -2749,7 +2749,7 @@ fn pressing_a_file_tab_brings_that_file_forward() {
 
 #[test]
 fn the_row_of_files_sits_above_the_editor_inside_its_pane() {
-    let (a, dir) = with_files("xplor-files-place", 2);
+    let (a, dir) = with_files("rhumb-files-place", 2);
     let strip = a.app.doc_strip.rects[0];
     let folders = a.app.folder_strip.rects[0];
     assert!(strip.top() > folders.bottom(), "below the folder tabs");
@@ -2762,7 +2762,7 @@ fn the_row_of_files_sits_above_the_editor_inside_its_pane() {
 
 #[test]
 fn the_cross_on_a_file_tab_closes_that_file() {
-    let (mut a, dir) = with_files("xplor-files-cross", 3);
+    let (mut a, dir) = with_files("rhumb-files-cross", 3);
     let r = a.app.doc_strip.rects[1];
     let cross = Pos2::new(r.right() - 11.0, r.center().y);
     press_at(&mut a, cross, egui::PointerButton::Primary);
@@ -2772,7 +2772,7 @@ fn the_cross_on_a_file_tab_closes_that_file() {
 
 #[test]
 fn the_middle_button_closes_a_file_tab() {
-    let (mut a, dir) = with_files("xplor-files-middle", 3);
+    let (mut a, dir) = with_files("rhumb-files-middle", 3);
     let at = file_tab_at(&a, 0);
     press_at(&mut a, at, egui::PointerButton::Middle);
     assert_eq!(file_labels(&a), vec!["f01.txt", "f02.txt"]);
@@ -2781,7 +2781,7 @@ fn the_middle_button_closes_a_file_tab() {
 
 #[test]
 fn file_tabs_can_be_dragged_into_another_order() {
-    let (mut a, dir) = with_files("xplor-files-drag", 3);
+    let (mut a, dir) = with_files("rhumb-files-drag", 3);
     let from = file_tab_at(&a, 0);
     let to = file_tab_at(&a, 2);
     drag_between(&mut a, from, to);
@@ -2792,7 +2792,7 @@ fn file_tabs_can_be_dragged_into_another_order() {
 
 #[test]
 fn a_file_with_unsaved_changes_asks_before_its_cross_closes_it() {
-    let (mut a, dir) = with_files("xplor-files-dirty-cross", 2);
+    let (mut a, dir) = with_files("rhumb-files-dirty-cross", 2);
     a.ctx.memory_mut(|m| m.request_focus(Id::new(codeedit::ID)));
     a.frame();
     a.type_char("Q");
@@ -2808,7 +2808,7 @@ fn a_file_with_unsaved_changes_asks_before_its_cross_closes_it() {
 
 #[test]
 fn many_files_slide_in_their_row_and_the_one_in_front_is_in_view() {
-    let (mut a, dir) = with_files("xplor-files-overflow", 16);
+    let (mut a, dir) = with_files("rhumb-files-overflow", 16);
     let pane_left = a.app.doc_strip.rects[0].left().min(0.0);
     let _ = pane_left;
     let r = a.app.doc_strip.rects[a.app.tabs.active];
@@ -2827,7 +2827,7 @@ fn many_files_slide_in_their_row_and_the_one_in_front_is_in_view() {
 fn the_files_row_and_the_folder_row_do_not_share_widgets() {
     // Both rows hold a tab at the same place in their order, and pressing one must not be
     // taken for pressing the other.
-    let (mut a, dir) = with_files("xplor-files-separate", 3);
+    let (mut a, dir) = with_files("rhumb-files-separate", 3);
     a.app.new_folder_tab();
     a.app.switch_folder(0);
     let at = file_tab_at(&a, 0);

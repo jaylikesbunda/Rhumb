@@ -1412,7 +1412,7 @@ impl Editor {
 /// is on: in the right-hand panel, or in the middle of the window. With a
 /// per-`Ui` id those would be two different editors, and switching between them
 /// would drop the caret and the scroll position.
-pub const ID: &str = "xplor-editor";
+pub const ID: &str = "rhumb-editor";
 
 /// Where the editor's own glyphs come from.
 fn font() -> egui::FontId {

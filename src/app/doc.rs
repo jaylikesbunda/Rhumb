@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     /// The tab on screen.
     pub(super) fn tab(&self) -> Option<&Tab> {
         self.tabs.active_tab()
@@ -592,7 +592,7 @@ impl Xplor {
 
     /// Records how long the editor took, and logs the worst frame seen so far.
     ///
-    /// Only when `XPLOR_BENCH` is set, and the whole probe is two comparisons
+    /// Only when `RHUMB_BENCH` is set, and the whole probe is two comparisons
     /// and an add otherwise. It reports a running maximum rather than logging
     /// every slow frame, because a frame that is fast is exactly as interesting
     /// as one that is not, and a log full of nothing is easy to mistake for a
@@ -827,7 +827,7 @@ impl Xplor {
         let read_path = path.to_path_buf();
         let watch_dir = path.parent().map(|p| p.to_path_buf());
         let _ = std::thread::Builder::new()
-            .name("xplor-read".into())
+            .name("rhumb-read".into())
             .spawn(move || {
                 // A file inside an archive is brought out to a real one first, and
                 // read from there, but it stays named for where it came from and

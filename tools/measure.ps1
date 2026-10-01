@@ -1,6 +1,6 @@
-# Measures Xplor against explorer.exe on this machine.
+# Measures Rhumb against explorer.exe on this machine.
 #
-# Everything here is automatable except the folder-open timing, which Xplor's
+# Everything here is automatable except the folder-open timing, which Rhumb's
 # own status bar reports as it happens. See the note printed at the end.
 #
 # Usage, from a fresh login with both apps closed:
@@ -13,7 +13,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$XplorPath,
+    [string]$RhumbPath,
     [int]$IdleSeconds = 30,
     [switch]$RestartExplorer
 )
@@ -22,9 +22,9 @@ $ErrorActionPreference = 'Stop'
 
 # Resolved here rather than in the param default: $PSScriptRoot is not yet bound
 # when defaults are evaluated under `powershell -File`.
-if (-not $XplorPath) {
+if (-not $RhumbPath) {
     $root = Split-Path (Split-Path $PSCommandPath -Parent) -Parent
-    $XplorPath = Join-Path $root 'target\release\xplor.exe'
+    $RhumbPath = Join-Path $root 'target\release\rhumb.exe'
 }
 
 function Get-IdleCpu {
@@ -62,8 +62,8 @@ function Measure-ColdStart {
     $sw.ElapsedMilliseconds
 }
 
-if (-not (Test-Path $XplorPath)) {
-    throw "xplor.exe not found at $XplorPath. Run 'cargo build --release' first."
+if (-not (Test-Path $RhumbPath)) {
+    throw "rhumb.exe not found at $RhumbPath. Run 'cargo build --release' first."
 }
 
 $machine = Get-CimInstance Win32_ComputerSystem
@@ -84,12 +84,12 @@ if ($RestartExplorer) {
 } else {
     'explorer.exe : skipped (pass -RestartExplorer to measure; this closes Explorer windows)'
 }
-"xplor.exe    : $(Measure-ColdStart $XplorPath) ms"
+"rhumb.exe    : $(Measure-ColdStart $RhumbPath) ms"
 
 ''
 "=== idle over $IdleSeconds s, one folder open ==="
 'process     idle CPU    working set'
-foreach ($name in 'explorer', 'xplor') {
+foreach ($name in 'explorer', 'rhumb') {
     $cpuPct = Get-IdleCpu -Name $name -Seconds $IdleSeconds
     $mem = Get-MemMb -Name $name
     if ($null -eq $cpuPct) {
@@ -101,9 +101,9 @@ foreach ($name in 'explorer', 'xplor') {
 
 ''
 '=== on disk ==='
-$xplorSize = [math]::Round((Get-Item $XplorPath).Length / 1MB, 1)
+$rhumbSize = [math]::Round((Get-Item $RhumbPath).Length / 1MB, 1)
 $xploreSize = [math]::Round((Get-Item "$env:SystemRoot\explorer.exe").Length / 1MB, 1)
-"xplor.exe    $xplorSize MB"
+"rhumb.exe    $rhumbSize MB"
 "explorer.exe $xploreSize MB (system component)"
 
 ''

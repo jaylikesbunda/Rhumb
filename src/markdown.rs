@@ -1735,7 +1735,7 @@ mod tests {
             ui.set_max_size(egui::vec2(400.0, 600.0));
             height = p.show(ui, 8.0);
         });
-        if std::env::var_os("XPLOR_DUMP_SHAPES").is_some() {
+        if std::env::var_os("RHUMB_DUMP_SHAPES").is_some() {
             for cs in &out.shapes {
                 if let egui::epaint::Shape::Text(t) = &cs.shape {
                     println!(

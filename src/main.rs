@@ -1,4 +1,4 @@
-//! Xplor: a minimal, fast, dark file explorer with a built-in text and
+//! Rhumb: a minimal, fast, dark file explorer with a built-in text and
 //! Markdown editor.
 
 #![warn(clippy::all)]
@@ -42,8 +42,8 @@ fn main() -> eframe::Result {
 
     let icon = load_icon();
     let viewport = ViewportBuilder::default()
-        .with_title("Xplor")
-        .with_app_id("dev.xplor.explorer")
+        .with_title("Rhumb")
+        .with_app_id("dev.rhumb.explorer")
         .with_inner_size([1160.0, 720.0])
         .with_min_inner_size([720.0, 440.0])
         // egui-winit ignores `titlebar_shown`, so the only route to a custom
@@ -66,11 +66,11 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "xplor",
+        "rhumb",
         native,
         Box::new(|cc| {
             instance::watch(cc.egui_ctx.clone());
-            Ok(Box::new(app::Xplor::new(cc)))
+            Ok(Box::new(app::Rhumb::new(cc)))
         }),
     )
 }
@@ -114,8 +114,8 @@ fn init_logging() {
     let path = dirs::data_local_dir()
         .or_else(dirs::config_dir)
         .unwrap_or_else(std::env::temp_dir)
-        .join("xplor")
-        .join("xplor.log");
+        .join("rhumb")
+        .join("rhumb.log");
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -146,5 +146,5 @@ fn init_logging() {
         )
     });
     let _ = builder.try_init();
-    log::info!("xplor {} starting", env!("CARGO_PKG_VERSION"));
+    log::info!("rhumb {} starting", env!("CARGO_PKG_VERSION"));
 }

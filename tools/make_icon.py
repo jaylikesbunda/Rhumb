@@ -1,4 +1,4 @@
-"""Generates the Xplor icon set from a single vector description.
+"""Generates the Rhumb icon set from a single vector description.
 
 Run:  python tools/make_icon.py
 

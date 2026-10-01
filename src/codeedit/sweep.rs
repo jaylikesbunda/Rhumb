@@ -36,7 +36,7 @@
 //!
 //! Nothing here is timed and nothing is random unless the test says so with a
 //! fixed seed, so a failure is reproducible from its name alone. Set
-//! `XPLOR_SWEEP=2` to roughly triple the depth of every layer; the seeds do not
+//! `RHUMB_SWEEP=2` to roughly triple the depth of every layer; the seeds do not
 //! change, so a failure found at the higher setting is still the same failure.
 
 use super::harness::{Harness, Rng, random_doc};
@@ -370,7 +370,7 @@ fn sane(h: &Harness, what: &str) {
 
 // ---- how much to sweep ------------------------------------------------------
 
-/// The depth multiplier, from `XPLOR_SWEEP`. `0` is the default and the tests are
+/// The depth multiplier, from `RHUMB_SWEEP`. `0` is the default and the tests are
 /// still exhaustive at their stated sizes; `2` roughly triples the depth of the
 /// permutation and enumeration layers.
 ///
@@ -378,7 +378,7 @@ fn sane(h: &Harness, what: &str) {
 /// down and a deliberate hunt can turn it up, without the source changing and
 /// without a test depending on which machine it ran on.
 fn depth() -> usize {
-    std::env::var("XPLOR_SWEEP")
+    std::env::var("RHUMB_SWEEP")
         .ok()
         .and_then(|v| v.parse().ok())
         .map_or(1, |n: usize| n.max(1))

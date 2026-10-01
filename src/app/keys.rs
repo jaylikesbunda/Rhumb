@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     pub(super) fn handle_keys(&mut self, ctx: &Context) {
         let mut k = Keys::default();
         ctx.input_mut(|i| {

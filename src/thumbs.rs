@@ -70,7 +70,7 @@ impl Thumbs {
         let p = path.to_path_buf();
         let tx = self.tx.clone();
         let spawned = std::thread::Builder::new()
-            .name("xplor-thumb".into())
+            .name("rhumb-thumb".into())
             .spawn(move || {
                 let msg = match decode(&p, px) {
                     Some((rgba, w, h)) => Msg::Thumb {
@@ -199,7 +199,7 @@ mod tests {
         let src = image::RgbaImage::from_fn(64, 32, |x, y| {
             image::Rgba([(x * 4) as u8, (y * 8) as u8, 128, 255])
         });
-        let path = std::env::temp_dir().join("xplor-thumb-test.png");
+        let path = std::env::temp_dir().join("rhumb-thumb-test.png");
         src.save(&path).expect("write png");
 
         // Downscaling fits the long edge to the target, keeping the aspect.
@@ -234,7 +234,7 @@ mod size_tests {
     fn a_larger_size_is_asked_for_when_the_tiles_grow() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut t = Thumbs::new(tx);
-        let dir = std::env::temp_dir().join(format!("xplor-thumb-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rhumb-thumb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.png");

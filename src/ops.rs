@@ -47,7 +47,7 @@ pub fn start_transfer_pairs(
     };
 
     std::thread::Builder::new()
-        .name("xplor-op".into())
+        .name("rhumb-op".into())
         .spawn(move || {
             let mut progress = Progress {
                 id,
@@ -124,7 +124,7 @@ pub fn start_transfer(
     };
 
     std::thread::Builder::new()
-        .name("xplor-op".into())
+        .name("rhumb-op".into())
         .spawn(move || run_transfer(tx, id, sources, dest_dir, cut, cancel))
         .expect("spawn transfer thread");
 
@@ -350,7 +350,7 @@ impl Measures {
             let p = path.to_path_buf();
             // One thread per request, and `asked` keeps it to one per folder.
             let _ = std::thread::Builder::new()
-                .name("xplor-measure".into())
+                .name("rhumb-measure".into())
                 .spawn(move || {
                     let _ = tx.send(Msg::Measured {
                         measure: measure(&p),
@@ -462,7 +462,7 @@ pub fn start_zip(
     let dest = dest_dir.join(&archive_name);
 
     std::thread::Builder::new()
-        .name("xplor-zip".into())
+        .name("rhumb-zip".into())
         .spawn(move || {
             // Counting first means the progress bar is honest from the start.
             let mut total_items = 0usize;
@@ -538,7 +538,7 @@ pub fn start_extract(
         started: std::time::Instant::now(),
     };
     std::thread::Builder::new()
-        .name("xplor-extract".into())
+        .name("rhumb-extract".into())
         .spawn(move || {
             let (total_items, total_bytes) =
                 crate::archive::count_files(&archive, &inner).unwrap_or((0, 0));
@@ -841,7 +841,7 @@ pub fn start_permanent_delete(
         started: job.started,
     };
     std::thread::Builder::new()
-        .name("xplor-del".into())
+        .name("rhumb-del".into())
         .spawn(move || {
             let total_items: usize = paths.iter().map(|p| count_items(p)).sum();
             let total_bytes: u64 = paths.iter().map(|p| dir_size(p)).sum();
@@ -892,7 +892,7 @@ mod tests {
     use crate::workers::bus;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("xplor-op-{name}"));
+        let d = std::env::temp_dir().join(format!("rhumb-op-{name}"));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

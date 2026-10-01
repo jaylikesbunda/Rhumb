@@ -3130,6 +3130,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "rhumb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "clipboard-win",
+ "dirs",
+ "eframe",
+ "egui",
+ "egui-phosphor",
+ "env_logger",
+ "flate2",
+ "image",
+ "jiff",
+ "log",
+ "notify",
+ "open",
+ "pulldown-cmark",
+ "ropey",
+ "sysinfo",
+ "tar",
+ "trash",
+ "walkdir",
+ "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
 name = "ropey"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4741,34 +4769,6 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
-
-[[package]]
-name = "xplor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "clipboard-win",
- "dirs",
- "eframe",
- "egui",
- "egui-phosphor",
- "env_logger",
- "flate2",
- "image",
- "jiff",
- "log",
- "notify",
- "open",
- "pulldown-cmark",
- "ropey",
- "sysinfo",
- "tar",
- "trash",
- "walkdir",
- "windows-sys 0.61.2",
- "zip",
-]
 
 [[package]]
 name = "yoke"

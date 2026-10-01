@@ -3406,10 +3406,10 @@ fn within(what: &str, got: (f64, f64), median: f64, worst: f64) {
     // The median is what typing feels like, and it holds steady however busy the
     // machine is, so it is always held to its budget. The worst case is a stall, and
     // on a machine running the whole test suite at once a stall is as likely to be
-    // another test as this one: so unless `XPLOR_STRICT_SPEED` is set, for a run on a
+    // another test as this one: so unless `RHUMB_STRICT_SPEED` is set, for a run on a
     // quiet machine, the worst case only has to be short of something a person would
     // call a freeze.
-    let strict = std::env::var_os("XPLOR_STRICT_SPEED").is_some();
+    let strict = std::env::var_os("RHUMB_STRICT_SPEED").is_some();
     // At 240 frames a second a whole frame is 4.2 ms, editor and everything else in it,
     // so in the strict run no single step of editing gets more than 4 ms. Operations
     // that work over a whole large document — pasting a hundred kilobytes, deleting

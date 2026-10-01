@@ -1,10 +1,10 @@
-# Xplor
+# Rhumb
 
 A dark, fast file explorer with a built-in code editor and live Markdown
 preview. Native Rust and [egui](https://github.com/emilk/egui): one binary, no
 runtime.
 
-![Xplor](assets/screenshot.png)
+![Rhumb](assets/screenshot.png)
 
 ## Features
 
@@ -56,7 +56,7 @@ The release binary is about 16 MB. Reproduce with:
     cargo test --release instant -- --nocapture --test-threads=1
 
 These are in-process frame timings, not a comparison against other programs.
-Set `XPLOR_STRICT_SPEED=1` to hold the tests to the 240 fps budget on a quiet
+Set `RHUMB_STRICT_SPEED=1` to hold the tests to the 240 fps budget on a quiet
 machine.
 
 ## Where it is stronger
@@ -88,10 +88,10 @@ Download a build from the releases page:
 
 | File | |
 |:--|:--|
-| `xplor-<version>-x64.msi` | Windows installer |
-| `xplor-<version>-windows-portable.zip` | Windows, no install |
+| `rhumb-<version>-x64.msi` | Windows installer |
+| `rhumb-<version>-windows-portable.zip` | Windows, no install |
 
-Settings are stored in `%LOCALAPPDATA%\xplor\prefs.txt`. Delete it to reset.
+Settings are stored in `%LOCALAPPDATA%\rhumb\prefs.txt`. Delete it to reset.
 
 ## Build
 

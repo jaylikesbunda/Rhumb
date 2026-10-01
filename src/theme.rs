@@ -146,10 +146,10 @@ const JBMONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regu
 const JBMONO_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
 
 /// Font families registered in the app.
-pub const FAMILY_UI: &str = "xplor-ui";
-pub const FAMILY_UI_BOLD: &str = "xplor-ui-bold";
-pub const FAMILY_MONO: &str = "xplor-mono";
-pub const FAMILY_MONO_BOLD: &str = "xplor-mono-bold";
+pub const FAMILY_UI: &str = "rhumb-ui";
+pub const FAMILY_UI_BOLD: &str = "rhumb-ui-bold";
+pub const FAMILY_MONO: &str = "rhumb-mono";
+pub const FAMILY_MONO_BOLD: &str = "rhumb-mono-bold";
 
 /// Loads Inter (UI) and JetBrains Mono (code) ahead of egui's bundled fallbacks,
 /// so icons and symbols we do not ship still render.

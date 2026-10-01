@@ -93,7 +93,7 @@ impl Index {
         let scanned = index.scanned.clone();
         let root = root.to_path_buf();
         let spawned = std::thread::Builder::new()
-            .name("xplor-index".into())
+            .name("rhumb-index".into())
             .spawn(move || {
                 let mut batch: Vec<IndexEntry> = Vec::with_capacity(2048);
                 let mut truncated = false;
@@ -414,7 +414,7 @@ impl Indexes {
                 let x = x.clone();
                 let dir = dir.to_path_buf();
                 let _ = std::thread::Builder::new()
-                    .name("xplor-reindex".into())
+                    .name("rhumb-reindex".into())
                     .spawn(move || x.rescan_dir(&dir));
             }
         }
@@ -442,7 +442,7 @@ mod tests {
     use std::time::Duration;
 
     fn tree(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("xplor-index-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src/deep/deeper")).unwrap();
         std::fs::write(root.join("Cargo.toml"), b"[package]").unwrap();
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn matches_are_ranked_exact_then_prefix_then_the_rest() {
-        let root = std::env::temp_dir().join(format!("xplor-index-rank-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-rank-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         std::fs::write(root.join("a/b/report"), b"").unwrap();
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn of_two_equal_matches_the_one_nearer_the_top_comes_first() {
-        let root = std::env::temp_dir().join(format!("xplor-index-depth-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-depth-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("x/y/z")).unwrap();
         std::fs::write(root.join("x/y/z/todo.txt"), b"").unwrap();
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn a_limit_keeps_the_best_and_says_there_were_more() {
-        let root = std::env::temp_dir().join(format!("xplor-index-limit-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-limit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         for i in 0..50 {
@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn names_with_accents_and_capitals_are_found_by_their_lower_case() {
-        let root = std::env::temp_dir().join(format!("xplor-index-case-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("ÄÖÜ Straße.txt"), b"").unwrap();
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn characters_that_mean_something_to_a_pattern_are_taken_literally() {
-        let root = std::env::temp_dir().join(format!("xplor-index-lit-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-lit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a+b (1).txt"), b"").unwrap();
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_search_while_the_index_is_still_filling_is_safe_and_only_ever_grows() {
-        let root = std::env::temp_dir().join(format!("xplor-index-grow-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-grow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         for d in 0..20 {
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn a_build_carries_on_while_any_handle_is_held_and_stops_when_the_last_goes() {
-        let root = std::env::temp_dir().join(format!("xplor-index-drop-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rhumb-index-drop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         for d in 0..30 {
@@ -815,11 +815,11 @@ mod tests {
 
     #[test]
     fn an_index_of_a_folder_that_does_not_exist_is_ready_and_empty() {
-        let ix = Index::build(Path::new("no-such-folder-anywhere-xplor"));
+        let ix = Index::build(Path::new("no-such-folder-anywhere-rhumb"));
         wait(&ix);
         assert_eq!(ix.len(), 0);
         assert!(
-            ix.search(Path::new("no-such-folder-anywhere-xplor"), "a", 5)
+            ix.search(Path::new("no-such-folder-anywhere-rhumb"), "a", 5)
                 .0
                 .is_empty()
         );
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn only_so_many_indexes_are_kept_and_the_oldest_goes_first() {
-        let base = std::env::temp_dir().join(format!("xplor-index-lru-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("rhumb-index-lru-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let mut set = Indexes::default();
         let mut dirs = Vec::new();

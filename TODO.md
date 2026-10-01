@@ -1,4 +1,4 @@
-# Xplor TODO
+# Rhumb TODO
 
 Backlog, roughly in priority order. Items are unchecked until done.
 
@@ -39,7 +39,7 @@ sizes.
 - [x] `Doc::dirty` cached against the document version. It hashed the whole
       buffer, twice a frame, and was the largest cost in the frame after the
       editor itself.
-- [x] `XPLOR_BENCH` split into named sections, so a slow frame can be
+- [x] `RHUMB_BENCH` split into named sections, so a slow frame can be
       attributed rather than merely counted.
 - [x] `app.rs` split into modules (toolbar, sidebar, list, settings, status, ...).
 - [x] Folder tabs, each with its own history, selection and open files.

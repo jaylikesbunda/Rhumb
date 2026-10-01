@@ -761,7 +761,7 @@ struct Keys {
 }
 
 /// The application state.
-pub struct Xplor {
+pub struct Rhumb {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     ids: Ids,
@@ -914,7 +914,7 @@ pub struct Xplor {
     ed_focused: bool,
     /// The editor took this frame's clipboard shortcut.
     ed_took_clipboard: bool,
-    /// Editor timing, for the `XPLOR_BENCH` probe. Read every frame, written
+    /// Editor timing, for the `RHUMB_BENCH` probe. Read every frame, written
     /// only when the probe is set.
     bench_since: Option<Instant>,
     bench_frames: u32,
@@ -944,7 +944,7 @@ struct Perf {
     list_ms: f32,
 }
 
-/// Whether the `XPLOR_BENCH` probe is switched on.
+/// Whether the `RHUMB_BENCH` probe is switched on.
 ///
 /// Asked eight times a frame, and reading the environment on Windows walks the
 /// process's whole environment block — so asking it in the loop made the probe
@@ -952,20 +952,20 @@ struct Perf {
 /// inflated by it. Read once.
 fn bench_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("XPLOR_BENCH").is_some())
+    *ON.get_or_init(|| std::env::var_os("RHUMB_BENCH").is_some())
 }
 
-impl Xplor {
+impl Rhumb {
     /// Builds the app and starts the first directory listing.
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Xplor {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Rhumb {
         // What windows that were closed badly left behind.
         let _ = std::thread::Builder::new()
-            .name("xplor-sweep".into())
+            .name("rhumb-sweep".into())
             .spawn(archive::sweep_cache);
         let (tx, rx) = workers::bus();
         let arg = std::env::args().nth(1).map(PathBuf::from);
 
-        let mut app = Xplor {
+        let mut app = Rhumb {
             tx: tx.clone(),
             rx,
             ids: Ids::default(),
@@ -1607,7 +1607,7 @@ fn prefs_path() -> PathBuf {
     dirs::config_dir()
         .or_else(dirs::data_local_dir)
         .unwrap_or_else(std::env::temp_dir)
-        .join("xplor")
+        .join("rhumb")
         .join("prefs.txt")
 }
 
@@ -1620,7 +1620,7 @@ fn sort_name(k: SortKey) -> &'static str {
     }
 }
 
-impl eframe::App for Xplor {
+impl eframe::App for Rhumb {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.draw(ui, &ctx);
@@ -1630,7 +1630,7 @@ impl eframe::App for Xplor {
         self.write_prefs();
         // Whatever was brought out of an archive to be read goes with the window.
         archive::clear_own_cache();
-        log::info!("xplor exiting");
+        log::info!("rhumb exiting");
     }
 }
 

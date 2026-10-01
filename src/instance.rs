@@ -18,7 +18,7 @@ fn signal_file() -> Option<PathBuf> {
     let dir = dirs::data_local_dir()
         .or_else(dirs::config_dir)
         .unwrap_or_else(std::env::temp_dir)
-        .join("xplor");
+        .join("rhumb");
     Some(dir.join("instance.signal"))
 }
 
@@ -170,7 +170,7 @@ mod platform {
     use std::path::PathBuf;
 
     /// Must match whatever the first window created.
-    const MUTEX: &str = r"Local\xplor-single-instance";
+    const MUTEX: &str = r"Local\rhumb-single-instance";
 
     /// NUL-terminated UTF-16, as every Win32 wide call wants.
     fn wide(s: &str) -> Vec<u16> {
@@ -215,7 +215,7 @@ mod platform {
         let dir = dirs::data_local_dir()
             .or_else(dirs::config_dir)
             .unwrap_or_else(std::env::temp_dir)
-            .join("xplor");
+            .join("rhumb");
         Some(dir.join("instance.lock"))
     }
 
@@ -266,7 +266,7 @@ mod tests {
     /// A private directory per test, so a test neither sees nor disturbs a
     /// real running instance.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("xplor-instance-{name}"));
+        let dir = std::env::temp_dir().join(format!("rhumb-instance-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

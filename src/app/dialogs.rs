@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Xplor {
+impl Rhumb {
     pub(super) fn dialogs(&mut self, ctx: &Context) {
         let dialog = std::mem::replace(&mut self.dialog, Dialog::None);
         let next = match dialog {

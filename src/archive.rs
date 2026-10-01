@@ -508,7 +508,7 @@ fn extract_tar<R: Read>(
 
 /// Where files brought out of archives are kept until the window closes.
 pub fn cache_root() -> PathBuf {
-    std::env::temp_dir().join(format!("xplor-archive-{}", std::process::id()))
+    std::env::temp_dir().join(format!("rhumb-archive-{}", std::process::id()))
 }
 
 /// Makes a path inside an archive into a real one, by extracting it to the cache, and
@@ -553,10 +553,10 @@ pub fn sweep_cache() {
     let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
         return;
     };
-    let mine = format!("xplor-archive-{}", std::process::id());
+    let mine = format!("rhumb-archive-{}", std::process::id());
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with("xplor-archive-") && name != mine {
+        if name.starts_with("rhumb-archive-") && name != mine {
             // Old ones only: another window may be using its own right now.
             let old = e
                 .metadata()
@@ -578,7 +578,7 @@ mod tests {
 
     fn dir(name: &str) -> PathBuf {
         let d =
-            std::env::temp_dir().join(format!("xplor-archive-test-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("rhumb-archive-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
