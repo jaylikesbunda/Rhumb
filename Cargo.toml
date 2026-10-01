@@ -50,6 +50,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+[build-dependencies]
+embed-resource = "3"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
