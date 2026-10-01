@@ -1,5 +1,7 @@
 name: release
 
+# Run by hand from the Actions tab: enter the version and it builds, tags and publishes.
+
 on:
   workflow_dispatch:
     inputs:
