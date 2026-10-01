@@ -4,8 +4,6 @@ A dark, fast file explorer with a built-in code editor and live Markdown
 preview. Native Rust and [egui](https://github.com/emilk/egui): one binary, no
 runtime.
 
-![Rhumb](assets/screenshot.png)
-
 ## Features
 
 **Browsing**
