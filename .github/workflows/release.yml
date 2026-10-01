@@ -1,60 +1,66 @@
 name: release
 
-# A `v*` tag publishes installers for that version. Pushes to main and pull
-# requests only prove the project still builds and passes on both platforms.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0 (digits and dots only)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as a pre-release"
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - name: Formatting
-        run: cargo fmt --check
-      - name: Lints
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Tests
-        run: cargo test
-      - name: Check the other platform's build
-        if: matrix.os == 'windows-latest'
-        run: |
-          rustup target add x86_64-unknown-linux-gnu
-          cargo check --target x86_64-unknown-linux-gnu
-
-  msi:
-    name: windows installer
-    needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+  release:
     runs-on: windows-latest
+    permissions:
+      contents: write
     defaults:
       run:
         shell: bash
     steps:
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must look like 1.2.3" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
+
+      - name: Refuse to overwrite an existing tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "tag v$VERSION already exists" >&2
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release
-      # The WiX binaries are fetched rather than taken from the runner image, so
-      # the build does not depend on what that image happens to carry, and needs
-      # no administrator rights. This is the same payload used locally.
+
+      - name: Set the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          sed -i '0,/^version = ".*"/s//version = "'"$VERSION"'"/' Cargo.toml
+          grep -m1 '^version' Cargo.toml
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
       - name: Fetch the WiX toolset
         shell: pwsh
         run: |
@@ -64,64 +70,27 @@ jobs:
             -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\wix" -Force
           "$env:RUNNER_TEMP\wix" >> $env:GITHUB_PATH
-      - name: Build the MSI
-        run: tools/build_msi.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: xplor-msi
-          path: dist/*.msi
-          if-no-files-found: error
 
-  appimage:
-    name: linux appimage
-    needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install the runtime libraries winit links against
+      - name: Package
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgl1-mesa-dri libxkbcommon-x11-0 libwayland-client0 libssl3 libudev1
-      - run: cargo build --release
-      - name: Assemble the AppDir
-        run: tools/make_appdir.sh
-      - name: Package it into an AppImage
-        uses: AppImageCrafters/appimage-builder@v2
-        with:
-          app-path: target/xplor.AppDir
-          output: xplor.AppImage
-      - uses: actions/upload-artifact@v4
-        with:
-          name: xplor-appimage
-          path: xplor.AppImage
-          if-no-files-found: error
-
-  publish:
-    name: publish release
-    needs: [msi, appimage]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Rename with the tag
-        shell: bash
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          for f in dist/*.msi;  do mv "$f" "dist/xplor-${tag}-x64.msi";  done
-          for f in dist/*.AppImage; do mv "$f" "dist/xplor-${tag}-x86_64.AppImage"; done
+          tools/build_msi.sh
+          mkdir -p stage
+          cp target/release/xplor.exe stage/
+          cp LICENSE README.md stage/
+          7z a "dist/xplor-${VERSION}-windows-portable.zip" ./stage/*
           ls -l dist
-      - uses: softprops/action-gh-release@v2
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
-          fail_on_unmatched_files: true
+          tag_name: v${{ inputs.version }}
+          name: Xplor ${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
-          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.msi
+            dist/*.zip

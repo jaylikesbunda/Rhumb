@@ -1,131 +1,134 @@
 # Xplor
 
-A dark file explorer with a built-in text and Markdown editor. Native Rust and
-[egui](https://github.com/emilk/egui) — one binary, nothing to install.
+A dark, fast file explorer with a built-in code editor and live Markdown
+preview. Native Rust and [egui](https://github.com/emilk/egui): one binary, no
+runtime.
 
 ![Xplor](assets/screenshot.png)
 
-## What it does
+## Features
 
-- Lazy Explorer-style tree, clickable path segments, sortable drag-to-resize
-  columns
-- Tabs, like Windows 11 Explorer
-- Three views: details, compact list, large icons with image thumbnails
-- Search as you type, in this folder or everything below it, cancellable and
-  never blocking the window
-- Text and code editing: syntax highlighting, bracket matching, auto-close,
-  comment toggling, soft wrap
-- Live Markdown preview beside the source
-- Details pane: image thumbnail, or the first lines of a text file
-- Properties, including a background size count for folders
-- Copy, cut, paste, rename, trash, permanent delete, ZIP, copy path, open in
-  terminal, undo
-- Drag and drop, to move or (`Ctrl`) copy
+**Browsing**
+- Folder tabs, each with its own place, history, selection and open files
+- Details, compact list and large-icon views with image thumbnails
+- Breadcrumb path bar, sortable resizable columns, quick access with pinning
+- Search as you type: this folder, or everything below it, cancellable
+- Name index per folder for instant ranked search, kept current by a watcher
+- ZIP, TAR and TAR.GZ archives open like folders (read-only); extract from the
+  context menu
+- Copy, cut, paste, rename, trash, delete, zip, properties, undo, drag and drop
+- Native file clipboard, so files move to and from Explorer
 
-Copy and paste speak the same clipboard formats as Explorer, so files move
-between Xplor and any other program in both directions.
+**Editing**
+- Rope-backed editor that stays responsive on files with 100,000+ lines
+- Multi-cursor: `Alt+Click`, `Ctrl+D` (next occurrence), `Ctrl+Shift+L`
+  (all occurrences), column selection, one undo step per multi-edit
+- Syntax highlighting, bracket matching, auto-close, comment toggling, soft
+  wrap, find and replace, focus mode
+- Live Markdown preview beside the source, with optional scroll lock
 
-Folders are read, searched and copied on worker threads, and only the rows
-intersecting the viewport are built. The status bar reports the measured cost of
-each update, so you can check that claim yourself.
+**Interface**
+- Settings window, zoom slider, three views, light touch of chrome
+- Phosphor icon set
 
-## Why not just use Explorer
+## Performance
 
-One binary, about 15 MB, no runtime, no installer required, no ads, no sync nag,
-no tips, no telemetry. It starts instantly and holds a folder with tens of
-thousands of entries without breaking a sweat.
+Frame costs measured on the release build with 20,000 to 100,000 line files,
+including layout and tessellation (GPU time not included), on one Windows 11 desktop under normal load. Medians, in milliseconds. A frame at 240 fps
+is 4.2 ms.
 
-And it has something Explorer does not have at all: opening a `.md` file puts
-the source and a rendered preview in the same tab, with the editor already
-there. Opening a `.rs` or `.py` file gives you a real editor instead of
-Notepad. Explorer has no answer to any of that.
-
-## Measured
-
-One machine, one method, stated so you can check it. Not a benchmark suite.
-
-| | Xplor | explorer.exe |
+| Operation | Median | Worst |
 |:--|--:|--:|
-| On disk | 14.7 MB | 3.3 MB (system component) |
-| Cold start to first window | _unmeasured_ | _unmeasured_ |
-| Idle CPU, one folder open | _unmeasured_ | _unmeasured_ |
-| Memory, one folder open | _unmeasured_ | _unmeasured_ |
-| Open a folder of ~20,000 files | _unmeasured_ | _unmeasured_ |
-| Runtime to install | none | — |
+| Typed character, whole app, 20,000 lines | 0.74 | 2.0 |
+| Idle frame, whole app | 0.53 | 1.2 |
+| Scrolling the editor, whole app | 0.53 | 1.2 |
+| Arrow key in a 100,000-line file | 0.29–0.38 | 1.3 |
+| Page Down / Ctrl+End in 100,000 lines | 0.46 / 0.55 | 1.2 |
+| Enter / Backspace mid-file, 20,000 lines | 0.22 / 0.19 | 0.8 |
+| Undo / redo after a long session | 0.53 / 0.51 | 3.1 |
+| Frame over a 100 KB single line | 0.01 | 0.05 |
+| Typing into a 100 KB single line | 0.55 | 1.3 |
+| Paste 100 KB, then undo it | 3.7 / 3.3 | |
 
-The blank cells are deliberate. Run `tools/measure.ps1` from a fresh login with
-nothing else open, and read the folder-open figure off Xplor's own status bar,
-median of five. An earlier run on a busy machine — a browser playing video, a
-dozen tabs — put Explorer at 10.6% CPU and 341 MB, but that was media decode and
-thumbnail work for the browser's windows, not Explorer browsing files. Those
-numbers are not in the table because they would not survive a second look.
+The release binary is about 16 MB. Reproduce with:
 
-Two things worth knowing about the comparison when you fill it in.
-`explorer.exe` is one shared process for the whole desktop: it draws the
-desktop and the taskbar and hosts every registered shell extension, so part of
-its memory is work Xplor does not do and does not need to. The comparison is
-fair for browsing files; it is not a claim that Explorer does less work. And
-Xplor's numbers are reproducible by you, because the status bar prints the cost
-of every update as it happens.
+    cargo test --release fits_in_a_frame -- --nocapture --test-threads=1
+    cargo test --release instant -- --nocapture --test-threads=1
 
-## Not wired up yet
+These are in-process frame timings, not a comparison against other programs.
+Set `XPLOR_STRICT_SPEED=1` to hold the tests to the 240 fps budget on a quiet
+machine.
 
-Everything above works on its own. These are the edges where Xplor doesn't yet
-reach the rest of Windows:
+## Where it is stronger
 
-- **No shell registration.** Xplor is not yet the handler for folders, drives,
-  or the desktop right-click, so double-clicking a folder elsewhere on the
-  system still opens Explorer.
-- **No extraction.** It writes ZIPs; it does not unpack ZIP, 7z, RAR or tar.
-- **Thumbnails cover PNG, JPEG, GIF, BMP and WebP.** Everything else falls back
-  to a generic icon.
-- **The Recycle Bin cannot be browsed.** Items can be sent to it, but there is
-  no view to restore from.
-- **Paths over 260 characters are not handled yet.**
+- **One tool for browsing and editing.** Open a file from the list and edit it
+  in place. Markdown gets a live preview in the same tab.
+- **Cost per keystroke does not grow with the file.** Edits and scrolling work
+  on a rope and only touch the visible lines.
+- **Searching never blocks the window.** Folders are read, indexed and searched
+  on worker threads.
+- **Small and self-contained.** One executable, no installer needed, no
+  telemetry.
+
+## Limits
+
+- Windows is the primary platform. Clipboard integration and single-window
+  handling are Windows-specific; Linux builds compile but get less testing.
+- No language server, tree-sitter, code folding or IME composition in the
+  editor.
+- Archives are read-only (extract to change them). 7z and RAR are not
+  supported.
+- No dual-pane view, no Recycle Bin browser, no shell registration as the
+  default folder handler.
+- The name index is in memory and rebuilt per session.
 
 ## Install
 
-Take a build from the releases page, or compile it yourself.
+Download a build from the releases page:
 
-| Platform | File |
-|:---------|:-----|
-| Windows  | `xplor-<version>-x64.msi` |
-| Windows  | `xplor-<version>-windows-portable.zip` |
-| Linux    | `xplor-<version>-x86_64.AppImage` — `chmod +x`, then run |
+| File | |
+|:--|:--|
+| `xplor-<version>-x64.msi` | Windows installer |
+| `xplor-<version>-windows-portable.zip` | Windows, no install |
 
-Settings persist in `%LOCALAPPDATA%\xplor\prefs.txt`. Delete it to reset.
+Settings are stored in `%LOCALAPPDATA%\xplor\prefs.txt`. Delete it to reset.
 
 ## Build
 
 Needs Rust 1.85 or newer.
 
-    cargo build --release        # target/release/xplor, about 15 MB
+    cargo build --release
     cargo test
     cargo clippy --all-targets
 
-`tools/build_msi.sh` and `tools/make_appdir.sh` produce the installer and the
-AppImage. Both need extra tooling on `PATH` (WiX v3, `appimagetool`).
+`tools/build_msi.sh` builds the installer (needs WiX v3 on `PATH`).
 
-`tools/measure.ps1` fills in the table above.
+## Releases
+
+Run the **release** workflow from the Actions tab and enter a version such as
+`0.2.0`. It stamps that version into the build, produces the MSI and portable
+zip, tags `v<version>` and publishes the release.
 
 ## Keys
 
 | Shortcut | Action |
 |:---------|:-------|
 | `Ctrl+1` / `2` / `3` | Details / list / large-icon view |
-| `Ctrl+Shift+V` | Cycle the view |
 | `Ctrl+B`, `Alt+P` | Toggle sidebar / details pane |
-| `Alt+Left` / `Right` / `Up` | Back, forward, up one folder |
+| `Alt+Left` / `Right` / `Up` | Back, forward, up |
 | `Ctrl+L`, `Ctrl+F` | Type a path / focus search |
 | `Ctrl+H` | Show hidden items |
 | `Ctrl+N` / `Ctrl+Shift+N` | New text document / folder |
-| `Ctrl+T`, `Ctrl+Tab` | Next / new tab |
+| `Ctrl+T` | New folder tab |
+| `Ctrl+Tab`, `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+W` | Close the file, or the folder tab if none is open |
 | `Ctrl+A`, `C`, `X`, `V` | Selection and clipboard |
 | `F2`, `Delete`, `Shift+Delete` | Rename, trash, delete permanently |
 | `Ctrl+Z` | Undo the last file operation |
 | `Alt+Enter` | Properties |
-| `Ctrl+S`, `Ctrl+W` | Save, close the tab |
-| `Tab` / `Shift+Tab`, `Ctrl+/` | Indent, toggle line comment |
+| `Ctrl+S` | Save |
+| `Alt+Click`, `Ctrl+D`, `Ctrl+Shift+L` | Multi-cursor |
+| `Tab` / `Shift+Tab`, `Ctrl+/` | Indent, toggle comment |
 | `F5` | Reload the folder |
 | `/` or `?` | Shortcut help |
 
