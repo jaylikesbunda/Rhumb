@@ -1,8 +1,10 @@
 # Rhumb
 
-A dark, fast file explorer with a built-in code editor and live Markdown
-preview. Native Rust and [egui](https://github.com/emilk/egui): one binary, no
-runtime.
+A fast file explorer with a built-in code editor and live Markdown
+preview
+
+<img width="1628" height="918" alt="image" src="https://github.com/user-attachments/assets/16240ac0-7caa-4dd3-8a2d-41c726a2e08d" />
+
 
 - **One tool for browsing and editing.** Open a file from the list and edit it
   in place. Markdown gets a live preview in the same tab.
