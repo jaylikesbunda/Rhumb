@@ -4,10 +4,14 @@
 #![warn(clippy::all)]
 
 mod app;
+mod archive;
+mod buffer;
 mod clip;
+mod codeedit;
 mod editing;
 mod editor;
 mod fs_model;
+mod index;
 mod instance;
 mod markdown;
 mod ops;
@@ -64,7 +68,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "xplor",
         native,
-        Box::new(|cc| Ok(Box::new(app::Xplor::new(cc)))),
+        Box::new(|cc| {
+            instance::watch(cc.egui_ctx.clone());
+            Ok(Box::new(app::Xplor::new(cc)))
+        }),
     )
 }
 

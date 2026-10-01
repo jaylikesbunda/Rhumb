@@ -7,19 +7,18 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, CornerRadius, FontId, Galley, Painter, Pos2, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, Ui, Vec2,
-    epaint::{
-        PathStroke,
-        text::{LayoutJob, TextWrapping},
-    },
+    Color32, CornerRadius, FontId, Galley, Painter, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2,
+    epaint::text::{LayoutJob, TextWrapping},
 };
 
 use crate::fs_model::{self, Entry};
 use crate::theme::{bold_font, c, fs as tfs, mono_font, sp, ui_font};
 
-/// Monochrome line icons, drawn rather than bitmapped so they stay crisp at any
-/// size and always match the current text colour.
+/// The interface's pictograms.
+///
+/// Each one is a glyph of the Phosphor icon font rather than a shape drawn here, so
+/// they are the drawings of a designer, they stay crisp at any size, and they take
+/// the text colour like any other text does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     Back,
@@ -30,31 +29,111 @@ pub enum Icon {
     Chevron,
     Search,
     Sidebar,
+    /// A small arrow up, marking the column the list is sorted by.
     Sort,
     /// A cross, for closing a tab.
     Close,
-    /// A page with a folded corner and a mark, for Markdown.
+    /// A page marked as Markdown.
     Markdown,
-    /// Two panes side by side, for the editor/preview split.
+    /// An eye, for showing or hiding the live preview.
     Preview,
-    /// An arrow turning back on itself, for soft wrap.
+    /// An arrow that turns back on itself, for soft wrap.
     Wrap,
-    /// An arrow down into a tray, for save.
+    /// A floppy disk, for save.
     Save,
     /// A pushpin, for quick access.
     Pin,
-    /// A diagonal double arrow pointing out: fill the window with this.
+    /// Arrows pointing out: fill the window with this.
     Expand,
-    /// A diagonal double arrow pointing in: go back to side by side.
+    /// Arrows pointing in: go back to side by side.
     Shrink,
     /// A circular arrow, for re-reading the folder.
     Refresh,
+    /// A closed chain: two things scroll together.
+    Link,
+    /// A broken chain: they scroll on their own.
+    LinkOff,
+    /// The window buttons.
+    WinMinimize,
+    WinMaximize,
+    WinRestore,
+    WinClose,
+    /// An eye, for hidden files shown.
+    Eye,
+    /// An eye with a line through it, for hidden files not shown.
+    EyeSlash,
+    /// Folders inside folders, for searching subfolders too.
+    Subfolders,
+    /// Any other glyph of the icon font, for a menu's items.
+    Glyph(&'static str),
+    /// Rows with columns, for the details view of a folder.
+    ViewDetails,
+    /// A bulleted list, for the compact list view.
+    ViewList,
+    /// A grid of tiles, for the large icons view.
+    ViewLarge,
 }
 
+/// The font family the icons are drawn from.
+pub const ICON_FAMILY: &str = "xplor-icons";
+
 impl Icon {
+    /// The glyph that draws this icon, with `open` telling the chevron which way to point.
+    fn glyph(self, open: bool) -> &'static str {
+        use egui_phosphor::regular as ph;
+        match self {
+            Icon::Back => ph::ARROW_LEFT,
+            Icon::Forward => ph::ARROW_RIGHT,
+            Icon::Up => ph::ARROW_UP,
+            Icon::Folder => ph::FOLDER,
+            Icon::File => ph::FILE_TEXT,
+            Icon::Chevron if open => ph::CARET_DOWN,
+            Icon::Chevron => ph::CARET_RIGHT,
+            Icon::Search => ph::MAGNIFYING_GLASS,
+            Icon::Sidebar => ph::SIDEBAR_SIMPLE,
+            Icon::Sort => ph::CARET_UP,
+            Icon::Close => ph::X,
+            Icon::Markdown => ph::FILE_MD,
+            Icon::Preview => ph::EYE,
+            Icon::Wrap => ph::ARROW_BEND_DOWN_LEFT,
+            Icon::Save => ph::FLOPPY_DISK,
+            Icon::Pin => ph::PUSH_PIN,
+            Icon::Expand => ph::ARROWS_OUT_SIMPLE,
+            Icon::Shrink => ph::ARROWS_IN_SIMPLE,
+            Icon::Refresh => ph::ARROW_CLOCKWISE,
+            Icon::Link => ph::LINK,
+            Icon::LinkOff => ph::LINK_BREAK,
+            Icon::WinMinimize => ph::MINUS,
+            Icon::WinMaximize => ph::SQUARE,
+            Icon::WinRestore => ph::COPY_SIMPLE,
+            Icon::WinClose => ph::X,
+            Icon::Eye => ph::EYE,
+            Icon::EyeSlash => ph::EYE_SLASH,
+            Icon::Subfolders => ph::TREE_STRUCTURE,
+            Icon::Glyph(g) => g,
+            Icon::ViewDetails => ph::TABLE,
+            Icon::ViewList => ph::LIST_BULLETS,
+            Icon::ViewLarge => ph::SQUARES_FOUR,
+        }
+    }
+
     /// Draws the icon centred in `rect`.
     pub fn paint(self, p: &Painter, rect: Rect, color: Color32) {
         self.paint_with(p, rect, color, false)
+    }
+
+    /// Draws the icon as large as `rect` allows, where `paint` stops at the size of
+    /// an icon in a row: for the folder on a large tile, which has room for more.
+    pub fn paint_large(self, p: &Painter, rect: Rect, color: Color32) {
+        let s = rect.height().min(rect.width());
+        let font = FontId::new(s * 1.15, egui::FontFamily::Name(ICON_FAMILY.into()));
+        p.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            self.glyph(false),
+            font,
+            color,
+        );
     }
 
     /// Draws the icon, with `open` telling the chevron which way to point.
@@ -62,333 +141,261 @@ impl Icon {
     /// Only the chevron cares; every other icon draws the same either way.
     pub fn paint_with(self, p: &Painter, rect: Rect, color: Color32, open: bool) {
         let s = sp::ICON.min(rect.height()).min(rect.width());
-        let r = Rect::from_center_size(rect.center(), Vec2::splat(s));
-        let stroke = Stroke::new(1.3, color);
-        let path_stroke = PathStroke::new(1.3, color);
-        let ctr = r.center();
+        // The glyphs are drawn to fill their em, so the font is a little larger than
+        // the space it is to fill.
+        let font = FontId::new(s * 1.15, egui::FontFamily::Name(ICON_FAMILY.into()));
+        p.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            self.glyph(open),
+            font,
+            color,
+        );
+    }
+}
 
-        match self {
-            Icon::Back | Icon::Forward => {
-                let dir: f32 = if self == Icon::Back { -1.0 } else { 1.0 };
-                let h = s * 0.32;
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x + dir * h * 0.6, ctr.y - h),
-                        Pos2::new(ctr.x - dir * h * 0.6, ctr.y),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - dir * h * 0.6, ctr.y),
-                        Pos2::new(ctr.x + dir * h * 0.6, ctr.y + h),
-                    ],
-                    stroke,
-                );
-            }
-            Icon::Up => {
-                let h = s * 0.34;
-                p.line_segment(
-                    [Pos2::new(ctr.x, ctr.y - h), Pos2::new(ctr.x - h, ctr.y)],
-                    stroke,
-                );
-                p.line_segment(
-                    [Pos2::new(ctr.x - h, ctr.y), Pos2::new(ctr.x, ctr.y + h)],
-                    stroke,
-                );
-                p.line_segment(
-                    [Pos2::new(ctr.x, ctr.y + h), Pos2::new(ctr.x + h, ctr.y)],
-                    stroke,
-                );
-            }
-            Icon::Chevron => {
-                // The glyph points right when closed and turns to point down
-                // when the folder is open, which is what makes the tree read.
-                let h = s * 0.26;
-                let a = Pos2::new(ctr.x - h * 0.6, ctr.y - h);
-                let b = Pos2::new(ctr.x + h * 0.6, ctr.y);
-                let c = Pos2::new(ctr.x - h * 0.6, ctr.y + h);
-                let (a, b, c) = if open {
-                    // A quarter turn clockwise about the centre.
-                    let turn = |p: Pos2| {
-                        let d = p - ctr;
-                        Pos2::new(ctr.x - d.y, ctr.y + d.x)
-                    };
-                    (turn(a), turn(b), turn(c))
-                } else {
-                    (a, b, c)
-                };
-                p.line_segment([a, b], stroke);
-                p.line_segment([b, c], stroke);
-            }
-            Icon::Folder => {
-                // A folder outline: left edge, tab, top edge, right edge, base.
-                let pad = s * 0.12;
-                let body = Rect::from_min_max(
-                    r.min + Vec2::new(pad, pad * 1.5),
-                    r.max - Vec2::new(pad, pad * 1.5),
-                );
-                let tab_w = body.width() * 0.36;
-                let tab_h = body.height() * 0.26;
-                let p1 = body.left_top();
-                let p2 = Pos2::new(p1.x + tab_w * 0.7, p1.y);
-                let p3 = Pos2::new(p1.x + tab_w, p1.y + tab_h);
-                let p4 = body.right_top() + Vec2::new(0.0, tab_h);
-                let p5 = body.right_bottom();
-                let p6 = body.left_bottom();
-                p.add(Shape::closed_line(
-                    vec![p1, p2, p3, p4, p5, p6, p1],
-                    path_stroke,
-                ));
-            }
-            Icon::File => {
-                // A page with a folded corner.
-                let pad = s * 0.18;
-                let body =
-                    Rect::from_min_max(r.min + Vec2::new(pad, 0.0), r.max - Vec2::new(pad, 0.0));
-                let fold = body.width() * 0.42;
-                let p1 = body.left_top();
-                let p2 = Pos2::new(body.right() - fold, p1.y);
-                let p3 = body.right_top();
-                let p4 = body.right_bottom();
-                let p5 = body.left_bottom();
-                p.add(Shape::closed_line(
-                    vec![p1, p2, p3, p4, p5, p1],
-                    PathStroke::new(1.2, color),
-                ));
-                p.line_segment([p2, Pos2::new(p2.x, p2.y + fold)], Stroke::new(1.0, color));
-                p.line_segment([Pos2::new(p2.x, p2.y + fold), p3], Stroke::new(1.0, color));
-            }
-            Icon::Search => {
-                let rad = s * 0.3;
-                let c0 = Pos2::new(ctr.x - s * 0.08, ctr.y - s * 0.08);
-                p.circle_stroke(c0, rad, stroke);
-                p.line_segment(
-                    [
-                        c0 + Vec2::new(rad * 0.72, rad * 0.72),
-                        c0 + Vec2::new(rad * 1.55, rad * 1.55),
-                    ],
-                    stroke,
-                );
-            }
-            Icon::Sidebar => {
-                let pad = s * 0.14;
-                let body =
-                    Rect::from_min_max(r.min + Vec2::new(pad, pad), r.max - Vec2::new(pad, pad));
-                p.rect_stroke(body, 2.0, stroke, StrokeKind::Inside);
-                let x = body.left() + body.width() * 0.36;
-                p.line_segment(
-                    [Pos2::new(x, body.top()), Pos2::new(x, body.bottom())],
-                    stroke,
-                );
-            }
-            Icon::Sort => {
-                let h = s * 0.3;
-                p.add(Shape::convex_polygon(
-                    vec![
-                        ctr + Vec2::new(0.0, -h),
-                        ctr + Vec2::new(h * 0.8, 0.0),
-                        ctr + Vec2::new(-h * 0.8, 0.0),
-                    ],
-                    color,
-                    PathStroke::new(1.2, color),
-                ));
-            }
-            Icon::Close => {
-                let h = s * 0.26;
-                let stroke = Stroke::new(1.2, color);
-                p.line_segment([ctr + Vec2::new(-h, -h), ctr + Vec2::new(h, h)], stroke);
-                p.line_segment([ctr + Vec2::new(h, -h), ctr + Vec2::new(-h, h)], stroke);
-            }
-            Icon::Markdown => {
-                // A page outline with two short strokes inside: enough to read
-                // as "document" at 14px without needing a typeface.
-                let page = Rect::from_center_size(ctr, Vec2::splat(s * 0.86));
-                let stroke = Stroke::new(1.1, color);
-                p.rect_stroke(page, 2.0, stroke, StrokeKind::Inside);
-                let x = page.left() + page.width() * 0.36;
-                p.line_segment(
-                    [
-                        Pos2::new(x, page.top() + 3.0),
-                        Pos2::new(x, page.bottom() - 3.0),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(x + 2.5, page.center().y - 2.5),
-                        Pos2::new(page.right() - 3.0, page.center().y + 2.5),
-                    ],
-                    stroke,
-                );
-            }
-            Icon::Preview => {
-                // A page with a narrow pane beside it: the split view.
-                let h = s * 0.42;
-                let stroke = Stroke::new(1.1, color);
-                let left = Rect::from_min_max(
-                    Pos2::new(ctr.x - h, ctr.y - h),
-                    Pos2::new(ctr.x - h * 0.25, ctr.y + h),
-                );
-                let right = Rect::from_min_max(
-                    Pos2::new(ctr.x + h * 0.25, ctr.y - h),
-                    Pos2::new(ctr.x + h, ctr.y + h),
-                );
-                p.rect_stroke(left, 1.5, stroke, StrokeKind::Inside);
-                p.rect_stroke(right, 1.5, stroke, StrokeKind::Inside);
-            }
-            Icon::Wrap => {
-                // An arrow that runs right, turns down and doubles back left.
-                let h = s * 0.34;
-                let stroke = Stroke::new(1.2, color);
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - h, ctr.y - h),
-                        Pos2::new(ctr.x + h, ctr.y - h),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x + h, ctr.y - h),
-                        Pos2::new(ctr.x + h, ctr.y + h * 0.45),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x + h, ctr.y + h * 0.45),
-                        Pos2::new(ctr.x - h * 0.2, ctr.y + h * 0.45),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - h * 0.7, ctr.y - h * 0.05),
-                        Pos2::new(ctr.x - h * 0.2, ctr.y + h * 0.45),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - h * 0.7, ctr.y + h * 0.95),
-                        Pos2::new(ctr.x - h * 0.2, ctr.y + h * 0.45),
-                    ],
-                    stroke,
-                );
-            }
-            Icon::Pin => {
-                // A pushpin: a flat head tapering to a point, needle below.
-                let h = s * 0.32;
-                let w = s * 0.40;
-                let stroke = Stroke::new(1.15, color);
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - w, ctr.y - h),
-                        Pos2::new(ctr.x + w, ctr.y - h),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - w, ctr.y - h),
-                        Pos2::new(ctr.x, ctr.y + h * 0.3),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x + w, ctr.y - h),
-                        Pos2::new(ctr.x, ctr.y + h * 0.3),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x, ctr.y + h * 0.3),
-                        Pos2::new(ctr.x, ctr.y + h * 1.15),
-                    ],
-                    stroke,
-                );
-            }
-            Icon::Refresh => {
-                // An open circle with a gap at the top right, where an arrow
-                // head points back down into it.
-                let h = s * 0.34;
-                let stroke = Stroke::new(1.2, color);
-                // Three quarters of a circle, drawn as a polyline so the gap
-                // is a real gap rather than a covered-up stroke.
-                let mut pts = Vec::with_capacity(9);
-                for k in 0..=8 {
-                    // From 40° round to 330°: leaves the top-right open.
-                    let a = 0.35 + (k as f32 / 8.0) * 4.9;
-                    pts.push(Pos2::new(ctr.x + a.cos() * h, ctr.y + a.sin() * h));
-                }
-                p.add(egui::Shape::line(pts, stroke));
-                let head = Pos2::new(ctr.x + h * 0.94, ctr.y - h * 0.34);
-                p.line_segment([head, Pos2::new(head.x - 2.4, head.y - 0.4)], stroke);
-                p.line_segment([head, Pos2::new(head.x + 0.4, head.y + 2.2)], stroke);
-            }
-            Icon::Expand | Icon::Shrink => {
-                // Two arrowheads on one diagonal: outwards to fill the
-                // window, inwards to go back to side by side.
-                let h = s * 0.36;
-                let out = matches!(self, Icon::Expand);
-                let stroke = Stroke::new(1.2, color);
-                for end in [1.0, -1.0] {
-                    let tip = Pos2::new(
-                        ctr.x + end * if out { h } else { h * 0.25 },
-                        ctr.y - end * if out { h } else { h * 0.25 },
-                    );
-                    let tail = Pos2::new(
-                        ctr.x + end * if out { h * 0.25 } else { h },
-                        ctr.y - end * if out { h * 0.25 } else { h },
-                    );
-                    p.line_segment([tail, tip], stroke);
-                    let wing = 2.6;
-                    if end > 0.0 {
-                        p.line_segment([tip, Pos2::new(tip.x - wing, tip.y)], stroke);
-                        p.line_segment([tip, Pos2::new(tip.x, tip.y + wing)], stroke);
-                    } else {
-                        p.line_segment([tip, Pos2::new(tip.x + wing, tip.y)], stroke);
-                        p.line_segment([tip, Pos2::new(tip.x, tip.y - wing)], stroke);
-                    }
-                }
-            }
-            Icon::Save => {
-                let h = s * 0.34;
-                let stroke = Stroke::new(1.2, color);
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x, ctr.y - h),
-                        Pos2::new(ctr.x, ctr.y + h * 0.25),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - h * 0.55, ctr.y - h * 0.3),
-                        Pos2::new(ctr.x, ctr.y + h * 0.25),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x + h * 0.55, ctr.y - h * 0.3),
-                        Pos2::new(ctr.x, ctr.y + h * 0.25),
-                    ],
-                    stroke,
-                );
-                p.line_segment(
-                    [
-                        Pos2::new(ctr.x - h, ctr.y + h),
-                        Pos2::new(ctr.x + h, ctr.y + h),
-                    ],
-                    stroke,
-                );
-            }
+/// The height of a row in a menu.
+pub const MENU_ROW: f32 = 28.0;
+
+/// One item of a menu: an icon, the label, and a shortcut hint at the right, on a
+/// row as wide as the menu so the whole of it is the target. `danger` tints it for
+/// what cannot be undone.
+pub fn menu_item(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    hint: &str,
+    danger: bool,
+    enabled: bool,
+) -> Response {
+    let width = ui.available_width().max(160.0);
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(width, MENU_ROW),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let inner = rect.shrink2(Vec2::new(4.0, 1.0));
+        if enabled && resp.hovered() {
+            painter.rect_filled(inner, CornerRadius::same(4), c::HOVER);
+        }
+        let base = if !enabled {
+            c::TEXT_GHOST
+        } else if danger {
+            c::DANGER
+        } else {
+            c::TEXT
+        };
+        let dim = if !enabled {
+            c::TEXT_GHOST
+        } else if danger {
+            c::DANGER
+        } else {
+            c::TEXT_DIM
+        };
+        icon.paint(
+            painter,
+            Rect::from_center_size(
+                Pos2::new(inner.left() + 14.0, rect.center().y),
+                Vec2::splat(16.0),
+            ),
+            dim,
+        );
+        let g = layout(ui, label.to_owned(), ui_font(tfs::BODY), base);
+        galley_at(
+            painter,
+            Pos2::new(inner.left() + 32.0, rect.center().y - g.size().y * 0.5),
+            &g,
+            base,
+        );
+        if !hint.is_empty() {
+            let h = layout(ui, hint.to_owned(), ui_font(tfs::SMALL), c::TEXT_GHOST);
+            galley_at(
+                painter,
+                Pos2::new(
+                    inner.right() - 10.0 - h.size().x,
+                    rect.center().y - h.size().y * 0.5,
+                ),
+                &h,
+                c::TEXT_GHOST,
+            );
         }
     }
+    resp
+}
+
+/// A hairline between groups of menu items, inset from both edges.
+pub fn menu_separator(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width().max(160.0), 9.0),
+        Sense::hover(),
+    );
+    ui.painter().hline(
+        rect.left() + 10.0..=rect.right() - 10.0,
+        rect.center().y,
+        Stroke::new(1.0, c::DIVIDER),
+    );
+}
+
+/// A slider for how big things are: a track, and a round handle that is dragged
+/// along it or jumped to with a click. `value` runs from 0 to 1. Returns whether it
+/// changed.
+pub fn size_slider(ui: &mut Ui, rect: Rect, value: &mut f32) -> bool {
+    let resp = ui.interact(
+        rect,
+        ui.id().with(("size-slider", rect.min.x as i32)),
+        Sense::click_and_drag(),
+    );
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0, rect.center().y - 1.5),
+        Pos2::new(rect.right() - 8.0, rect.center().y + 1.5),
+    );
+    let mut changed = false;
+    if (resp.dragged() || resp.clicked() || resp.is_pointer_button_down_on())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let v = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        if (v - *value).abs() > f32::EPSILON {
+            *value = v;
+            changed = true;
+        }
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect_filled(track, CornerRadius::same(2), c::BORDER);
+        let x = track.left() + track.width() * value.clamp(0.0, 1.0);
+        painter.rect_filled(
+            Rect::from_min_max(track.min, Pos2::new(x, track.bottom())),
+            CornerRadius::same(2),
+            c::TEXT_FAINT,
+        );
+        let hot = resp.hovered() || resp.dragged();
+        painter.circle_filled(
+            Pos2::new(x, rect.center().y),
+            if hot { 7.0 } else { 6.0 },
+            if hot { c::ACCENT } else { c::TEXT },
+        );
+    }
+    resp.on_hover_text("Size of the items in the list");
+    changed
+}
+
+/// An on/off switch: a pill with a knob that sits at the end that is chosen.
+pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(38.0, 20.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if *on {
+            c::ACCENT
+        } else if resp.hovered() {
+            c::SEL
+        } else {
+            c::BORDER
+        };
+        painter.rect_filled(rect, CornerRadius::same(10), fill);
+        let x = if *on {
+            rect.right() - 10.0
+        } else {
+            rect.left() + 10.0
+        };
+        painter.circle_filled(
+            Pos2::new(x, rect.center().y),
+            7.0,
+            if *on { c::BG } else { c::TEXT_DIM },
+        );
+    }
+    resp
+}
+
+/// A row of choices of which one is picked, side by side as one control. Returns the
+/// index that was clicked, if any.
+pub fn segmented(ui: &mut Ui, options: &[&str], picked: usize) -> Option<usize> {
+    let mut clicked = None;
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|o| {
+            layout(ui, (*o).to_owned(), ui_font(tfs::BODY), c::TEXT)
+                .size()
+                .x
+                + 24.0
+        })
+        .collect();
+    let total: f32 = widths.iter().sum();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(total + 4.0, 28.0), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(6), c::CODE_BG);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(6),
+        Stroke::new(1.0, c::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let mut x = rect.left() + 2.0;
+    for (i, (label, w)) in options.iter().zip(&widths).enumerate() {
+        let seg = Rect::from_min_size(Pos2::new(x, rect.top() + 2.0), Vec2::new(*w, 24.0));
+        let resp = ui.interact(
+            seg,
+            ui.id().with(("segment", i, rect.min.x as i32)),
+            Sense::click(),
+        );
+        if i == picked {
+            ui.painter().rect_filled(seg, CornerRadius::same(5), c::SEL);
+        } else if resp.hovered() {
+            ui.painter()
+                .rect_filled(seg, CornerRadius::same(5), c::HOVER);
+        }
+        let color = if i == picked {
+            c::SEL_TEXT
+        } else {
+            c::TEXT_DIM
+        };
+        let g = layout(ui, (*label).to_owned(), ui_font(tfs::BODY), color);
+        galley_at(
+            ui.painter(),
+            Pos2::new(
+                seg.center().x - g.size().x * 0.5,
+                seg.center().y - g.size().y * 0.5,
+            ),
+            &g,
+            color,
+        );
+        if resp.clicked() {
+            clicked = Some(i);
+        }
+        x += w;
+    }
+    clicked
+}
+
+/// A square icon button that stays lit while `on`, for settings that are either
+/// showing or not.
+pub fn icon_toggle(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(26.0, 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if on {
+            painter.rect_filled(rect, CornerRadius::same(sp::RADIUS), c::SEL);
+        } else if resp.hovered() {
+            painter.rect_filled(rect, CornerRadius::same(sp::RADIUS), c::HOVER);
+        }
+        let color = if on {
+            c::ACCENT
+        } else if resp.hovered() {
+            c::TEXT
+        } else {
+            c::TEXT_DIM
+        };
+        icon.paint(painter, rect, color);
+    }
+    resp.on_hover_text(tip)
 }
 
 /// A square icon button with no chrome until hovered.
@@ -700,11 +707,13 @@ pub fn paint_tile(
                 c::TEXT_FAINT
             };
             // A folder glyph scaled up reads better than a tiny one.
-            let icon = Rect::from_center_size(art.center(), Vec2::splat(box_px * 0.62));
+            let icon = Rect::from_center_size(art.center(), Vec2::splat(box_px * 0.7));
             if entry.is_dir {
-                Icon::Folder.paint(painter, icon, color);
+                Icon::Folder.paint_large(painter, icon, color);
+            } else if crate::archive::kind_of(&entry.path).is_some() {
+                Icon::Glyph(egui_phosphor::regular::FILE_ZIP).paint_large(painter, icon, color);
             } else {
-                Icon::File.paint(painter, icon, color);
+                Icon::File.paint_large(painter, icon, color);
             }
         }
     }
@@ -765,6 +774,8 @@ pub fn paint_row(
     };
     if entry.is_dir {
         Icon::Folder.paint(painter, icon, icon_color);
+    } else if crate::archive::kind_of(&entry.path).is_some() {
+        Icon::Glyph(egui_phosphor::regular::FILE_ZIP).paint(painter, icon, icon_color);
     } else {
         Icon::File.paint(painter, icon, icon_color);
     }
@@ -1119,6 +1130,58 @@ mod tests {
     use super::*;
     use crate::theme::col;
     use egui::vec2;
+
+    #[test]
+    fn every_icon_is_a_glyph_the_icon_font_has() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let id = FontId::new(14.0, egui::FontFamily::Name(ICON_FAMILY.into()));
+        let all = [
+            Icon::Back,
+            Icon::Forward,
+            Icon::Up,
+            Icon::Folder,
+            Icon::File,
+            Icon::Chevron,
+            Icon::Search,
+            Icon::Sidebar,
+            Icon::Sort,
+            Icon::Close,
+            Icon::Markdown,
+            Icon::Preview,
+            Icon::Wrap,
+            Icon::Save,
+            Icon::Pin,
+            Icon::Expand,
+            Icon::Shrink,
+            Icon::Refresh,
+            Icon::Link,
+            Icon::LinkOff,
+            Icon::WinMinimize,
+            Icon::WinMaximize,
+            Icon::WinRestore,
+            Icon::WinClose,
+            Icon::Eye,
+            Icon::EyeSlash,
+            Icon::Subfolders,
+            Icon::ViewDetails,
+            Icon::ViewList,
+            Icon::ViewLarge,
+        ];
+        for icon in all {
+            for open in [false, true] {
+                let glyph = icon.glyph(open);
+                let ch = glyph.chars().next().unwrap();
+                assert!(
+                    ctx.fonts_mut(|f| f.has_glyph(&id, ch)),
+                    "{icon:?} draws {glyph:?}, which the icon font does not have"
+                );
+            }
+        }
+    }
 
     #[test]
     fn middle_elision_keeps_the_tail_of_a_long_path() {

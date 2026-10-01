@@ -100,8 +100,6 @@ pub mod sp {
     pub const TILE_W: f32 = 104.0;
     /// Tile height in the large-icon view: artwork plus one line of name.
     pub const TILE: f32 = 86.0;
-    /// Decoded thumbnail edge length, in device pixels at 1x.
-    pub const THUMB_PX: u32 = 64;
 
     /// Integer forms, for egui APIs that take `i8` margins.
     pub const SM_I: i8 = 8;
@@ -208,6 +206,18 @@ pub fn fonts() -> FontDefinitions {
     let mut mono_only = vec![FAMILY_MONO.to_owned()];
     mono_only.extend(mono_fallbacks.iter().cloned());
 
+    // The icons: their own family, so a glyph's codepoint is never taken for text.
+    defs.font_data.insert(
+        crate::widgets::ICON_FAMILY.to_owned(),
+        Arc::new(FontData::from_static(
+            egui_phosphor::Variant::Regular.font_bytes(),
+        )),
+    );
+    defs.families.insert(
+        FontFamily::Name(crate::widgets::ICON_FAMILY.into()),
+        vec![crate::widgets::ICON_FAMILY.to_owned()],
+    );
+
     defs.families.insert(FontFamily::Proportional, proportional);
     defs.families.insert(FontFamily::Monospace, monospace);
     defs.families
@@ -292,8 +302,24 @@ pub fn style() -> Style {
     s.spacing.window_margin = Margin::same(sp::SM_I);
     s.spacing.indent = sp::INDENT;
     s.spacing.interact_size.y = sp::ROW;
-    s.spacing.scroll.bar_width = 9.0;
-    s.spacing.scroll.floating_allocated_width = 9.0;
+    // Scroll bars are thin and quiet until the pointer comes near, then grow to a wide,
+    // easy target. egui widens a floating bar when the pointer is over the space it
+    // will occupy, so the width it grows to is also how close the pointer has to get:
+    // 16 points here, which is a comfortable throw for anyone reaching for the edge.
+    // A bar that is only visible on hover is one nobody can find, so a resting bar is
+    // still drawn, faintly.
+    s.spacing.scroll.floating = true;
+    s.spacing.scroll.bar_width = 16.0;
+    s.spacing.scroll.floating_width = 4.0;
+    s.spacing.scroll.floating_allocated_width = 6.0;
+    s.spacing.scroll.handle_min_length = 32.0;
+    s.spacing.scroll.foreground_color = true;
+    s.spacing.scroll.dormant_background_opacity = 0.0;
+    s.spacing.scroll.active_background_opacity = 0.35;
+    s.spacing.scroll.interact_background_opacity = 0.7;
+    s.spacing.scroll.dormant_handle_opacity = 0.45;
+    s.spacing.scroll.active_handle_opacity = 0.75;
+    s.spacing.scroll.interact_handle_opacity = 1.0;
     s.spacing.menu_width = 190.0;
     s.spacing.combo_width = 160.0;
     s.spacing.tooltip_width = 320.0;

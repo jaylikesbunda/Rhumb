@@ -2,7 +2,8 @@
 name = "xplor"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# The floor is set by let-chains, not by the edition.
+rust-version = "1.88"
 description = "A minimal, fast, dark file explorer with a built-in text and Markdown editor"
 license = "MIT"
 readme = "README.md"
@@ -19,7 +20,7 @@ arboard = "3.6.1"
 dirs = "7.0.0"
 eframe = "0.36.2"
 egui = { version = "0.36.2", features = ["serde"] }
-egui_code_editor = { version = "0.4.1", features = ["serde"] }
+egui-phosphor = { version = "0.14.0", default-features = false, features = ["regular"] }
 env_logger = "0.11.11"
 image = { version = "0.25.9", default-features = false, features = [
     "png",
@@ -33,9 +34,13 @@ log = "0.4.34"
 notify = "8.2.0"
 open = "5.4.4"
 pulldown-cmark = "0.13.4"
+ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 sysinfo = "0.39.6"
 trash = "5.2.9"
 walkdir = "2.5.0"
+zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4.1"
@@ -44,7 +49,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_Threading",
 ] }
-zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = 3
