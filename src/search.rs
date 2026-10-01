@@ -87,6 +87,10 @@ pub struct Search {
     pub results: Vec<Entry>,
     pub scanned: u64,
     pub truncated: bool,
+    /// Counts the searches started, and goes on every chunk a search sends.
+    pub token: u64,
+    /// Whether the results came from an index and not from a walk of the disk.
+    pub indexed: bool,
     cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -99,9 +103,53 @@ impl Search {
         self.running = false;
     }
 
+    /// Starts a search that asks an index instead of the disk: the answer is the best
+    /// matches first, and arrives as soon as the scan of the names is done.
+    pub fn start_indexed(
+        &mut self,
+        index: crate::index::Index,
+        scope: &Path,
+        query: &str,
+        tx: Sender<Msg>,
+    ) {
+        self.cancel();
+        self.token += 1;
+        let token = self.token;
+        self.query = query.to_owned();
+        self.results.clear();
+        self.scanned = 0;
+        self.truncated = false;
+        if prepare(query).is_empty() {
+            self.running = false;
+            self.indexed = false;
+            return;
+        }
+        self.running = true;
+        self.indexed = true;
+        let (scope, query) = (scope.to_path_buf(), query.to_owned());
+        let spawned = std::thread::Builder::new()
+            .name("xplor-index-search".into())
+            .spawn(move || {
+                let (found, truncated) = index.search(&scope, &query, MAX_RESULTS);
+                let _ = tx.send(Msg::Search(SearchChunk {
+                    token,
+                    found,
+                    scanned: index.len() as u64,
+                    done: true,
+                    truncated,
+                }));
+            });
+        if spawned.is_err() {
+            self.running = false;
+        }
+    }
+
     /// Starts (or restarts) a search rooted at `root`.
     pub fn start(&mut self, root: &Path, query: &str, tx: Sender<Msg>) {
         self.cancel();
+        self.token += 1;
+        let token = self.token;
+        self.indexed = false;
         self.query = query.to_owned();
         self.results.clear();
         self.scanned = 0;
@@ -168,8 +216,9 @@ impl Search {
                         found.push(e.clone());
                         pending.push(e);
                     }
-                    if pending.len() >= 128 || scanned % 2000 == 0 {
+                    if pending.len() >= 128 || scanned.is_multiple_of(2000) {
                         let chunk = SearchChunk {
+                            token,
                             found: std::mem::take(&mut pending),
                             scanned,
                             done: false,
@@ -183,6 +232,7 @@ impl Search {
 
                 let elapsed_ms = started.elapsed().as_millis();
                 let _ = tx.send(Msg::Search(SearchChunk {
+                    token,
                     found: pending,
                     scanned,
                     done: true,
@@ -195,7 +245,7 @@ impl Search {
 }
 
 /// Folders we never descend into: noise plus VCS noise.
-fn skip_entry(path: &Path, root: &Path) -> bool {
+pub fn skip_entry(path: &Path, root: &Path) -> bool {
     if path == root {
         return false;
     }
@@ -349,6 +399,122 @@ mod tests {
         assert!(!s.running);
         // Draining what already arrived must not panic or block.
         while rx.try_recv().is_ok() {}
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- searches answered from an index -----------------------------------------------
+
+    fn index_of(root: &Path) -> crate::index::Index {
+        let ix = crate::index::Index::build(root);
+        for _ in 0..2000 {
+            if ix.is_ready() {
+                return ix;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the index never finished");
+    }
+
+    fn collect(rx: &std::sync::mpsc::Receiver<Msg>) -> (Vec<String>, u64, bool) {
+        for _ in 0..2000 {
+            match rx.try_recv() {
+                Ok(Msg::Search(c)) if c.done => {
+                    return (
+                        c.found.iter().map(|e| e.name.clone()).collect(),
+                        c.token,
+                        c.truncated,
+                    );
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+        panic!("no answer arrived");
+    }
+
+    #[test]
+    fn an_indexed_search_answers_with_the_best_match_first() {
+        let root = tree("idx-rank");
+        std::fs::write(root.join("notes.md.bak"), b"").unwrap();
+        let ix = index_of(&root);
+        let (tx, rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start_indexed(ix, &root, "notes", tx);
+        assert!(s.running && s.indexed);
+        let (names, token, truncated) = collect(&rx);
+        assert_eq!(names, vec!["notes.md", "notes.md.bak"]);
+        assert_eq!(token, s.token);
+        assert!(!truncated);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_search_has_a_token_of_its_own() {
+        let root = tree("idx-token");
+        let ix = index_of(&root);
+        let (tx, rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start_indexed(ix.clone(), &root, "rs", tx.clone());
+        let first = s.token;
+        s.start_indexed(ix, &root, "md", tx);
+        assert!(s.token > first);
+        // Both answers arrive, tagged, so the older one can be told from the current one.
+        let (_, a, _) = collect(&rx);
+        let (_, b, _) = collect(&rx);
+        assert_ne!(a, b);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_indexed_search_of_a_blank_query_never_starts() {
+        let root = tree("idx-blank");
+        let ix = index_of(&root);
+        let (tx, _rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start_indexed(ix, &root, "  ", tx);
+        assert!(!s.running);
+        assert!(!s.indexed);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_indexed_search_stays_inside_the_folder_it_was_asked_about() {
+        let root = tree("idx-scope");
+        let ix = index_of(&root);
+        let (tx, rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start_indexed(ix, &root.join("src/deep"), "md", tx);
+        let (names, _, _) = collect(&rx);
+        assert_eq!(names, vec!["notes.md"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_plain_walk_after_an_indexed_search_is_not_marked_as_indexed() {
+        let root = tree("idx-mode");
+        let ix = index_of(&root);
+        let (tx, _rx) = crate::workers::bus();
+        let mut s = Search::default();
+        s.start_indexed(ix, &root, "rs", tx.clone());
+        assert!(s.indexed);
+        s.start(&root, "rs", tx);
+        assert!(!s.indexed);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walked_and_indexed_searches_find_the_same_files() {
+        let root = tree("idx-same");
+        let ix = index_of(&root);
+        for q in ["rs", "md", "readme", "main rs", "e"] {
+            let walked = run(&root, q);
+            let (tx, rx) = crate::workers::bus();
+            let mut s = Search::default();
+            s.start_indexed(ix.clone(), &root, q, tx);
+            let (mut indexed, _, _) = collect(&rx);
+            indexed.sort();
+            assert_eq!(indexed, walked, "query {q:?}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

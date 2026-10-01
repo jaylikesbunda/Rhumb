@@ -7,7 +7,8 @@
 //! rules can be tested here rather than only on Windows.
 //!
 //! The cost is that the first window has to look at the signal file now and
-//! then, which the app does on a slow repaint tick.
+//! then, which a small thread does, waking the window only when there is
+//! something to read, so an idle window is not redrawn to check.
 
 use std::path::{Path, PathBuf};
 
@@ -95,6 +96,31 @@ fn signal_in(signal: &Path, path: Option<&Path>) {
     if std::fs::write(&staging, body).is_ok() {
         let _ = std::fs::rename(&staging, signal);
     }
+}
+
+/// Watches for a signal from a second launch, and wakes the window for it.
+///
+/// Looking at a file is nothing; drawing a frame is not, so the looking is done
+/// here and a frame is asked for only when there is something to act on.
+pub fn watch(ctx: egui::Context) {
+    let Some(sig) = signal_file() else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("instance-watch".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                if sig.exists() {
+                    ctx.request_repaint();
+                    // Not asked again until the frame has taken it.
+                    while sig.exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        });
 }
 
 /// Takes the signal if one is waiting, so it is acted on exactly once.

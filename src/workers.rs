@@ -86,6 +86,8 @@ pub enum Outcome {
 /// Incremental recursive-search results.
 #[derive(Clone, Debug)]
 pub struct SearchChunk {
+    /// Which search sent this, so the answer to one that has been replaced is ignored.
+    pub token: u64,
     pub found: Vec<Entry>,
     pub scanned: u64,
     pub done: bool,
@@ -121,6 +123,7 @@ pub enum OpKind {
     Move,
     Delete,
     Compress,
+    Extract,
 }
 
 /// Monotonic id source shared by jobs and requests.

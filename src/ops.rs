@@ -155,24 +155,24 @@ fn run_transfer(
     let _ = tx.send(Msg::Progress(progress.clone()));
 
     // Moving onto another volume cannot be a rename; warn only if space is short.
-    if total_bytes > 0 && !cut {
-        if let Some((avail, _)) = fs_model::FreeSpace::default().get(&dest_dir) {
-            if avail.saturating_sub(16 * 1024 * 1024) < total_bytes {
-                let msg = format!(
-                    "Not enough free space in {} (need {}, have {})",
-                    short(&dest_dir),
-                    fs_model::fmt_size(total_bytes),
-                    fs_model::fmt_size(avail)
-                );
-                progress.failed.push(msg.clone());
-                let _ = tx.send(Msg::Progress(progress));
-                let _ = tx.send(Msg::Finished {
-                    id,
-                    outcome: Outcome::Failed(msg),
-                });
-                return;
-            }
-        }
+    if total_bytes > 0
+        && !cut
+        && let Some((avail, _)) = fs_model::FreeSpace::blocking(&dest_dir)
+        && avail.saturating_sub(16 * 1024 * 1024) < total_bytes
+    {
+        let msg = format!(
+            "Not enough free space in {} (need {}, have {})",
+            short(&dest_dir),
+            fs_model::fmt_size(total_bytes),
+            fs_model::fmt_size(avail)
+        );
+        progress.failed.push(msg.clone());
+        let _ = tx.send(Msg::Progress(progress));
+        let _ = tx.send(Msg::Finished {
+            id,
+            outcome: Outcome::Failed(msg),
+        });
+        return;
     }
 
     let mut ok = 0usize;
@@ -257,10 +257,10 @@ pub fn dir_size(path: &Path) -> u64 {
     }
     let mut total = 0u64;
     for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
-        if let Ok(md) = entry.metadata() {
-            if md.is_file() {
-                total += md.len();
-            }
+        if let Ok(md) = entry.metadata()
+            && md.is_file()
+        {
+            total += md.len();
         }
     }
     total
@@ -512,6 +512,82 @@ pub fn start_zip(
             }
         })
         .expect("spawn zip thread");
+    job
+}
+
+/// Extracts `inner` of an archive (everything, when it is empty) into `dest`, on a
+/// thread of its own, reporting each file as it goes. The folder it writes to is made
+/// if it is not there; if the job is cancelled, or fails, what was written is removed.
+pub fn start_extract(
+    tx: Sender<Msg>,
+    id: u64,
+    archive: PathBuf,
+    inner: String,
+    dest: PathBuf,
+    cancel: Arc<AtomicBool>,
+) -> Job {
+    let name = archive
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let job = Job {
+        id,
+        kind: OpKind::Extract,
+        label: format!("Extracting {name}"),
+        cancel: cancel.clone(),
+        started: std::time::Instant::now(),
+    };
+    std::thread::Builder::new()
+        .name("xplor-extract".into())
+        .spawn(move || {
+            let (total_items, total_bytes) =
+                crate::archive::count_files(&archive, &inner).unwrap_or((0, 0));
+            let mut progress = Progress {
+                id,
+                done_items: 0,
+                total_items,
+                done_bytes: 0,
+                total_bytes,
+                current: name,
+                failed: Vec::new(),
+            };
+            let _ = tx.send(Msg::Progress(progress.clone()));
+            let made = !dest.exists();
+            let result =
+                crate::archive::extract_with(&archive, &inner, &dest, &mut |file, size| {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return false;
+                    }
+                    progress.done_items += 1;
+                    progress.done_bytes += size;
+                    progress.current = file.to_owned();
+                    let _ = tx.send(Msg::Progress(progress.clone()));
+                    true
+                });
+            let outcome = match result {
+                Ok(done) => Outcome::Done {
+                    ok: done.files,
+                    failed: Vec::new(),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    // Half an extraction is worse than none: what this job made goes.
+                    if made {
+                        let _ = fs::remove_dir_all(&dest);
+                    }
+                    Outcome::Cancelled {
+                        done: progress.done_items,
+                    }
+                }
+                Err(e) => {
+                    if made {
+                        let _ = fs::remove_dir_all(&dest);
+                    }
+                    Outcome::Failed(e.to_string())
+                }
+            };
+            let _ = tx.send(Msg::Finished { id, outcome });
+        })
+        .expect("spawn extract thread");
     job
 }
 

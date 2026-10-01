@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Files larger than this are never opened in the built-in editor.
-pub const MAX_EDIT_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_EDIT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Sort column for the file list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,6 +58,14 @@ impl Entry {
 ///
 /// Runs on a worker thread; touches the disk exactly once.
 pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
+    // An archive, or a place inside one, is read out of the archive.
+    if let Some(crate::archive::Inside { archive, inner }) = crate::archive::split(path) {
+        let mut entries = crate::archive::list(&archive, &inner)?;
+        if !show_hidden {
+            entries.retain(|e| !e.hidden);
+        }
+        return Ok(entries);
+    }
     let mut out = Vec::with_capacity(64);
     for item in fs::read_dir(path)? {
         let Ok(item) = item else { continue };
@@ -326,27 +334,71 @@ pub fn drives() -> Vec<Place> {
     out
 }
 
+/// What a background read of the volumes hands back.
+type VolumeMap = HashMap<PathBuf, (u64, u64)>;
+
+/// What a background read of the sidebar's entries hands back: label, path, device.
+type RootList = Vec<(String, PathBuf, bool)>;
+
 /// Free space per volume, kept in memory and refreshed on a timer.
 ///
 /// Enumerating disks is not cheap: it opens every volume and asks the OS for
-/// its capacity. Doing that once per device row per frame burned most of a core
-/// while the app sat idle, so it is cached here instead. The numbers only need
-/// to be roughly right, and a few seconds of staleness is invisible.
+/// its capacity, and on a machine with a network share or a sleeping USB disk a
+/// single call can take tens of milliseconds or far longer. So it is never done
+/// on the thread that draws: a worker does the asking, and the numbers are
+/// picked up on the next frame after it answers. They only need to be roughly
+/// right, and a few seconds of staleness is invisible.
 #[derive(Default)]
 pub struct FreeSpace {
     values: HashMap<PathBuf, (u64, u64)>,
     refreshed: Option<std::time::Instant>,
+    /// The answer of a refresh in flight, once it has one.
+    incoming: std::sync::Arc<std::sync::Mutex<Option<VolumeMap>>>,
+    working: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How long a cached reading is trusted.
 const FREE_SPACE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl FreeSpace {
-    /// Available and total bytes for the volume holding `path`.
-    pub fn get(&mut self, path: &Path) -> Option<(u64, u64)> {
+    /// Available and total bytes for the volume holding `path`, read right now.
+    ///
+    /// Waits for the OS, so it is for a worker thread that is about to do something
+    /// slow anyway — never for the thread that draws.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn blocking(path: &Path) -> Option<(u64, u64)> {
+        let fs = FreeSpace {
+            values: read_volumes(),
+            ..Default::default()
+        };
+        fs.lookup(path)
+    }
+
+    /// Available and total bytes for the volume holding `path`, from the last
+    /// reading. Starts a refresh in the background when that is stale; the call
+    /// itself never waits for the OS.
+    pub fn get(&mut self, path: &Path, ctx: &egui::Context) -> Option<(u64, u64)> {
+        if let Some(fresh) = self.incoming.lock().ok().and_then(|mut g| g.take()) {
+            self.values = fresh;
+        }
         let stale = self.refreshed.is_none_or(|t| t.elapsed() > FREE_SPACE_TTL);
-        if stale {
-            self.refresh();
+        if stale
+            && !self
+                .working
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.refreshed = Some(std::time::Instant::now());
+            let incoming = std::sync::Arc::clone(&self.incoming);
+            let working = std::sync::Arc::clone(&self.working);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let fresh = read_volumes();
+                if let Ok(mut slot) = incoming.lock() {
+                    *slot = Some(fresh);
+                }
+                working.store(false, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
+            });
         }
         self.lookup(path)
     }
@@ -365,19 +417,86 @@ impl FreeSpace {
             .max_by_key(|(mount, _)| mount.components().count())
             .map(|(_, v)| *v)
     }
+}
 
-    /// Re-reads every volume in one pass.
-    pub fn refresh(&mut self) {
-        use sysinfo::Disks;
-        let disks = Disks::new_with_refreshed_list();
-        self.values.clear();
-        for d in disks.list() {
-            let mount = PathBuf::from(d.mount_point().to_string_lossy().to_string());
-            self.values
-                .insert(mount, (d.available_space(), d.total_space()));
+/// Every volume's free and total bytes, in one pass over the OS.
+fn read_volumes() -> HashMap<PathBuf, (u64, u64)> {
+    use sysinfo::Disks;
+    let disks = Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .map(|d| {
+            (
+                PathBuf::from(d.mount_point().to_string_lossy().to_string()),
+                (d.available_space(), d.total_space()),
+            )
+        })
+        .collect()
+}
+
+/// The sidebar's top-level entries — places and drives — as `(label, path,
+/// is_device)`, kept so they are not asked of the OS on every frame.
+///
+/// The drive list comes from the OS and that can be slow, so it is read once when
+/// the sidebar first draws and then again on a timer by a worker, and a frame only
+/// ever copies what is already here.
+#[derive(Default)]
+pub struct Roots {
+    list: Vec<(String, PathBuf, bool)>,
+    refreshed: Option<std::time::Instant>,
+    incoming: std::sync::Arc<std::sync::Mutex<Option<RootList>>>,
+    working: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// How long the drive list is trusted before it is read again.
+const ROOTS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl Roots {
+    /// The entries, as of the last reading.
+    pub fn get(&mut self, ctx: &egui::Context) -> &[(String, PathBuf, bool)] {
+        if self.refreshed.is_none() {
+            // The very first frame has nothing to show yet, so it waits once.
+            self.list = read_roots();
+            self.refreshed = Some(std::time::Instant::now());
         }
-        self.refreshed = Some(std::time::Instant::now());
+        if let Some(fresh) = self.incoming.lock().ok().and_then(|mut g| g.take()) {
+            self.list = fresh;
+        }
+        let stale = self.refreshed.is_none_or(|t| t.elapsed() > ROOTS_TTL);
+        if stale
+            && !self
+                .working
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.refreshed = Some(std::time::Instant::now());
+            let incoming = std::sync::Arc::clone(&self.incoming);
+            let working = std::sync::Arc::clone(&self.working);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let fresh = read_roots();
+                if let Ok(mut slot) = incoming.lock() {
+                    *slot = Some(fresh);
+                }
+                working.store(false, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+        }
+        &self.list
     }
+}
+
+/// Places, then drives, in the order the sidebar shows them.
+fn read_roots() -> Vec<(String, PathBuf, bool)> {
+    let mut roots = Vec::new();
+    for p in places() {
+        let device = p.is_device();
+        roots.push((p.label, p.path, device));
+    }
+    for d in drives() {
+        roots.push((d.label, d.path, true));
+    }
+    roots
 }
 
 /// Path components, root first, for the breadcrumb bar.
@@ -387,24 +506,66 @@ pub fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
     let mut parts: Vec<(String, PathBuf)> = Vec::new();
     let mut acc = PathBuf::new();
     let comps: Vec<_> = path.components().collect();
+    // Whether a segment has already named the root, so the one after it can be
+    // recognised as the same place rather than shown as a second name for it.
+    let mut named_root = false;
     for (i, c) in comps.iter().enumerate() {
         acc.push(c.as_os_str());
+        let is_last = i + 1 == comps.len();
         let label = match c {
-            std::path::Component::RootDir => root_label(&acc),
-            std::path::Component::Prefix(p) => p.as_os_str().to_string_lossy().into_owned(),
+            std::path::Component::Prefix(p) => {
+                named_root = true;
+                p.as_os_str().to_string_lossy().into_owned()
+            }
+            // On Windows the root directory follows the drive prefix, and its label
+            // comes from the path so far — which is `C:\`, so it renders as `C`
+            // again. The drive has already said where this is, so this segment
+            // contributes nothing to show. It is still pushed with an empty label so
+            // that the address bar's separators land in the right places, and
+            // dropped below, because an empty label is a separator and not a
+            // segment.
+            std::path::Component::RootDir if named_root => {
+                parts.push((String::new(), acc.clone()));
+                if is_last {
+                    // `C:\` is the whole path, so the last segment is the blank one
+                    // and there is nothing after it to separate. Hand it the drive's
+                    // label instead, which is what a reader expects to see for a
+                    // root they have arrived at.
+                    if let Some(first) = parts.first_mut()
+                        && first.0.is_empty()
+                    {
+                        first.0 = root_label(&acc);
+                        return parts.into_iter().filter(|p| !p.0.is_empty()).collect();
+                    }
+                }
+                continue;
+            }
+            std::path::Component::RootDir => {
+                named_root = true;
+                root_label(&acc)
+            }
             std::path::Component::CurDir => ".".to_owned(),
             std::path::Component::ParentDir => "..".to_owned(),
             _ => c.as_os_str().to_string_lossy().into_owned(),
         };
-        let is_last = i + 1 == comps.len();
         if !is_last || !label.is_empty() {
             parts.push((label, acc.clone()));
         }
     }
-    if parts.is_empty() {
-        parts.push((root_label(path), PathBuf::from("/")));
+    let mut shown: Vec<(String, PathBuf)> = parts.into_iter().filter(|p| !p.0.is_empty()).collect();
+    // A drive on its own, `C:`, names the folder a process is in *on that drive*, not
+    // its root, so a segment that stops there would take a click to somewhere else.
+    if let Some(first) = shown.first_mut()
+        && cfg!(windows)
+        && !first.1.has_root()
+        && first.1.to_string_lossy().ends_with(':')
+    {
+        first.1 = PathBuf::from(format!("{}\\", first.1.display()));
     }
-    parts
+    if shown.is_empty() {
+        shown.push((root_label(path), PathBuf::from("/")));
+    }
+    shown
 }
 
 fn root_label(p: &Path) -> String {
@@ -652,6 +813,31 @@ pub fn is_editable_text(path: &Path) -> bool {
     )
 }
 
+/// `cargo test --release probe_sidebar_root_costs -- --ignored --nocapture`
+#[cfg(test)]
+#[test]
+#[ignore]
+fn probe_sidebar_root_costs() {
+    use std::time::Instant;
+    for (name, f) in [
+        ("places()", (|| drop(places())) as fn()),
+        ("drives()", || drop(drives())),
+    ] {
+        let mut times = Vec::new();
+        for _ in 0..30 {
+            let t = Instant::now();
+            f();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.total_cmp(b));
+        eprintln!(
+            "{name:10} median {:.2} ms  max {:.2} ms",
+            times[times.len() / 2],
+            times[times.len() - 1]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,14 +912,83 @@ mod tests {
             PathBuf::from("/home/dev/docs")
         };
         let bc = breadcrumbs(&p);
-        // First segment is the root, last is the folder itself.
-        assert_eq!(
-            bc.first().unwrap().1,
-            PathBuf::from(p.components().next().unwrap().as_os_str())
-        );
+        // First segment is the root, last is the folder itself. The root of a drive is
+        // `C:\`: `C:` alone means the current folder on that drive, so a click on it
+        // went somewhere other than the top of the drive.
+        let root = if cfg!(windows) {
+            PathBuf::from(r"C:\")
+        } else {
+            PathBuf::from("/")
+        };
+        assert_eq!(bc.first().unwrap().1, root);
+        assert!(bc.first().unwrap().1.has_root(), "{bc:?}");
         assert_eq!(bc.last().unwrap().1, p);
         assert_eq!(bc.last().unwrap().0, "docs");
         assert!(bc.len() >= 2, "{bc:?}");
+    }
+
+    #[test]
+    fn a_drive_segment_of_the_address_bar_leads_to_the_root_of_the_drive() {
+        if !cfg!(windows) {
+            return;
+        }
+        for path in [r"D:\", r"D:", r"D:\c"] {
+            let bc = breadcrumbs(Path::new(path));
+            assert_eq!(bc[0].0, "D:", "{bc:?}");
+            assert_eq!(bc[0].1, PathBuf::from(r"D:\"), "{path}");
+        }
+    }
+
+    #[test]
+    fn the_drive_letter_is_not_shown_twice() {
+        // On Windows a path has *two* components at the front: the prefix (`C:`) and
+        // the root directory (`\`). The prefix already reads as "C:", and labelling
+        // the root as well — which is derived from the accumulated path and so comes
+        // out as "C" — puts the drive letter in the address bar twice, as
+        // `C: > C > Users > dev`. Only the prefix should be shown, and only when
+        // there is one.
+        let p = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\dev\docs")
+        } else {
+            PathBuf::from("/home/dev/docs")
+        };
+        let labels: Vec<String> = breadcrumbs(&p).into_iter().map(|(l, _)| l).collect();
+        let dupes = labels.windows(2).filter(|w| w[0] == w[1]).count();
+        assert_eq!(dupes, 0, "the same label twice in a row: {labels:?}");
+        if cfg!(windows) {
+            assert_eq!(labels.first().map(String::as_str), Some("C:"));
+            assert_eq!(
+                labels.iter().filter(|l| l.starts_with('C')).count(),
+                1,
+                "the drive letter appears once: {labels:?}"
+            );
+        }
+        // And the first segment must still navigate to the root, so a reader can get
+        // back there by clicking it.
+        let bc = breadcrumbs(&p);
+        let root = if cfg!(windows) {
+            PathBuf::from(r"C:\")
+        } else {
+            PathBuf::from("/")
+        };
+        assert_eq!(
+            bc.first().unwrap().1,
+            root,
+            "the first segment goes to the root of the drive"
+        );
+    }
+
+    #[test]
+    fn a_bare_drive_root_reads_as_the_drive() {
+        let p = if cfg!(windows) {
+            PathBuf::from("C:\\")
+        } else {
+            PathBuf::from("/")
+        };
+        let labels: Vec<String> = breadcrumbs(&p).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels.len(), 1, "one segment for a bare root: {labels:?}");
+        let want = if cfg!(windows) { "C:" } else { "/" };
+        assert_eq!(labels[0], want);
     }
 
     #[test]
