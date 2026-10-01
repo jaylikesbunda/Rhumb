@@ -19,7 +19,8 @@ Download a build from the releases page:
 
 | File | |
 |:--|:--|
-| `rhumb-<version>-x64.msi` | Windows installer |
+| `rhumb-<version>-setup.exe` | Windows installer (per user, no admin needed) |
+| `rhumb-<version>-x64.msi` | Windows installer (MSI) |
 | `rhumb-<version>-windows-portable.zip` | Windows, no install |
 
 Settings are stored in `%LOCALAPPDATA%\rhumb\prefs.txt`. Delete it to reset.

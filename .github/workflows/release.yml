@@ -73,6 +73,19 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\wix" -Force
           "$env:RUNNER_TEMP\wix" >> $env:GITHUB_PATH
 
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Build the NSIS installer
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" -V2 "/DVERSION=$env:VERSION" installer\rhumb.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Package
         env:
           VERSION: ${{ inputs.version }}
@@ -95,4 +108,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.msi
+            dist/*setup.exe
             dist/*.zip
