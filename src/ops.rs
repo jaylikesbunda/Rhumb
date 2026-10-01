@@ -936,7 +936,10 @@ mod tests {
         #[cfg(windows)]
         if std::os::windows::fs::symlink_dir(&root, &link).is_ok() {
             let m = measure(&sub);
-            assert_eq!(m.files, 1, "the link's contents were walked");
+            // The file, and the link itself counted as an entry; what it points at is
+            // not walked, so no folder is found and nothing from `root` is added.
+            assert_eq!(m.files, 2, "the link's contents were walked");
+            assert_eq!(m.folders, 0, "the link's contents were walked");
             return;
         }
         let m = measure(&sub);
