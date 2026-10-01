@@ -1,6 +1,9 @@
 //! Rhumb: a minimal, fast, dark file explorer with a built-in text and
 //! Markdown editor.
 
+// A release build is a windowed program, so it does not open a console behind
+// the window. Debug builds keep the console for log output.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![warn(clippy::all)]
 
 mod app;
