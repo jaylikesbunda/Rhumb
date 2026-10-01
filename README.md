@@ -4,7 +4,30 @@ A dark, fast file explorer with a built-in code editor and live Markdown
 preview. Native Rust and [egui](https://github.com/emilk/egui): one binary, no
 runtime.
 
-## Features
+- **One tool for browsing and editing.** Open a file from the list and edit it
+  in place. Markdown gets a live preview in the same tab.
+- **Cost per keystroke does not grow with the file.** Edits and scrolling work
+  on a rope and only touch the visible lines.
+- **Searching never blocks the window.** Folders are read, indexed and searched
+  on worker threads.
+- **Small and self-contained.** One executable, no installer needed, no
+  telemetry.
+
+## Install
+
+Download a build from the releases page:
+
+| File | |
+|:--|:--|
+| `rhumb-<version>-x64.msi` | Windows installer |
+| `rhumb-<version>-windows-portable.zip` | Windows, no install |
+
+Settings are stored in `%LOCALAPPDATA%\rhumb\prefs.txt`. Delete it to reset.
+
+<details>
+<summary><b>Features</b></summary>
+
+&nbsp;
 
 **Browsing**
 - Folder tabs, each with its own place, history, selection and open files
@@ -29,11 +52,17 @@ runtime.
 - Settings window, zoom slider, three views, light touch of chrome
 - Phosphor icon set
 
-## Performance
+</details>
+
+<details>
+<summary><b>Performance</b></summary>
+
+&nbsp;
 
 Frame costs measured on the release build with 20,000 to 100,000 line files,
-including layout and tessellation (GPU time not included), on one Windows 11 desktop under normal load. Medians, in milliseconds. A frame at 240 fps
-is 4.2 ms.
+including layout and tessellation (GPU time not included), on one Windows 11
+desktop under normal load. Medians, in milliseconds. A frame at 240 fps is
+4.2 ms.
 
 | Operation | Median | Worst |
 |:--|--:|--:|
@@ -57,57 +86,12 @@ These are in-process frame timings, not a comparison against other programs.
 Set `RHUMB_STRICT_SPEED=1` to hold the tests to the 240 fps budget on a quiet
 machine.
 
-## Where it is stronger
+</details>
 
-- **One tool for browsing and editing.** Open a file from the list and edit it
-  in place. Markdown gets a live preview in the same tab.
-- **Cost per keystroke does not grow with the file.** Edits and scrolling work
-  on a rope and only touch the visible lines.
-- **Searching never blocks the window.** Folders are read, indexed and searched
-  on worker threads.
-- **Small and self-contained.** One executable, no installer needed, no
-  telemetry.
+<details>
+<summary><b>Keyboard shortcuts</b></summary>
 
-## Limits
-
-- Windows is the primary platform. Clipboard integration and single-window
-  handling are Windows-specific; Linux builds compile but get less testing.
-- No language server, tree-sitter, code folding or IME composition in the
-  editor.
-- Archives are read-only (extract to change them). 7z and RAR are not
-  supported.
-- No dual-pane view, no Recycle Bin browser, no shell registration as the
-  default folder handler.
-- The name index is in memory and rebuilt per session.
-
-## Install
-
-Download a build from the releases page:
-
-| File | |
-|:--|:--|
-| `rhumb-<version>-x64.msi` | Windows installer |
-| `rhumb-<version>-windows-portable.zip` | Windows, no install |
-
-Settings are stored in `%LOCALAPPDATA%\rhumb\prefs.txt`. Delete it to reset.
-
-## Build
-
-Needs Rust 1.85 or newer.
-
-    cargo build --release
-    cargo test
-    cargo clippy --all-targets
-
-`tools/build_msi.sh` builds the installer (needs WiX v3 on `PATH`).
-
-## Releases
-
-Run the **release** workflow from the Actions tab and enter a version such as
-`0.2.0`. It stamps that version into the build, produces the MSI and portable
-zip, tags `v<version>` and publishes the release.
-
-## Keys
+&nbsp;
 
 | Shortcut | Action |
 |:---------|:-------|
@@ -129,6 +113,44 @@ zip, tags `v<version>` and publishes the release.
 | `Tab` / `Shift+Tab`, `Ctrl+/` | Indent, toggle comment |
 | `F5` | Reload the folder |
 | `/` or `?` | Shortcut help |
+
+</details>
+
+<details>
+<summary><b>Limits</b></summary>
+
+&nbsp;
+
+- Windows is the primary platform. Clipboard integration and single-window
+  handling are Windows-specific; Linux builds compile but get less testing.
+- No language server, tree-sitter, code folding or IME composition in the
+  editor.
+- Archives are read-only (extract to change them). 7z and RAR are not
+  supported.
+- No dual-pane view, no Recycle Bin browser, no shell registration as the
+  default folder handler.
+- The name index is in memory and rebuilt per session.
+
+</details>
+
+<details>
+<summary><b>Building from source</b></summary>
+
+&nbsp;
+
+Needs Rust 1.85 or newer.
+
+    cargo build --release
+    cargo test
+    cargo clippy --all-targets
+
+`tools/build_msi.sh` builds the installer (needs WiX v3 on `PATH`).
+
+**Releasing:** run the **release** workflow from the Actions tab and enter a
+version such as `0.2.0`. It stamps that version into the build, produces the
+MSI and portable zip, tags `v<version>` and publishes the release.
+
+</details>
 
 ## Licence
 
