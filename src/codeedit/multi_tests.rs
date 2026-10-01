@@ -1938,6 +1938,11 @@ fn nothing_a_person_can_press_breaks_the_carets() {
 // speed
 // ====================================================================================
 
+/// Unoptimised builds run these several times slower, and the budgets are for release.
+fn debug_slack() -> u128 {
+    if cfg!(debug_assertions) { 30 } else { 1 }
+}
+
 #[test]
 fn typing_at_a_thousand_carets_is_still_a_quick_frame() {
     let doc: String = (0..3000).map(|i| format!("line number {i}\n")).collect();
@@ -1959,6 +1964,7 @@ fn typing_at_a_thousand_carets_is_still_a_quick_frame() {
     } else {
         (40, 400)
     };
+    let (limit_mean, limit_worst) = (limit_mean * debug_slack(), limit_worst * debug_slack());
     assert!(
         mean.as_millis() < limit_mean && worst.as_millis() < limit_worst,
         "a thousand carets took {mean:?} on average and {worst:?} at worst"
@@ -1981,7 +1987,7 @@ fn moving_a_thousand_carets_is_a_quick_frame() {
         8
     } else {
         60
-    };
+    } * debug_slack();
     assert!(each.as_millis() < limit, "a move took {each:?}");
 }
 
@@ -2000,7 +2006,7 @@ fn undoing_an_edit_at_a_thousand_carets_is_quick() {
         16
     } else {
         200
-    };
+    } * debug_slack();
     assert!(took.as_millis() < limit, "undo took {took:?}");
 }
 
@@ -2012,7 +2018,7 @@ fn ctrl_shift_l_on_a_word_that_stands_thousands_of_times_is_quick_and_capped() {
     h.key_mod(Key::L, CTRL_SHIFT);
     let took = t.elapsed();
     assert_eq!(h.cursor_count(), super::multi::MAX_CURSORS);
-    assert!(took.as_millis() < 3000, "{took:?}");
+    assert!(took.as_millis() < 3000 * debug_slack(), "{took:?}");
     h.type_text("w");
     assert!(h.text().matches('w').count() > 10_000);
 }

@@ -402,7 +402,11 @@ impl Rhumb {
         // Hover-only, so this placeholder can never steal the click credit
         // from the row beneath it. It exists only to give the popup an id, a
         // layer, and a rect to sit beside.
-        let dummy = ui.interact(Rect::from_min_size(anchor, Vec2::ZERO), id, Sense::hover());
+        let dummy = ui.interact(
+            Rect::from_min_size(anchor, Vec2::ZERO),
+            id.with("anchor"),
+            Sense::hover(),
+        );
 
         let popup = egui::Popup::menu(&dummy).id(id);
         // Open exactly once, on the frame the right click landed. After that
