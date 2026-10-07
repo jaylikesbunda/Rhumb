@@ -12,8 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
-/// The signal file, kept beside the lock so the owner and the guest cannot
-/// disagree about where it is.
+/// The signal file, kept at one fixed per-user path so the owner and the guest
+/// cannot disagree about where it is.
 fn signal_file() -> Option<PathBuf> {
     let dir = dirs::data_local_dir()
         .or_else(dirs::config_dir)
@@ -25,8 +25,9 @@ fn signal_file() -> Option<PathBuf> {
 /// Ownership of the instance slot, held for as long as this value lives.
 ///
 /// On Windows that is a named mutex the process keeps open; elsewhere it is a
-/// file under an exclusive `flock`. Either way the OS releases it when the
-/// process dies, so a crash never leaves the app unlaunchable.
+/// lock file holding this process's pid. A crash leaves the file behind, but
+/// the next launch sees the dead pid and takes it over, so a crash never leaves
+/// the app unlaunchable.
 pub struct Lock {
     /// Held only so the handle stays open: the lock belongs to the process,
     /// not to this value. Named `_` so nothing reads it by accident.
@@ -209,41 +210,105 @@ mod platform {
 #[cfg(unix)]
 mod platform {
     use super::Lock;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
 
-    /// The lock file, beside the signal file it shares a directory with.
-    fn lock_path() -> Option<std::path::PathBuf> {
-        let dir = dirs::data_local_dir()
-            .or_else(dirs::config_dir)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("rhumb");
-        Some(dir.join("instance.lock"))
+    /// Where the lock lives: the session's runtime dir when it has one, else a
+    /// per-user folder in the temp dir. `XDG_RUNTIME_DIR` is per-user and is
+    /// cleared at logout, which is exactly the lifetime wanted; the temp dir is
+    /// the fallback, keyed by uid so two users on one machine do not collide.
+    fn lock_path() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return Some(dir.join("rhumb.lock"));
+        }
+        Some(
+            std::env::temp_dir()
+                .join(format!("rhumb-{}", user_id()))
+                .join("rhumb.lock"),
+        )
+    }
+
+    /// This process's real user id. No crate for one syscall.
+    fn user_id() -> u32 {
+        unsafe extern "C" {
+            fn getuid() -> u32;
+        }
+        // SAFETY: `getuid` takes no arguments and cannot fail.
+        unsafe { getuid() }
+    }
+
+    /// Whether `pid` still names a live process. `kill(pid, 0)` sends no signal;
+    /// it only asks the kernel. `EPERM` means alive but owned by someone else,
+    /// which still counts as alive.
+    fn is_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        const EPERM: i32 = 1;
+        // SAFETY: signal 0 is an existence probe and cannot affect `pid`.
+        if unsafe { kill(pid as i32, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(EPERM)
+    }
+
+    /// Creates the lock, failing if it already exists, and records our pid.
+    /// `create_new` is `O_EXCL`, so two launches cannot both succeed.
+    fn create(path: &Path) -> std::io::Result<std::fs::File> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)?;
+        // The pid is what a later launch reads to tell a live owner from a
+        // crash's leftovers.
+        let _ = write!(file, "{}", std::process::id());
+        let _ = file.flush();
+        Ok(file)
     }
 
     pub fn try_acquire() -> Option<Lock> {
-        use std::os::fd::AsRawFd;
-        const LOCK_EX: i32 = 2;
-        const LOCK_NB: i32 = 4;
-        extern "C" {
-            fn flock(fd: i32, operation: i32) -> i32;
-        }
         let path = lock_path()?;
         let dir = path.parent()?.to_path_buf();
         std::fs::create_dir_all(&dir).ok()?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .ok()?;
-        let ok = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-        if ok != 0 {
+
+        match create(&path) {
+            Ok(file) => {
+                return Some(Lock {
+                    _file: file,
+                    _dir: dir,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                log::warn!("cannot create the instance lock: {e}");
+                return None;
+            }
+        }
+
+        // The file is there. A live owner keeps the slot; a dead pid is a crash
+        // we are free to take over.
+        let owner = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        if owner.is_some_and(is_alive) {
             return None;
         }
-        Some(Lock {
-            _file: file,
-            _dir: dir,
-        })
+        // Stale: clear it and claim it. `create_new` decides a race between two
+        // launches taking over the same dead owner.
+        let _ = std::fs::remove_file(&path);
+        match create(&path) {
+            Ok(file) => Some(Lock {
+                _file: file,
+                _dir: dir,
+            }),
+            Err(_) => None,
+        }
     }
 }
 

@@ -34,13 +34,25 @@ Settings are stored in `%LOCALAPPDATA%\rhumb\prefs.txt`. Delete it to reset.
 
 **Browsing**
 - Folder tabs, each with its own place, history, selection and open files
-- Details, compact list and large-icon views with image thumbnails
-- Breadcrumb path bar, sortable resizable columns, quick access with pinning
-- Search as you type: this folder, or everything below it, cancellable
-- Name index per folder for instant ranked search, kept current by a watcher
-- ZIP, TAR and TAR.GZ archives open like folders (read-only); extract from the
-  context menu
-- Copy, cut, paste, rename, trash, delete, zip, properties, undo, drag and drop
+- Dual-pane view: two folder lists side by side (`Ctrl+Shift+D`), so files can
+  be copied or moved between them
+- Details, compact list and large-icon views, with real Windows shell icons and
+  thumbnails (images, and video, PDF and RAW through the shell)
+- Group by name, type, modified or size, with kind, date and size filters
+- Breadcrumb path bar with chevron separators, sortable resizable columns,
+  quick access with pinning
+- Search as you type: this folder, or everything below it, cancellable; the
+  per-folder name index is saved and reloaded between sessions
+- ZIP, TAR, TAR.GZ, 7z and RAR archives open like folders, with extract from the
+  context menu; a ZIP can be added to or deleted from in place
+- The Recycle Bin and This PC as browsable locations, with restore
+- Copy, cut, paste, batch rename, symlink/junction creation, trash, delete,
+  zip, properties, undo, drag and drop
+- A collision dialog for copy and move: replace/merge, skip or keep both, with
+  apply-to-all; jobs can be paused, with throughput, an estimated time left and
+  retries on a briefly locked file
+- Long-path (`\\?\`) support, so trees past Windows' 260-character limit are
+  reachable
 - Native file clipboard, so files move to and from Explorer
 
 **Editing**
@@ -48,11 +60,15 @@ Settings are stored in `%LOCALAPPDATA%\rhumb\prefs.txt`. Delete it to reset.
 - Multi-cursor: `Alt+Click`, `Ctrl+D` (next occurrence), `Ctrl+Shift+L`
   (all occurrences), column selection, one undo step per multi-edit
 - Syntax highlighting, bracket matching, auto-close, comment toggling, soft
-  wrap, find and replace, focus mode
-- Live Markdown preview beside the source, with optional scroll lock
+  wrap, find and replace, and code folding
+- IME composition, so input methods type at the caret
+- Live Markdown preview beside the source, with optional scroll lock; local,
+  remote and SVG images are drawn, not printed as paths
 
 **Interface**
 - Settings window, zoom slider, three views, light touch of chrome
+- Accessible names and roles across the toolbar, list, tabs, sidebar, status
+  bar and editor
 - Phosphor icon set
 
 </details>
@@ -102,7 +118,7 @@ machine.
 | `Ctrl+B`, `Alt+P` | Toggle sidebar / details pane |
 | `Alt+Left` / `Right` / `Up` | Back, forward, up |
 | `Ctrl+L`, `Ctrl+F` | Type a path / focus search |
-| `Ctrl+H` | Show hidden items |
+| `Ctrl+H` | Show hidden items (in the editor: find and replace) |
 | `Ctrl+N` / `Ctrl+Shift+N` | New text document / folder |
 | `Ctrl+T` | New folder tab |
 | `Ctrl+Tab`, `Ctrl+Shift+Tab` | Next / previous tab |
@@ -114,6 +130,11 @@ machine.
 | `Ctrl+S` | Save |
 | `Alt+Click`, `Ctrl+D`, `Ctrl+Shift+L` | Multi-cursor |
 | `Tab` / `Shift+Tab`, `Ctrl+/` | Indent, toggle comment |
+| `Ctrl+Shift+D` | Dual-pane: two folder lists |
+| `Ctrl+Shift+V` | Cycle the list layout |
+| `F2` over a selection | Batch rename |
+| `Ctrl+,` | Settings |
+| `F11` | Focus mode (editor) |
 | `F5` | Reload the folder |
 | `/` or `?` | Shortcut help |
 
@@ -124,15 +145,15 @@ machine.
 
 &nbsp;
 
-- Windows is the primary platform. Clipboard integration and single-window
-  handling are Windows-specific; Linux builds compile but get less testing.
-- No language server, tree-sitter, code folding or IME composition in the
-  editor.
-- Archives are read-only (extract to change them). 7z and RAR are not
-  supported.
-- No dual-pane view, no Recycle Bin browser, no shell registration as the
-  default folder handler.
-- The name index is in memory and rebuilt per session.
+- Windows is the primary platform. Linux builds and is covered by CI, with a
+  clipboard and single-instance implementation, but it gets less real-world
+  testing; macOS is not supported.
+- The editor has no language server or tree-sitter highlighting.
+- Only ZIP archives can be written; TAR, 7z and RAR are read-only.
+- No shell registration as the default folder handler.
+- A single line of a few hundred kilobytes to a megabyte is still shaped whole,
+  so a frame over one costs far more than a normal file. Ordinary long lines
+  are fine.
 
 </details>
 
@@ -141,7 +162,7 @@ machine.
 
 &nbsp;
 
-Needs Rust 1.85 or newer.
+Needs Rust 1.88 or newer.
 
     cargo build --release
     cargo test

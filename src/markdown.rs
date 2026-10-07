@@ -6,16 +6,18 @@
 //! length. The caller debounces re-parsing while the user types.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{
-    Color32, FontFamily, Galley, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2,
+    Color32, FontFamily, Galley, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
     epaint::text::{LayoutJob, TextWrapping},
     text::CCursor,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 
 use crate::theme::{FAMILY_UI, bold_font, c, fs as tfs, mono_font, sp, ui_font};
+use crate::thumbs;
 
 /// One run of inline text sharing a style.
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -25,6 +27,10 @@ pub struct Span {
     pub italic: bool,
     pub code: bool,
     pub strike: bool,
+    /// Raised text (`<sup>` / `^x^`).
+    pub sup: bool,
+    /// Lowered text (`<sub>` / `~x~`).
+    pub sub: bool,
     pub link: Option<String>,
 }
 
@@ -73,9 +79,18 @@ pub enum Block {
     Rule,
     /// Raw HTML, shown as dimmed source rather than dropped.
     Html(String),
+    /// A `<details>` disclosure: its summary and, when open, its body.
+    Details {
+        summary: String,
+        blocks: Vec<Block>,
+        open: bool,
+    },
     Image {
         alt: String,
         url: String,
+        /// Explicit `width`/`height` from a raw `<img>` tag, in points.
+        width: Option<f32>,
+        height: Option<f32>,
     },
     Footnote {
         label: String,
@@ -100,6 +115,9 @@ pub fn parse_with_lines(source: &str) -> (Vec<Block>, Vec<usize>) {
         | Options::ENABLE_SUBSCRIPT
         | Options::ENABLE_SMART_PUNCTUATION;
     let (blocks, starts) = Builder::run(Parser::new_ext(source, options).into_offset_iter());
+    // `<details>` arrives as three or more top-level HTML blocks — the opening tag,
+    // the summary, then the body — so they are folded into one disclosure here.
+    let (blocks, starts) = fold_details(blocks, starts);
     // Byte offsets to line numbers, counting the newlines between one and the next.
     let bytes = source.as_bytes();
     let (mut at, mut line) = (0usize, 0usize);
@@ -117,6 +135,191 @@ pub fn parse_with_lines(source: &str) -> (Vec<Block>, Vec<usize>) {
         })
         .collect();
     (blocks, lines)
+}
+
+/// Folds the HTML blocks of a `<details>` element into one [`Block::Details`].
+///
+/// The parser hands back the opening tag, the summary and the closing tag as
+/// separate top-level HTML blocks, with the body between them parsed normally.
+/// This walks the list and gathers each run into a single block, keeping the
+/// starting offset of the opening tag so the line mapping still lines up.
+fn fold_details(blocks: Vec<Block>, starts: Vec<usize>) -> (Vec<Block>, Vec<usize>) {
+    let mut slots: Vec<Option<Block>> = blocks.into_iter().map(Some).collect();
+    let mut out: Vec<Block> = Vec::with_capacity(slots.len());
+    let mut out_starts: Vec<usize> = Vec::with_capacity(starts.len());
+    let mut i = 0;
+    while i < slots.len() {
+        let open = match slots[i].as_ref() {
+            Some(Block::Html(h)) => details_open(h),
+            _ => None,
+        };
+        let Some(open) = open else {
+            if let Some(b) = slots[i].take() {
+                out.push(b);
+                out_starts.push(starts[i]);
+            }
+            i += 1;
+            continue;
+        };
+        let start = starts[i];
+        let mut summary = String::new();
+        if let Some(Block::Html(h)) = slots[i].as_ref() {
+            extract_summary(h, &mut summary);
+        }
+        let mut inner = Vec::new();
+        let mut j = i + 1;
+        while j < slots.len() {
+            match slots[j].as_ref() {
+                Some(Block::Html(h)) if is_details_close(h) => {
+                    slots[j] = None;
+                    j += 1;
+                    break;
+                }
+                Some(Block::Html(h)) if is_summary_only(h) => {
+                    if summary.is_empty() {
+                        extract_summary(h, &mut summary);
+                    }
+                    slots[j] = None;
+                    j += 1;
+                }
+                _ => {
+                    if let Some(b) = slots[j].take() {
+                        inner.push(b);
+                    }
+                    j += 1;
+                }
+            }
+        }
+        out.push(Block::Details {
+            summary,
+            blocks: inner,
+            open,
+        });
+        out_starts.push(start);
+        i = j;
+    }
+    (out, out_starts)
+}
+
+/// Whether an HTML block opens a `<details>`, and whether it starts open.
+fn details_open(html: &str) -> Option<bool> {
+    let lower = html.to_ascii_lowercase();
+    let rest = lower.split("<details").nth(1)?;
+    let tag = rest.split('>').next().unwrap_or("");
+    Some(tag.split_ascii_whitespace().any(|a| a == "open"))
+}
+
+/// Whether an HTML block closes a `<details>`.
+fn is_details_close(html: &str) -> bool {
+    html.to_ascii_lowercase().contains("</details>")
+}
+
+/// Whether an HTML block is just a `<summary>` line, which belongs to the header.
+fn is_summary_only(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("<summary") && lower.contains("</summary>") && !lower.contains("<details")
+}
+
+/// Pulls the text out of a `<summary>` tag, tags and entities removed.
+fn extract_summary(html: &str, out: &mut String) {
+    let lower = html.to_ascii_lowercase();
+    let Some(start) = lower.find("<summary") else {
+        return;
+    };
+    let Some(gt) = html[start..].find('>') else {
+        return;
+    };
+    let from = start + gt + 1;
+    let Some(end) = lower[from..].find("</summary>") else {
+        return;
+    };
+    out.push_str(&strip_html(&html[from..from + end]));
+}
+
+/// Turns a scrap of HTML into readable text: tags dropped, a few entities decoded,
+/// whitespace collapsed.
+fn strip_html(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(ch),
+            _ => {}
+        }
+    }
+    decode_entities(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Decodes the handful of HTML entities that turn up in prose.
+fn decode_entities(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+/// Recognises a lone `<img …>` tag and returns its `(alt, src, width, height)`.
+/// Width and height are the tag's own attributes, in points, when it has them.
+fn parse_img_tag(html: &str) -> Option<(String, String, Option<f32>, Option<f32>)> {
+    let t = html.trim();
+    let lower = t.to_ascii_lowercase();
+    if !lower.starts_with("<img") || !lower.ends_with('>') {
+        return None;
+    }
+    let src = attr_value(t, "src")?;
+    let alt = attr_value(t, "alt").unwrap_or_default();
+    let width = attr_value(t, "width").as_deref().and_then(css_len);
+    let height = attr_value(t, "height").as_deref().and_then(css_len);
+    Some((decode_entities(&alt), src, width, height))
+}
+
+/// A CSS length in points, from an attribute value like `320` or `320px`.
+fn css_len(v: &str) -> Option<f32> {
+    let v = v.trim();
+    let v = v
+        .strip_suffix("px")
+        .or_else(|| v.strip_suffix("PX"))
+        .unwrap_or(v);
+    v.trim().parse::<f32>().ok().filter(|n| *n > 0.0)
+}
+
+/// The value of an HTML attribute in `tag`, double-quoted, single-quoted or bare.
+fn attr_value(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = tag.as_bytes();
+    let mut at = 0;
+    while let Some(pos) = lower[at..].find(name) {
+        let i = at + pos;
+        // Only a real attribute: preceded by whitespace or the tag's `<`.
+        let preceded = i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b'<';
+        let rest = tag[i + name.len()..].trim_start();
+        if preceded && let Some(rest) = rest.strip_prefix('=') {
+            let rest = rest.trim_start();
+            let bytes = rest.as_bytes();
+            return match bytes.first() {
+                Some(&q @ (b'"' | b'\'')) => {
+                    let end = rest[1..].find(q as char)?;
+                    Some(rest[1..1 + end].to_owned())
+                }
+                Some(_) => {
+                    let end = rest
+                        .find(|c: char| c.is_ascii_whitespace() || c == '>')
+                        .unwrap_or(rest.len());
+                    Some(rest[..end].to_owned())
+                }
+                None => None,
+            };
+        }
+        at = i + name.len();
+    }
+    None
 }
 
 /// One level of container nesting while parsing.
@@ -155,6 +358,8 @@ struct Builder {
     bold: u32,
     italic: u32,
     strike: u32,
+    sup: u32,
+    sub: u32,
     /// Cells collected so far in the current table row.
     cells: Vec<Vec<Span>>,
     /// Whether the row being built is the header row.
@@ -175,6 +380,8 @@ impl Builder {
             bold: 0,
             italic: 0,
             strike: 0,
+            sup: 0,
+            sub: 0,
             cells: Vec::new(),
             in_header: false,
         };
@@ -236,7 +443,17 @@ impl Builder {
             Event::Html(html) | Event::InlineHtml(html) => {
                 let t = html.trim();
                 if !t.is_empty() {
-                    self.push(Block::Html(t.to_owned()));
+                    // A lone `<img>` tag is a picture, not source to be shown.
+                    if let Some((alt, url, width, height)) = parse_img_tag(t) {
+                        self.push(Block::Image {
+                            alt,
+                            url,
+                            width,
+                            height,
+                        });
+                    } else {
+                        self.push(Block::Html(t.to_owned()));
+                    }
                 }
             }
             Event::FootnoteReference(label) => {
@@ -300,7 +517,8 @@ impl Builder {
                 url: dest_url.to_string(),
             }),
             Tag::MetadataBlock(_) | Tag::HtmlBlock => {}
-            Tag::Superscript | Tag::Subscript => {}
+            Tag::Superscript => self.sup += 1,
+            Tag::Subscript => self.sub += 1,
             // Definition lists render as a flat list: enough structure to read.
             Tag::DefinitionList => self.stack.push(Frame::List {
                 start: None,
@@ -314,7 +532,9 @@ impl Builder {
         match tag {
             TagEnd::Paragraph => {
                 let spans = std::mem::take(&mut self.spans);
-                if !spans.is_empty() {
+                // A paragraph that is only whitespace — the space a soft break leaves
+                // between two images — is not worth a block of its own.
+                if spans.iter().any(|s| !s.text.trim().is_empty()) {
                     self.push(Block::Para(spans));
                 }
             }
@@ -390,12 +610,18 @@ impl Builder {
             TagEnd::Strong => self.bold = self.bold.saturating_sub(1),
             TagEnd::Emphasis => self.italic = self.italic.saturating_sub(1),
             TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
-            TagEnd::Superscript | TagEnd::Subscript => {}
+            TagEnd::Superscript => self.sup = self.sup.saturating_sub(1),
+            TagEnd::Subscript => self.sub = self.sub.saturating_sub(1),
             TagEnd::Link => self.link = None,
             TagEnd::Image => {
                 if let Some(Frame::Image { alt, url }) = self.stack.pop() {
                     let alt = if alt.is_empty() { url.clone() } else { alt };
-                    self.push(Block::Image { alt, url });
+                    self.push(Block::Image {
+                        alt,
+                        url,
+                        width: None,
+                        height: None,
+                    });
                 }
             }
             TagEnd::MetadataBlock(_) | TagEnd::HtmlBlock => {}
@@ -434,6 +660,8 @@ impl Builder {
         span.bold = self.bold > 0;
         span.italic = self.italic > 0;
         span.strike = self.strike > 0;
+        span.sup = self.sup > 0;
+        span.sub = self.sub > 0;
         span.link = self.link.clone();
         merge(&mut self.spans, span);
     }
@@ -475,7 +703,12 @@ impl Builder {
                 }
                 Frame::List { start, items } => self.push_root(Block::List { start, items }),
                 Frame::Table(table) => self.push_root(Block::Table(table)),
-                Frame::Image { alt, url } => self.push_root(Block::Image { alt, url }),
+                Frame::Image { alt, url } => self.push_root(Block::Image {
+                    alt,
+                    url,
+                    width: None,
+                    height: None,
+                }),
             }
         }
         if !self.spans.is_empty() {
@@ -517,6 +750,8 @@ fn merge(spans: &mut Vec<Span>, next: Span) {
         && last.italic == next.italic
         && last.code == next.code
         && last.strike == next.strike
+        && last.sup == next.sup
+        && last.sub == next.sub
         && last.link == next.link
     {
         last.text.push_str(&next.text);
@@ -528,7 +763,6 @@ fn merge(spans: &mut Vec<Span>, next: Span) {
 /// Shaped geometry for one block, reused every frame.
 struct Shaped {
     galley: Arc<Galley>,
-    height: f32,
     /// Clickable link targets, relative to the galley origin.
     link_rects: Vec<(Rect, String)>,
 }
@@ -548,19 +782,26 @@ type Parsed = (u64, Vec<Block>, Vec<usize>, usize, u128);
 /// A parsed document plus its shaping cache.
 pub struct Preview {
     blocks: Vec<Block>,
-    /// How far the scroll position is still to move to hold the page where it is, after
-    /// blocks above the view turned out to be a different height from their estimates:
-    /// the scroll area applies it at the end of the frame, so for the rest of this frame
-    /// the offset it reports is that much short of where the page really is.
-    pending_shift: f32,
     /// The line of the source each block starts on, and how many lines there are.
     lines: Vec<usize>,
     source_lines: usize,
     cache: HashMap<u64, Shaped>,
-    /// How tall each top-level block is, once it has been laid out. Blocks that have
-    /// never been on screen have no height yet and are given an estimate, so the
-    /// document has a length and a scrollbar without every block in it being shaped.
+    /// Pixel dimensions of local images, so an image block has a real height on the
+    /// first frame rather than changing size once its texture is decoded. `None`
+    /// means the file could not be read as an image.
+    dims: HashMap<PathBuf, Option<(u32, u32)>>,
+    /// Which `<details>` disclosures the reader has opened, by block key.
+    details_open: HashMap<u64, bool>,
+    /// The exact height of each top-level block. Every block is laid out before the
+    /// document is drawn, so the map below is complete and does not move under the
+    /// reader as blocks come into view. `None` only until the layout pass runs.
     heights: Vec<Option<f32>>,
+    /// `tops[i]` is where block `i` starts, measured from the top of the document, so
+    /// a source line and a pixel can each be found with a binary search. Rebuilt
+    /// whenever a height changes.
+    tops: Vec<f32>,
+    /// Whether every height is known, so the map is exact and the sync can trust it.
+    laid_out: bool,
     /// Document version the cache belongs to.
     version: Option<u64>,
     /// A parse running on another thread: where its answer will be, once it has one.
@@ -580,11 +821,14 @@ impl Preview {
     pub fn new() -> Preview {
         Preview {
             blocks: Vec::new(),
-            pending_shift: 0.0,
             lines: Vec::new(),
             source_lines: 0,
             cache: HashMap::new(),
+            dims: HashMap::new(),
+            details_open: HashMap::new(),
             heights: Vec::new(),
+            tops: Vec::new(),
+            laid_out: false,
             version: None,
             pending: None,
             width: 0.0,
@@ -678,6 +922,10 @@ impl Preview {
         self.stats.blocks = self.blocks.len();
         self.cache.clear();
         self.version = Some(version);
+        // The unchanged blocks keep their heights, so only the stretch that differs
+        // has to be laid out again; the map is rebuilt from what is known.
+        self.laid_out = self.heights.iter().all(Option::is_some);
+        self.recompute_tops();
     }
 
     /// Forgets the parsed document, so the next `sync` rebuilds it.
@@ -686,6 +934,8 @@ impl Preview {
         self.lines.clear();
         self.source_lines = 0;
         self.heights.clear();
+        self.tops.clear();
+        self.laid_out = false;
         self.cache.clear();
         self.version = None;
         self.pending = None;
@@ -696,13 +946,27 @@ impl Preview {
         self.stats
     }
 
-    /// What the scroll offset is still to be moved by, so that `offset + pending_shift`
-    /// is where the page is. Zero when the heights have not changed under the view.
-    pub fn pending_shift(&self) -> f32 {
-        self.pending_shift
+    /// Whether every block has an exact height, so the line<->pixel map is exact.
+    pub fn laid_out(&self) -> bool {
+        self.laid_out
     }
 
-    /// How tall block `i` is: as it was drawn, or as it is expected to be.
+    /// Rebuilds the block-start offsets from the current heights. The heights of
+    /// blocks that have not been laid out yet fall back to an estimate, so the map
+    /// still has a length while the layout pass runs.
+    fn recompute_tops(&mut self) {
+        let mut tops = Vec::with_capacity(self.blocks.len() + 1);
+        let mut acc = 0.0f32;
+        tops.push(0.0);
+        for i in 0..self.blocks.len() {
+            acc += self.block_height(i);
+            tops.push(acc);
+        }
+        self.tops = tops;
+    }
+
+    /// How tall block `i` is: exactly, if it has been laid out, or an estimate until
+    /// then.
     fn block_height(&self, i: usize) -> f32 {
         self.heights
             .get(i)
@@ -715,15 +979,15 @@ impl Preview {
     /// fractional for somewhere between two lines. Found through the block the line is
     /// in, by how far through that block's lines it is.
     pub fn y_of_line(&self, line: f32) -> f32 {
-        if self.lines.is_empty() {
+        if self.blocks.is_empty() || self.tops.len() <= 1 {
             return 0.0;
         }
         let line = line.max(0.0);
         let k = self
             .lines
             .partition_point(|&l| (l as f32) <= line)
-            .saturating_sub(1);
-        let above: f32 = (0..k).map(|i| self.block_height(i)).sum();
+            .saturating_sub(1)
+            .min(self.blocks.len() - 1);
         let from = self.lines[k] as f32;
         let to = self
             .lines
@@ -731,59 +995,71 @@ impl Preview {
             .copied()
             .unwrap_or(self.source_lines.max(self.lines[k] + 1)) as f32;
         let frac = ((line - from) / (to - from).max(1.0)).clamp(0.0, 1.0);
-        above + frac * self.block_height(k)
+        self.tops[k] + frac * self.block_height(k)
     }
 
     /// The line of the source that is `y` points down the preview: the opposite of
     /// [`Preview::y_of_line`].
     pub fn line_at_y(&self, y: f32) -> f32 {
-        if self.lines.is_empty() {
+        if self.blocks.is_empty() || self.tops.len() <= 1 {
             return 0.0;
         }
-        let mut top = 0.0f32;
-        for k in 0..self.blocks.len() {
-            let h = self.block_height(k).max(0.001);
-            if y < top + h || k + 1 == self.blocks.len() {
-                let from = self.lines[k] as f32;
-                let to = self
-                    .lines
-                    .get(k + 1)
-                    .copied()
-                    .unwrap_or(self.source_lines.max(self.lines[k] + 1))
-                    as f32;
-                let frac = ((y - top) / h).clamp(0.0, 1.0);
-                return from + frac * (to - from).max(1.0);
-            }
-            top += h;
-        }
-        0.0
+        let y = y.max(0.0);
+        let k = self
+            .tops
+            .partition_point(|&t| t <= y)
+            .saturating_sub(1)
+            .min(self.blocks.len() - 1);
+        let h = self.block_height(k).max(0.001);
+        let frac = ((y - self.tops[k]) / h).clamp(0.0, 1.0);
+        let from = self.lines[k] as f32;
+        let to = self
+            .lines
+            .get(k + 1)
+            .copied()
+            .unwrap_or(self.source_lines.max(self.lines[k] + 1)) as f32;
+        from + frac * (to - from).max(1.0)
+    }
+
+    /// Renders the document with no image caches: the plain entry point used by
+    /// tests and by any caller that has none.
+    #[cfg(test)]
+    pub fn show(&mut self, ui: &mut Ui, indent: f32) -> f32 {
+        self.show_ctx(ui, indent, None, None, None)
     }
 
     /// Renders the document, returning its total height.
     ///
-    /// Blocks are painted at absolute positions, so the origin comes from the
-    /// `Ui` itself. Inside a scroll area that origin already carries the scroll
-    /// offset, which keeps every block on the same rhythm as it scrolls.
+    /// Every block is laid out once, before anything is drawn, so the map from source
+    /// lines to pixels is exact and never moves under the reader; only the blocks near
+    /// the view are painted, so a frame still costs what is on screen and not what is
+    /// in the file. Blocks are painted at absolute positions, so the origin comes from
+    /// the `Ui` itself.
     ///
-    /// Only the blocks near the visible part are laid out and painted. The rest are
-    /// stepped over by their remembered height, or by an estimate if they have never
-    /// been seen, so a frame costs what is on screen and not what is in the file. A
-    /// block that is measured for the first time above the top of the view changes the
-    /// height of everything above it, and the scroll position is adjusted by the
-    /// difference so that what the reader is looking at stays where it is.
-    pub fn show(&mut self, ui: &mut Ui, indent: f32) -> f32 {
+    /// `thumbs` and `remote` are the image caches, and `base` is the directory the
+    /// Markdown file lives in, which relative image paths resolve against.
+    pub fn show_ctx(
+        &mut self,
+        ui: &mut Ui,
+        indent: f32,
+        mut thumbs: Option<&mut thumbs::Thumbs>,
+        mut remote: Option<&mut crate::remote::RemoteImages>,
+        base: Option<&Path>,
+    ) -> f32 {
         let avail = ui.available_width();
         let width = (avail - indent).clamp(120.0, sp::MD_MEASURE);
         if (self.width - width).abs() > 0.5 {
-            // A different width wraps everything differently: what was measured is
-            // no longer true, and the reader's place is kept by the estimates being
-            // replaced as the blocks come back into view.
+            // A different width wraps everything differently, so every height is stale.
             self.cache.clear();
             self.heights.fill(None);
             self.width = width;
+            self.laid_out = false;
         }
-        // Blocks are laid out left to right from this x, and `indent` is folded
-        // into it, so the measuring width above stays correct.
+        // Lay out every block that has no height yet, so the map below is exact.
+        if !self.laid_out {
+            self.layout_all(ui, indent, width, &mut thumbs, &mut remote, base);
+        }
+
         let origin = ui.min_rect().min;
         let x0 = origin.x + indent;
         let clip = ui.clip_rect();
@@ -792,42 +1068,48 @@ impl Preview {
         let reach = clip.height().max(200.0);
         let (top, bottom) = (clip.top() - reach, clip.bottom() + reach);
         let mut hits: Vec<(Rect, String)> = Vec::new();
-        let mut y = origin.y;
-        // How far blocks are drawn from where the running total says they are. A block
-        // measured for the first time above the view is a different height from the
-        // estimate that stood in for it, which moves everything after it; drawing what
-        // comes next that much the other way leaves it on screen exactly where it was.
-        let mut shift = 0.0f32;
-        // Taken out of `self` for the loop so each block can be read without copying
-        // it, while the shaping cache is written.
-        let blocks = std::mem::take(&mut self.blocks);
-        for (i, block) in blocks.iter().enumerate() {
-            let known = self.heights.get(i).copied().flatten();
-            let guess = known.unwrap_or_else(|| estimate(block, width));
-            let at = y - shift;
-            if at + guess < top || at > bottom {
-                y += guess;
-                continue;
-            }
-            let painted = self.block(ui, key_of(0, i), block, x0, at, width, 0, &mut hits) - at;
-            if let Some(slot) = self.heights.get_mut(i) {
-                if known.is_none() && at + painted <= clip.top() {
-                    shift += painted - guess;
+        // Only the blocks in the band are painted; their positions come from `tops`.
+        let len = self.blocks.len();
+        if len > 0 {
+            let first = self
+                .tops
+                .partition_point(|&t| origin.y + t < top)
+                .saturating_sub(1)
+                .min(len - 1);
+            let mut changed = false;
+            let blocks = std::mem::take(&mut self.blocks);
+            for (i, block) in blocks.iter().enumerate().skip(first) {
+                let at = origin.y + self.tops[i];
+                if at > bottom {
+                    break;
                 }
-                *slot = Some(painted);
+                let h = self.block(
+                    ui,
+                    key_of(0, i),
+                    block,
+                    x0,
+                    at,
+                    width,
+                    0,
+                    &mut hits,
+                    &mut thumbs,
+                    &mut remote,
+                    base,
+                    c::TEXT,
+                    true,
+                ) - at;
+                // A block whose state changed under us — an image finished loading, a
+                // `<details>` was opened — has a new height, so the map is rebuilt.
+                if (h - self.heights[i].unwrap_or(h)).abs() > 0.5 {
+                    self.heights[i] = Some(h);
+                    changed = true;
+                }
             }
-            y += painted;
-        }
-        self.blocks = blocks;
-        self.pending_shift = if shift.abs() > 0.5 { shift } else { 0.0 };
-        if shift.abs() > 0.5 {
-            // And the scroll position moves by the same amount for the next frame, so
-            // that what was drawn shifted is then drawn where it is.
-            ui.scroll_with_delta_animation(
-                egui::vec2(0.0, -shift),
-                egui::style::ScrollAnimation::none(),
-            );
-            ui.ctx().request_repaint();
+            self.blocks = blocks;
+            if changed {
+                self.recompute_tops();
+                ui.ctx().request_repaint();
+            }
         }
 
         // Open a link when it is clicked with the pointer still on it.
@@ -846,10 +1128,54 @@ impl Preview {
             let _ = open::that(&url);
         }
         // A height, not an absolute y, so the caller can size the content.
-        (y - origin.y).max(0.0)
+        self.tops.last().copied().unwrap_or(0.0)
     }
 
-    /// Renders one block, returning the y cursor after it.
+    /// Lays out every block that has no height yet, so the line<->pixel map is exact.
+    ///
+    /// Nothing is painted: only the geometry is wanted. An image block uses the size it
+    /// already knows — a local file's pixels, or a short placeholder for a remote one —
+    /// rather than starting a fetch, so a document full of pictures does not decode
+    /// them all at once.
+    fn layout_all(
+        &mut self,
+        ui: &mut Ui,
+        indent: f32,
+        width: f32,
+        thumbs: &mut Option<&mut thumbs::Thumbs>,
+        remote: &mut Option<&mut crate::remote::RemoteImages>,
+        base: Option<&Path>,
+    ) {
+        let blocks = std::mem::take(&mut self.blocks);
+        let mut hits: Vec<(Rect, String)> = Vec::new();
+        for (i, block) in blocks.iter().enumerate() {
+            if self.heights.get(i).copied().flatten().is_some() {
+                continue;
+            }
+            let h = self.block(
+                ui,
+                key_of(0, i),
+                block,
+                indent,
+                0.0,
+                width,
+                0,
+                &mut hits,
+                thumbs,
+                remote,
+                base,
+                c::TEXT,
+                false,
+            );
+            self.heights[i] = Some(h);
+        }
+        self.blocks = blocks;
+        self.laid_out = self.heights.iter().all(Option::is_some);
+        self.recompute_tops();
+    }
+
+    /// Lays out one block, returning the y cursor after it. When `draw` is false only
+    /// the geometry is computed: nothing is painted and no input is taken.
     #[allow(clippy::too_many_arguments)]
     fn block(
         &mut self,
@@ -861,6 +1187,11 @@ impl Preview {
         width: f32,
         depth: u32,
         hits: &mut Vec<(Rect, String)>,
+        thumbs: &mut Option<&mut thumbs::Thumbs>,
+        remote: &mut Option<&mut crate::remote::RemoteImages>,
+        base: Option<&Path>,
+        text: Color32,
+        draw: bool,
     ) -> f32 {
         if depth > 6 {
             return y;
@@ -868,7 +1199,12 @@ impl Preview {
         match block {
             Block::Heading { level, spans } => {
                 let size = heading_size(*level);
-                let color = heading_color(*level);
+                // A heading in a blockquote takes the quote's dimmed colour.
+                let color = if text == c::TEXT {
+                    heading_color(*level)
+                } else {
+                    text
+                };
                 let level = *level;
                 let make = || {
                     inline_job(spans, |span| {
@@ -881,17 +1217,20 @@ impl Preview {
                         if level == 1 {
                             fmt.extra_letter_spacing = 0.15;
                         }
+                        raise_or_lower(&mut fmt, span);
                         fmt
                     })
                 };
-                let h = self.paint(ui, key, make, indent, y, width, hits);
+                let h = self.paint(ui, key, make, indent, y, width, hits, draw);
                 if level <= 2 {
                     let line_y = (y + h + sp::XS).round();
-                    ui.painter().hline(
-                        indent..=(indent + width.min(600.0)),
-                        line_y,
-                        Stroke::new(1.0, c::DIVIDER),
-                    );
+                    if draw {
+                        ui.painter().hline(
+                            indent..=(indent + width.min(600.0)),
+                            line_y,
+                            Stroke::new(1.0, c::DIVIDER),
+                        );
+                    }
                     line_y + sp::SM
                 } else {
                     y + h + sp::XS
@@ -901,36 +1240,39 @@ impl Preview {
                 let h = self.paint(
                     ui,
                     key,
-                    || inline_job(spans, body_format),
+                    || inline_job(spans, |span| body_format(span, text)),
                     indent,
                     y,
                     width,
                     hits,
+                    draw,
                 );
                 y + h + sp::SM
             }
-            Block::Code { lang, text } => {
+            Block::Code { lang, text: code } => {
                 let pad = Vec2::new(sp::MD, sp::SM);
-                let galley = self.shape(ui, key, (width - pad.x * 2.0).max(40.0), || {
-                    (code_job(text, lang), Vec::new())
+                let galley = self.shape(ui, key, (width - pad.x * 2.0).max(40.0), draw, || {
+                    (code_job(code, lang), Vec::new())
                 });
                 let rect = Rect::from_min_size(
                     Pos2::new(indent, y),
                     Vec2::new(width, galley.size().y + pad.y * 2.0),
                 );
-                let painter = ui.painter();
-                painter.rect_filled(rect, 5, c::CODE_BG);
-                painter.rect_stroke(rect, 5, Stroke::new(1.0, c::DIVIDER), StrokeKind::Inside);
-                if !lang.is_empty() {
-                    painter.text(
-                        rect.right_top() + Vec2::new(-sp::SM, 5.0),
-                        egui::Align2::RIGHT_TOP,
-                        lang,
-                        ui_font(tfs::SMALL),
-                        c::TEXT_GHOST,
-                    );
+                if draw {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 5, c::CODE_BG);
+                    painter.rect_stroke(rect, 5, Stroke::new(1.0, c::DIVIDER), StrokeKind::Inside);
+                    if !lang.is_empty() {
+                        painter.text(
+                            rect.right_top() + Vec2::new(-sp::SM, 5.0),
+                            egui::Align2::RIGHT_TOP,
+                            lang,
+                            ui_font(tfs::SMALL),
+                            c::TEXT_GHOST,
+                        );
+                    }
+                    crate::widgets::galley_at(painter, rect.min + pad, &galley, c::TEXT);
                 }
-                crate::widgets::galley_at(painter, rect.min + pad, &galley, c::TEXT);
                 rect.max.y + sp::SM
             }
             Block::Quote(blocks) => {
@@ -939,13 +1281,27 @@ impl Preview {
                 let start = y;
                 let mut y = y;
                 for (i, b) in blocks.iter().enumerate() {
-                    y = self.block(ui, child(key, i), b, inner_x, y, inner_w, depth + 1, hits);
+                    y = self.block(
+                        ui,
+                        child(key, i),
+                        b,
+                        inner_x,
+                        y,
+                        inner_w,
+                        depth + 1,
+                        hits,
+                        thumbs,
+                        remote,
+                        base,
+                        c::TEXT_DIM,
+                        draw,
+                    );
                 }
-                if y > start + 1.0 {
+                if draw && y > start + 1.0 {
                     ui.painter().vline(
                         indent,
                         start..=(y - sp::SM).max(start),
-                        Stroke::new(2.0, c::BORDER),
+                        Stroke::new(3.0, c::BORDER),
                     );
                 }
                 y
@@ -956,48 +1312,52 @@ impl Preview {
                 let text_w = (width - gutter).max(40.0);
                 let mut y = y;
                 for (n, item) in items.iter().enumerate() {
-                    // A task item shows a checkbox instead of a bullet.
-                    if item.checked.is_none() {
-                        let marker = match start {
-                            Some(first) => format!("{}.", first + n as u64),
-                            None => "\u{2022}".to_owned(),
-                        };
-                        let marker_font = if start.is_some() {
-                            mono_font(tfs::SMALL)
-                        } else {
-                            bold_font(tfs::BODY)
-                        };
-                        ui.painter().text(
-                            Pos2::new(indent + 2.0, y + 1.0),
-                            egui::Align2::LEFT_TOP,
-                            marker,
-                            marker_font,
-                            c::TEXT_FAINT,
-                        );
-                    }
-                    if let Some(checked) = item.checked {
-                        let s = 11.0f32;
-                        let rect =
-                            Rect::from_min_size(Pos2::new(indent + 1.0, y + 3.0), Vec2::splat(s));
-                        let painter = ui.painter();
-                        let stroke =
-                            Stroke::new(1.0, if checked { c::TEXT_DIM } else { c::BORDER });
-                        painter.rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
-                        if checked {
-                            painter.line_segment(
-                                [
-                                    rect.left_top() + Vec2::new(2.0, 5.5),
-                                    rect.left_top() + Vec2::new(4.5, 8.5),
-                                ],
-                                Stroke::new(1.3, c::TEXT_DIM),
+                    if draw {
+                        // A task item shows a checkbox instead of a bullet.
+                        if item.checked.is_none() {
+                            let marker = match start {
+                                Some(first) => format!("{}.", first + n as u64),
+                                None => "\u{2022}".to_owned(),
+                            };
+                            let marker_font = if start.is_some() {
+                                mono_font(tfs::SMALL)
+                            } else {
+                                bold_font(tfs::BODY)
+                            };
+                            ui.painter().text(
+                                Pos2::new(indent + 2.0, y + 1.0),
+                                egui::Align2::LEFT_TOP,
+                                marker,
+                                marker_font,
+                                c::TEXT_FAINT,
                             );
-                            painter.line_segment(
-                                [
-                                    rect.left_top() + Vec2::new(4.5, 8.5),
-                                    rect.right_top() + Vec2::new(-1.5, 2.5),
-                                ],
-                                Stroke::new(1.3, c::TEXT_DIM),
+                        }
+                        if let Some(checked) = item.checked {
+                            let s = 11.0f32;
+                            let rect = Rect::from_min_size(
+                                Pos2::new(indent + 1.0, y + 3.0),
+                                Vec2::splat(s),
                             );
+                            let painter = ui.painter();
+                            let stroke =
+                                Stroke::new(1.0, if checked { c::TEXT_DIM } else { c::BORDER });
+                            painter.rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
+                            if checked {
+                                painter.line_segment(
+                                    [
+                                        rect.left_top() + Vec2::new(2.0, 5.5),
+                                        rect.left_top() + Vec2::new(4.5, 8.5),
+                                    ],
+                                    Stroke::new(1.3, c::TEXT_DIM),
+                                );
+                                painter.line_segment(
+                                    [
+                                        rect.left_top() + Vec2::new(4.5, 8.5),
+                                        rect.right_top() + Vec2::new(-1.5, 2.5),
+                                    ],
+                                    Stroke::new(1.3, c::TEXT_DIM),
+                                );
+                            }
                         }
                     }
                     for (i, b) in item.blocks.iter().enumerate() {
@@ -1010,20 +1370,27 @@ impl Preview {
                             text_w,
                             depth + 1,
                             hits,
+                            thumbs,
+                            remote,
+                            base,
+                            text,
+                            draw,
                         );
                     }
                     y += sp::XS;
                 }
                 y + sp::XS
             }
-            Block::Table(table) => self.table(ui, key, table, indent, y, width),
+            Block::Table(table) => self.table(ui, key, table, indent, y, width, text, draw),
             Block::Rule => {
                 let line_y = (y + sp::SM).round();
-                ui.painter().hline(
-                    indent..=(indent + width),
-                    line_y,
-                    Stroke::new(1.0, c::DIVIDER),
-                );
+                if draw {
+                    ui.painter().hline(
+                        indent..=(indent + width),
+                        line_y,
+                        Stroke::new(1.0, c::DIVIDER),
+                    );
+                }
                 line_y + sp::SM
             }
             Block::Html(html) => {
@@ -1034,25 +1401,89 @@ impl Preview {
                     );
                     (job, Vec::new())
                 };
-                let h = self.paint(ui, key, make, indent, y, width, hits);
+                let h = self.paint(ui, key, make, indent, y, width, hits, draw);
                 y + h + sp::SM
             }
-            Block::Image { alt, url } => {
-                // Images are not decoded; a tidy reference keeps the file honest.
-                let make = || {
-                    let label = if alt.is_empty() {
-                        url.clone()
-                    } else {
-                        format!("{alt}  \u{2014}  {url}")
-                    };
-                    let job = plain_job(
-                        label,
-                        egui::text::TextFormat::simple(ui_font(tfs::SMALL), c::TEXT_FAINT),
+            Block::Image {
+                alt,
+                url,
+                width: aw,
+                height: ah,
+            } => self.image(
+                ui, key, alt, url, *aw, *ah, indent, y, width, hits, thumbs, remote, base, draw,
+            ),
+            Block::Details {
+                summary,
+                blocks,
+                open,
+            } => {
+                let expanded = *self.details_open.entry(key).or_insert(*open);
+                // Shape the summary first, so the hover background can be drawn
+                // beneath it rather than over it.
+                let g = self.shape(
+                    ui,
+                    child(key, usize::MAX),
+                    (width - sp::LG).max(40.0),
+                    draw,
+                    || {
+                        (
+                            plain_job(
+                                summary.clone(),
+                                egui::text::TextFormat::simple(bold_font(tfs::BODY), text),
+                            ),
+                            Vec::new(),
+                        )
+                    },
+                );
+                let head = g.size().y;
+                let head_rect =
+                    Rect::from_min_size(Pos2::new(indent, y), Vec2::new(width, head + sp::XS));
+                if draw {
+                    let resp = ui.interact(head_rect, Id::new(("md-details", key)), Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(head_rect, 4, c::HOVER);
+                    }
+                    crate::widgets::Icon::Chevron.paint_with(
+                        ui.painter(),
+                        Rect::from_center_size(
+                            Pos2::new(indent + 6.0, y + head * 0.5),
+                            Vec2::splat(12.0),
+                        ),
+                        if resp.hovered() { c::TEXT } else { c::TEXT_DIM },
+                        expanded,
                     );
-                    (job, Vec::new())
-                };
-                let h = self.paint(ui, key, make, indent, y, width, hits);
-                y + h + sp::SM
+                    crate::widgets::galley_at(
+                        ui.painter(),
+                        Pos2::new(indent + sp::LG, y),
+                        &g,
+                        text,
+                    );
+                    if resp.clicked() {
+                        self.details_open.insert(key, !expanded);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                let mut y = y + head + sp::XS;
+                if expanded {
+                    for (i, b) in blocks.iter().enumerate() {
+                        y = self.block(
+                            ui,
+                            child(key, i),
+                            b,
+                            indent + sp::LG,
+                            y,
+                            (width - sp::LG).max(40.0),
+                            depth + 1,
+                            hits,
+                            thumbs,
+                            remote,
+                            base,
+                            text,
+                            draw,
+                        );
+                    }
+                }
+                y + sp::SM
             }
             Block::Footnote { label, blocks } => {
                 let make = || {
@@ -1062,7 +1493,7 @@ impl Preview {
                     );
                     (job, Vec::new())
                 };
-                let mut y = y + self.paint(ui, key, make, indent, y, width, hits);
+                let mut y = y + self.paint(ui, key, make, indent, y, width, hits, draw);
                 for (i, b) in blocks.iter().enumerate() {
                     y = self.block(
                         ui,
@@ -1073,6 +1504,11 @@ impl Preview {
                         (width - sp::MD).max(40.0),
                         depth + 1,
                         hits,
+                        thumbs,
+                        remote,
+                        base,
+                        text,
+                        draw,
                     );
                 }
                 y
@@ -1080,7 +1516,9 @@ impl Preview {
         }
     }
 
-    /// Table layout, honouring the source column alignment.
+    /// Table layout, GitHub style: padded cells, a tinted header row and a border
+    /// around every cell. Column widths follow the content, then share the room.
+    #[allow(clippy::too_many_arguments)]
     fn table(
         &mut self,
         ui: &mut Ui,
@@ -1089,6 +1527,8 @@ impl Preview {
         indent: f32,
         y: f32,
         width: f32,
+        text: Color32,
+        draw: bool,
     ) -> f32 {
         // The column count is the widest row: a header cell holds spans, not
         // columns, so counting `header.first()` would count styled runs.
@@ -1099,83 +1539,136 @@ impl Preview {
         if cols == 0 {
             return y;
         }
-        let col_w = (width / cols as f32).floor();
-        let mut y = y;
-        // How tall the header row is: its tallest cell. A cell reports a height, and the
-        // row used to take that for a position and keep the larger of it and `y`, which
-        // is only right while `y` is smaller than any height — that is, never once the
-        // page has been scrolled far enough for `y` to be negative. Then the whole table
-        // was drawn at the top of the pane, and measured as the distance it had jumped.
-        let mut head_h = 0.0f32;
-        for (ci, cell) in table.header.iter().enumerate().take(cols) {
-            let align = table.aligns.get(ci).copied().unwrap_or(Alignment::None);
-            head_h = head_h.max(self.cell(
-                ui,
-                table_key(key, 0, ci),
-                cell,
-                indent + col_w * ci as f32,
-                y,
-                col_w,
-                true,
-                align,
-            ));
+        let pad = Vec2::new(sp::SM, 5.0);
+        let col_w = table_widths(table, cols, width, pad.x);
+        // Column left edges, kept so the vertical rules can be drawn afterwards.
+        let mut edges = Vec::with_capacity(cols + 1);
+        let mut x = indent;
+        for w in &col_w {
+            edges.push(x);
+            x += w;
         }
-        y += head_h;
+        edges.push(x);
+        let (left, right) = (edges[0], *edges.last().unwrap());
+
+        let mut y = y;
+        let mut rules: Vec<f32> = Vec::with_capacity(table.rows.len() + 2);
+        rules.push(y);
+        // Header: measured first, so its background can be painted beneath the text.
         if !table.header.is_empty() {
-            let line_y = (y + sp::XS).round();
-            ui.painter().hline(
-                indent..=(indent + width),
-                line_y,
-                Stroke::new(1.0, c::DIVIDER),
-            );
-            y = line_y + sp::SM;
+            let mut cells = Vec::with_capacity(cols);
+            let mut h = 0.0f32;
+            for (ci, cell) in table.header.iter().enumerate().take(cols) {
+                let g = self.cell_shape(
+                    ui,
+                    table_key(key, 0, ci),
+                    cell,
+                    col_w[ci] - pad.x * 2.0,
+                    true,
+                    text,
+                    draw,
+                );
+                h = h.max(g.size().y);
+                cells.push(g);
+            }
+            let row = Rect::from_min_max(Pos2::new(left, y), Pos2::new(right, y + h + pad.y * 2.0));
+            if draw {
+                ui.painter().rect_filled(row, 0, c::RAISED);
+                for (ci, g) in cells.iter().enumerate() {
+                    let align = table.aligns.get(ci).copied().unwrap_or(Alignment::None);
+                    cell_paint(
+                        ui.painter(),
+                        g,
+                        edges[ci] + pad.x,
+                        y + pad.y,
+                        col_w[ci] - pad.x * 2.0,
+                        align,
+                        if text == c::TEXT { c::TEXT_DIM } else { text },
+                    );
+                }
+            }
+            y = row.max.y;
+            rules.push(y);
         }
         for (ri, row) in table.rows.iter().enumerate() {
-            let mut row_h = 0.0f32;
+            let mut cells = Vec::with_capacity(cols);
+            let mut h = 0.0f32;
             for (ci, cell) in row.iter().enumerate().take(cols) {
-                let align = table.aligns.get(ci).copied().unwrap_or(Alignment::None);
-                row_h = row_h.max(self.cell(
+                let g = self.cell_shape(
                     ui,
                     table_key(key, ri + 1, ci),
                     cell,
-                    indent + col_w * ci as f32,
-                    y,
-                    col_w - sp::SM,
+                    col_w[ci] - pad.x * 2.0,
                     false,
-                    align,
-                ));
+                    text,
+                    draw,
+                );
+                h = h.max(g.size().y);
+                cells.push(g);
             }
-            y += row_h + sp::XS;
+            if draw {
+                for (ci, g) in cells.iter().enumerate() {
+                    let align = table.aligns.get(ci).copied().unwrap_or(Alignment::None);
+                    cell_paint(
+                        ui.painter(),
+                        g,
+                        edges[ci] + pad.x,
+                        y + pad.y,
+                        col_w[ci] - pad.x * 2.0,
+                        align,
+                        text,
+                    );
+                }
+            }
+            y += h + pad.y * 2.0;
+            rules.push(y);
+        }
+        // The grid: a rule under every row, a rule between every column, and a box.
+        if draw {
+            let stroke = Stroke::new(1.0, c::BORDER);
+            let painter = ui.painter();
+            for line in &rules {
+                painter.hline(left..=right, *line, stroke);
+            }
+            let bottom = *rules.last().unwrap();
+            for edge in &edges {
+                painter.vline(*edge, rules[0]..=bottom, stroke);
+            }
         }
         y + sp::SM
     }
 
+    /// Shapes one table cell and returns its galley.
     #[allow(clippy::too_many_arguments)]
-    fn cell(
+    fn cell_shape(
         &mut self,
         ui: &mut Ui,
         key: u64,
         spans: &[Span],
-        x: f32,
-        y: f32,
         w: f32,
         header: bool,
-        align: Alignment,
-    ) -> f32 {
-        let (font, color) = if header {
-            (bold_font(tfs::SMALL), c::TEXT_DIM)
+        text: Color32,
+        cache: bool,
+    ) -> Arc<Galley> {
+        let color = if header && text == c::TEXT {
+            c::TEXT_DIM
         } else {
-            (ui_font(tfs::BODY), c::TEXT)
+            text
+        };
+        let font = if header {
+            bold_font(tfs::SMALL)
+        } else {
+            ui_font(tfs::BODY)
         };
         let bold = if header {
             bold_font(tfs::SMALL)
         } else {
             font.clone()
         };
-        let galley = self.shape(ui, key, w.max(20.0), || {
+        self.shape(ui, key, w.max(20.0), cache, || {
             inline_job(spans, move |span| {
                 if span.code {
-                    let mut fmt = egui::text::TextFormat::simple(mono_font(tfs::MONO), c::TEXT);
+                    let mut fmt = egui::text::TextFormat::simple(mono_font(tfs::MONO), text);
                     fmt.background = c::CODE_BG;
                     fmt.expand_bg = 2.0;
                     fmt
@@ -1185,38 +1678,173 @@ impl Preview {
                     egui::text::TextFormat::simple(font.clone(), color)
                 }
             })
-        });
-        let size = galley.size();
-        let dx = match align {
-            Alignment::Right => (w - size.x).max(0.0),
-            Alignment::Center => ((w - size.x) / 2.0).max(0.0),
-            _ => 0.0,
-        };
-        let pos = Pos2::new((x + dx).round(), y.round());
-        crate::widgets::galley_at(ui.painter(), pos, &galley, color);
-        size.y
+        })
     }
 
-    /// Shapes a job at `width`, caching the result.
+    /// Draws an image — local or remote — or a tidy reference when it cannot be
+    /// decoded. In layout-only mode (`draw` false) the height is computed without
+    /// painting and without starting a fetch, using the size already known.
+    ///
+    /// `attr_w`/`attr_h` are a raw `<img>` tag's own width and height, which win over
+    /// the picture's natural size the way a browser honours them.
+    #[allow(clippy::too_many_arguments)]
+    fn image(
+        &mut self,
+        ui: &mut Ui,
+        key: u64,
+        alt: &str,
+        url: &str,
+        attr_w: Option<f32>,
+        attr_h: Option<f32>,
+        indent: f32,
+        y: f32,
+        width: f32,
+        hits: &mut Vec<(Rect, String)>,
+        thumbs: &mut Option<&mut thumbs::Thumbs>,
+        remote: &mut Option<&mut crate::remote::RemoteImages>,
+        base: Option<&Path>,
+        draw: bool,
+    ) -> f32 {
+        // A web URL is fetched on a worker; a local path is decoded from disk.
+        if let Some(url) = remote_url(url)
+            && let Some(remote) = remote.as_deref_mut()
+            && !remote.is_failed(&url)
+        {
+            // The size the texture will have, from the one already cached or from the
+            // tag's own attributes; a short placeholder while it is still on its way.
+            let natural = remote.peek(&url).map(|tex| tex.size_vec2());
+            let size = if attr_w.is_some() || attr_h.is_some() {
+                Some(fit_size(
+                    natural.unwrap_or(Vec2::new(width, 20.0)),
+                    attr_w,
+                    attr_h,
+                    width,
+                ))
+            } else {
+                natural.map(|n| fit_size(n, None, None, width))
+            };
+            let h = size.map_or(20.0, |s| s.y);
+            if draw {
+                let ppp = ui.ctx().pixels_per_point();
+                let px = thumbs::bucket(width, ppp);
+                match remote.get(&url, px) {
+                    Some(tex) => {
+                        let size = fit_size(tex.size_vec2(), attr_w, attr_h, width);
+                        let rect = Rect::from_min_size(Pos2::new(indent, y), size);
+                        egui::Image::new(&tex)
+                            .fit_to_exact_size(size)
+                            .paint_at(ui, rect);
+                        return y + size.y + sp::SM;
+                    }
+                    None => {
+                        // Not fetched yet: a short placeholder, since most remote
+                        // images in a README are badges. Asking for a repaint is
+                        // what makes it appear without further input.
+                        let rect = Rect::from_min_size(
+                            Pos2::new(indent, y),
+                            Vec2::new(width.min(160.0), h),
+                        );
+                        ui.painter().rect_filled(rect, 3, c::CODE_BG);
+                        ui.ctx().request_repaint();
+                        return y + h + sp::SM;
+                    }
+                }
+            }
+            return y + h + sp::SM;
+        }
+        let path = local_image_path(url, base);
+        let dims = path.as_deref().and_then(|p| self.image_dims(p));
+        if let (Some(path), Some((w, h))) = (path, dims)
+            && w > 0
+            && h > 0
+        {
+            let size = fit_size(Vec2::new(w as f32, h as f32), attr_w, attr_h, width);
+            if !draw {
+                return y + size.y + sp::SM;
+            }
+            if let Some(thumbs) = thumbs.as_deref_mut() {
+                let ppp = ui.ctx().pixels_per_point();
+                let rect = Rect::from_min_size(Pos2::new(indent, y), size);
+                match thumbs.get(&path, thumbs::bucket(size.x, ppp)) {
+                    Some(tex) => {
+                        egui::Image::new(&tex)
+                            .fit_to_exact_size(size)
+                            .paint_at(ui, rect);
+                    }
+                    // Known bad: fall through to the reference line below.
+                    None if thumbs.is_failed(&path) => {}
+                    None => {
+                        // The decode is still running: hold the space at the right
+                        // size with a quiet placeholder. Ask for another frame, since
+                        // the decode finishing does not wake the window on its own.
+                        ui.painter().rect_filled(rect, 4, c::CODE_BG);
+                        if !alt.is_empty() {
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                alt,
+                                ui_font(tfs::SMALL),
+                                c::TEXT_FAINT,
+                            );
+                        }
+                        ui.ctx().request_repaint();
+                    }
+                }
+                return y + size.y + sp::SM;
+            }
+        }
+        // Not an image we can draw: keep the source honest with a reference line.
+        let make = || {
+            let label = if alt.is_empty() {
+                url.to_owned()
+            } else {
+                format!("{alt}  \u{2014}  {url}")
+            };
+            let job = plain_job(
+                label,
+                egui::text::TextFormat::simple(ui_font(tfs::SMALL), c::TEXT_FAINT),
+            );
+            (job, Vec::new())
+        };
+        let h = self.paint(ui, key, make, indent, y, width, hits, draw);
+        y + h + sp::SM
+    }
+
+    /// The pixel size of a local image, read once and remembered.
+    fn image_dims(&mut self, path: &Path) -> Option<(u32, u32)> {
+        if let Some(hit) = self.dims.get(path) {
+            return *hit;
+        }
+        let dims = image::image_dimensions(path).ok();
+        self.dims.insert(path.to_path_buf(), dims);
+        dims
+    }
+
+    /// Shapes a job at `width`, caching the result when `cache` is set.
     ///
     /// The job is built by `make`, and only when it is needed: a block that is
     /// already shaped costs a lookup and nothing else, where building its job first
     /// — a string and a section for every run of text — cost more than the lookup it
-    /// was for, on every block, every frame.
+    /// was for, on every block, every frame. The layout pass passes `cache` false, so
+    /// measuring a whole document does not hold every galley in memory.
     fn shape(
         &mut self,
         ui: &mut Ui,
         key: u64,
         width: f32,
+        cache: bool,
         make: impl FnOnce() -> (LayoutJob, Vec<(usize, String)>),
     ) -> Arc<Galley> {
-        if let Some(s) = self.cache.get(&key) {
+        if cache && let Some(s) = self.cache.get(&key) {
             return s.galley.clone();
         }
         let (job, links) = make();
         let started = std::time::Instant::now();
         let galley = ui.ctx().fonts_mut(|f| f.layout_job(wrap(job, width)));
         self.stats.shape_ms = started.elapsed().as_secs_f32() * 1000.0;
+        if !cache {
+            return galley;
+        }
 
         // Clickable link geometry comes from the shaped text. Inline code
         // backgrounds are handled by `TextFormat::background`, so nothing else
@@ -1243,7 +1871,6 @@ impl Preview {
         self.cache.insert(
             key,
             Shaped {
-                height: galley.size().y,
                 galley: galley.clone(),
                 link_rects,
             },
@@ -1251,7 +1878,8 @@ impl Preview {
         galley
     }
 
-    /// Shapes, paints and returns the height of a text block.
+    /// Shapes, paints and returns the height of a text block. With `draw` false only
+    /// the height is returned.
     #[allow(clippy::too_many_arguments)]
     fn paint(
         &mut self,
@@ -1262,17 +1890,139 @@ impl Preview {
         y: f32,
         width: f32,
         hits: &mut Vec<(Rect, String)>,
+        draw: bool,
     ) -> f32 {
-        let galley = self.shape(ui, key, width, make);
-        let height = self.cache.get(&key).map_or(0.0, |s| s.height);
-        let pos = Pos2::new(indent, y);
-        if let Some(shaped) = self.cache.get(&key) {
-            for (r, url) in &shaped.link_rects {
-                hits.push((r.translate(pos.to_vec2()), url.clone()));
+        let galley = self.shape(ui, key, width, draw, make);
+        let height = galley.size().y;
+        if draw {
+            let pos = Pos2::new(indent, y);
+            if let Some(shaped) = self.cache.get(&key) {
+                for (r, url) in &shaped.link_rects {
+                    hits.push((r.translate(pos.to_vec2()), url.clone()));
+                }
             }
+            crate::widgets::galley_at(ui.painter(), pos, &galley, c::TEXT);
         }
-        crate::widgets::galley_at(ui.painter(), pos, &galley, c::TEXT);
         height
+    }
+}
+
+/// Draws a shaped cell at `x`,`y`, aligned within `w`.
+fn cell_paint(
+    painter: &egui::Painter,
+    galley: &Arc<Galley>,
+    x: f32,
+    y: f32,
+    w: f32,
+    align: Alignment,
+    color: Color32,
+) {
+    let size = galley.size();
+    let dx = match align {
+        Alignment::Right => (w - size.x).max(0.0),
+        Alignment::Center => ((w - size.x) / 2.0).max(0.0),
+        _ => 0.0,
+    };
+    crate::widgets::galley_at(
+        painter,
+        Pos2::new((x + dx).round(), y.round()),
+        galley,
+        color,
+    );
+}
+
+/// The size to draw an image at: the tag's own width/height when it has them, else
+/// the picture's natural size. Either way it is never wider than the measure; a
+/// small image is left at its own size, only an oversized one is shrunk.
+fn fit_size(nat: Vec2, attr_w: Option<f32>, attr_h: Option<f32>, measure: f32) -> Vec2 {
+    let cap = |w: f32, h: f32| {
+        let s = (measure / w.max(1.0)).min(1.0);
+        Vec2::new((w * s).max(1.0), (h * s).max(1.0))
+    };
+    match (attr_w, attr_h) {
+        (Some(w), Some(h)) => cap(w, h),
+        (Some(w), None) => cap(w, w * nat.y / nat.x.max(1.0)),
+        (None, Some(h)) => cap(h * nat.x / nat.y.max(1.0), h),
+        (None, None) => {
+            let s = (measure / nat.x.max(1.0)).min(1.0);
+            Vec2::new((nat.x * s).max(1.0), (nat.y * s).max(1.0))
+        }
+    }
+}
+
+/// Column widths for a table: the room shared in proportion to how much text each
+/// column holds, with a floor so a narrow column stays readable.
+fn table_widths(table: &Table, cols: usize, width: f32, pad_x: f32) -> Vec<f32> {
+    let mut weight = vec![3.0f32; cols];
+    let measure = |cells: &[Vec<Span>], weight: &mut Vec<f32>| {
+        for (ci, cell) in cells.iter().enumerate().take(cols) {
+            let chars: usize = cell.iter().map(|s| s.text.chars().count()).sum();
+            weight[ci] = weight[ci].max(chars as f32);
+        }
+    };
+    measure(&table.header, &mut weight);
+    for row in &table.rows {
+        measure(row, &mut weight);
+    }
+    let total: f32 = weight.iter().sum::<f32>().max(1.0);
+    let inner = (width - cols as f32 * pad_x * 2.0).max(cols as f32 * 20.0);
+    let mut out: Vec<f32> = weight
+        .iter()
+        .map(|w| (inner * w / total).max(20.0) + pad_x * 2.0)
+        .collect();
+    let sum: f32 = out.iter().sum();
+    if sum > width {
+        let k = width / sum;
+        for w in &mut out {
+            *w *= k;
+        }
+    }
+    out
+}
+
+/// The URL of a web image, if `url` names one.
+fn remote_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        Some(url.to_owned())
+    } else {
+        None
+    }
+}
+
+/// Resolves an image URL to a local file, if it names one: relative paths are
+/// joined to the Markdown file's directory, a `file:` URL is taken as a path, and
+/// anything with a web scheme or a data URL is not a local file.
+fn local_image_path(url: &str, base: Option<&Path>) -> Option<PathBuf> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("data:")
+        || lower.starts_with("mailto:")
+    {
+        return None;
+    }
+    if lower.starts_with("file://") {
+        // `file:///C:/a.png` on Windows and `file:///home/a.png` elsewhere.
+        let rest = &url["file://".len()..];
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        let rest = if cfg!(windows) {
+            rest.to_owned()
+        } else {
+            format!("/{rest}")
+        };
+        return Some(PathBuf::from(rest));
+    }
+    let p = Path::new(url);
+    if p.is_absolute() {
+        Some(p.to_path_buf())
+    } else {
+        base.map(|b| b.join(p))
     }
 }
 
@@ -1292,11 +2042,13 @@ fn wrap(mut job: LayoutJob, width: f32) -> LayoutJob {
     job
 }
 
-fn body_format(span: &Span) -> egui::text::TextFormat {
+/// The format for one run of body text, in the colour of the surrounding block
+/// (`c::TEXT_DIM` inside a blockquote, `c::TEXT` elsewhere).
+fn body_format(span: &Span, text: Color32) -> egui::text::TextFormat {
     if span.code {
-        return egui::text::TextFormat::simple(mono_font(tfs::MONO), c::TEXT);
+        return egui::text::TextFormat::simple(mono_font(tfs::MONO), text);
     }
-    let mut fmt = egui::text::TextFormat::simple(ui_font(tfs::BODY), c::TEXT);
+    let mut fmt = egui::text::TextFormat::simple(ui_font(tfs::BODY), text);
     if span.bold {
         fmt.font_id = bold_font(tfs::BODY);
     }
@@ -1307,7 +2059,20 @@ fn body_format(span: &Span) -> egui::text::TextFormat {
     if span.strike {
         fmt.strikethrough = Stroke::new(1.0, c::TEXT_DIM);
     }
+    raise_or_lower(&mut fmt, span);
     fmt
+}
+
+/// Makes a run superscript or subscript: a smaller font aligned to the top or the
+/// bottom of its row, which is what egui's `valign` is for.
+fn raise_or_lower(fmt: &mut egui::text::TextFormat, span: &Span) {
+    if span.sup {
+        fmt.font_id = ui_font(tfs::SMALL);
+        fmt.valign = egui::Align::TOP;
+    } else if span.sub {
+        fmt.font_id = ui_font(tfs::SMALL);
+        fmt.valign = egui::Align::BOTTOM;
+    }
 }
 
 /// Builds a wrapping job from inline spans.
@@ -1324,7 +2089,10 @@ fn inline_job(
     for span in spans {
         let mut fmt = fmt_for(span);
         if let Some(url) = &span.link {
-            fmt.underline = Stroke::new(1.0, c::TEXT_FAINT);
+            // Links are the one place a second value from the palette is used, so
+            // they read as links rather than as faint body text.
+            fmt.color = c::ACCENT;
+            fmt.underline = Stroke::new(1.0, c::ACCENT);
             links.push((job.sections.len(), url.clone()));
         }
         job.append(&span.text, 0.0, fmt);
@@ -1345,9 +2113,11 @@ fn plain_job(text: String, fmt: egui::text::TextFormat) -> LayoutJob {
 fn key_of(parent: u64, i: usize) -> u64 {
     // The parent and the index are scaled by different odd constants before they are
     // combined, so no two pairs cancel, and the result is then thoroughly mixed.
-    let mut z = parent
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add((i as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93));
+    let mut z = parent.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(
+        (i as u64)
+            .wrapping_add(1)
+            .wrapping_mul(0xD6E8_FEB8_6659_FD93),
+    );
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
@@ -1404,6 +2174,16 @@ fn estimate(block: &Block, width: f32) -> f32 {
         Block::Rule => 20.0,
         Block::Html(h) => h.lines().count().max(1) as f32 * 17.0 + sp::SM,
         Block::Image { .. } => LINE + sp::SM,
+        Block::Details { blocks, .. } => {
+            // Estimated as open, since the estimate has no access to the toggle;
+            // the real height replaces it as soon as the block is on screen.
+            LINE + sp::XS
+                + blocks
+                    .iter()
+                    .map(|b| estimate(b, width - sp::LG))
+                    .sum::<f32>()
+                + sp::SM
+        }
         Block::Footnote { blocks, .. } => {
             LINE + blocks
                 .iter()
@@ -1604,8 +2384,115 @@ mod tests {
     fn images_become_alt_and_url() {
         let b = parse("![diagram](img/a.png)\n");
         assert!(b.iter().any(
-            |x| matches!(x, Block::Image { alt, url } if alt == "diagram" && url == "img/a.png")
+            |x| matches!(x, Block::Image { alt, url, .. } if alt == "diagram" && url == "img/a.png")
         ));
+    }
+
+    #[test]
+    fn a_raw_img_tag_becomes_an_image() {
+        let b = parse("<img width=\"800\" alt=\"logo\" src=\"https://x/a.png\" />\n");
+        assert!(b.iter().any(|x| matches!(
+            x,
+            Block::Image { alt, url, width: Some(800.0), .. }
+                if alt == "logo" && url == "https://x/a.png"
+        )));
+    }
+
+    #[test]
+    fn image_attributes_are_read_in_any_order() {
+        assert_eq!(
+            parse_img_tag("<img src='a b.png' alt=\"x\" />"),
+            Some((String::from("x"), String::from("a b.png"), None, None))
+        );
+        assert_eq!(
+            parse_img_tag("<img src=a.png>"),
+            Some((String::new(), String::from("a.png"), None, None))
+        );
+        assert_eq!(
+            parse_img_tag("<img width=\"320\" height=\"170px\" src=x.png>"),
+            Some((
+                String::new(),
+                String::from("x.png"),
+                Some(320.0),
+                Some(170.0)
+            ))
+        );
+        assert_eq!(parse_img_tag("<div src=x>"), None);
+    }
+
+    #[test]
+    fn an_image_is_never_drawn_larger_than_its_own_pixels() {
+        // A 320x170 tag keeps its size; a natural image is capped to the measure;
+        // nothing is ever enlarged.
+        let measure = 760.0;
+        assert_eq!(
+            fit_size(Vec2::new(1000.0, 500.0), Some(320.0), Some(170.0), measure),
+            Vec2::new(320.0, 170.0)
+        );
+        assert_eq!(
+            fit_size(Vec2::new(1000.0, 500.0), None, None, measure),
+            Vec2::new(760.0, 380.0)
+        );
+        assert_eq!(
+            fit_size(Vec2::new(120.0, 20.0), None, None, measure),
+            Vec2::new(120.0, 20.0),
+            "a small badge is left at its own size"
+        );
+    }
+
+    #[test]
+    fn superscript_and_subscript_are_flagged() {
+        let b = parse("a ^2^ b and H ~2~ O\n");
+        let p = para(&b);
+        assert!(p.iter().any(|s| s.sup && s.text == "2"));
+        assert!(p.iter().any(|s| s.sub && s.text == "2"));
+    }
+
+    #[test]
+    fn details_become_a_disclosure() {
+        let b = parse(
+            "<details>\n<summary><strong>WiFi Features</strong></summary>\n\n- a\n- b\n\n</details>\n",
+        );
+        let (summary, body, open) = b
+            .iter()
+            .find_map(|x| match x {
+                Block::Details {
+                    summary,
+                    blocks,
+                    open,
+                } => Some((summary.clone(), blocks.len(), *open)),
+                _ => None,
+            })
+            .expect("details block");
+        assert_eq!(summary, "WiFi Features");
+        assert_eq!(body, 1, "one body block");
+        assert!(!open, "closed by default");
+    }
+
+    #[test]
+    fn an_open_details_starts_expanded() {
+        let b = parse("<details open>\n<summary>X</summary>\n\nhi\n\n</details>\n");
+        assert!(
+            b.iter()
+                .any(|x| matches!(x, Block::Details { open: true, .. }))
+        );
+    }
+
+    #[test]
+    fn image_paths_resolve_against_the_document() {
+        let base = Path::new("docs");
+        assert_eq!(
+            local_image_path("img/a.png", Some(base)),
+            Some(base.join("img/a.png"))
+        );
+        assert_eq!(
+            local_image_path("https://example.com/a.png", Some(base)),
+            None
+        );
+        assert_eq!(
+            local_image_path("data:image/png;base64,AAAA", Some(base)),
+            None
+        );
     }
 
     #[test]
@@ -1705,6 +2592,75 @@ mod tests {
         assert_eq!(table.rows[0].len(), 2, "body cells");
         assert_eq!(text(&table.rows[0][0]), "1");
         assert_eq!(text(&table.rows[0][1]), "2");
+    }
+
+    /// A remote image is painted from the cache once it has been fetched, so the
+    /// preview path that draws web pictures is covered without touching the network.
+    #[test]
+    fn a_remote_image_is_drawn_once_cached() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        let url = "https://img.shields.io/badge/version-2.2-7c5cff?style=flat-square";
+        let mut p = Preview::new();
+        p.sync(&format!("![Version]({url})\n"), 1);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut remote = crate::remote::RemoteImages::new(tx);
+        // A 10x10 image, cached at a size above any the layout will ask for, so no
+        // fetch is started.
+        remote.insert(url.to_owned(), 2048, vec![200; 10 * 10 * 4], 10, 10, &ctx);
+
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_max_size(egui::vec2(400.0, 600.0));
+            p.show_ctx(ui, 8.0, None, Some(&mut remote), None);
+        });
+        out.textures_delta.clear();
+        // An image is painted as a textured `Rect`; the placeholder is a much wider
+        // rect, so a narrow one proves the cached texture was used.
+        let drew_image = out.shapes.iter().any(|cs| match &cs.shape {
+            egui::epaint::Shape::Rect(r) => r.rect.width() < 40.0,
+            _ => false,
+        });
+        assert!(
+            drew_image,
+            "the cached remote image is painted at its own size"
+        );
+    }
+
+    /// A `<details>` block keeps its body hidden until the summary is opened.
+    #[test]
+    fn a_details_body_is_hidden_until_opened() {
+        let doc = "<details>\n<summary>More</summary>\n\nsecret body\n\n</details>\n";
+        let mut p = Preview::new();
+        p.sync(doc, 1);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        let render = |p: &mut Preview| -> String {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_max_size(egui::vec2(400.0, 600.0));
+                p.show(ui, 8.0);
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::epaint::Shape::Text(t) => Some(t.galley.job.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let closed = render(&mut p);
+        assert!(closed.contains("More"), "the summary shows: {closed:?}");
+        assert!(
+            !closed.contains("secret body"),
+            "the body is hidden while closed: {closed:?}"
+        );
+        p.details_open.insert(key_of(0, 0), true);
+        let open = render(&mut p);
+        assert!(
+            open.contains("secret body"),
+            "the body shows once opened: {open:?}"
+        );
     }
 
     /// The preview must actually paint something: a real `Ui`, a real font
@@ -2023,7 +2979,7 @@ mod tests {
     }
 
     #[test]
-    fn heights_measured_before_an_edit_are_kept_for_the_blocks_it_did_not_touch() {
+    fn heights_survive_an_edit_that_touches_one_block() {
         let mut p = Preview::new();
         let doc = sections(50);
         p.sync(&doc, 1);
@@ -2033,11 +2989,8 @@ mod tests {
         for _ in 0..3 {
             pane_frame(&ctx, &mut p, pane, &mut time, Vec::new());
         }
-        let measured = p.heights.iter().flatten().count();
-        assert!(
-            measured > 3,
-            "the blocks on screen were measured: {measured}"
-        );
+        assert!(p.laid_out(), "every block has an exact height");
+        let before = p.heights.clone();
         // Change a paragraph a long way down, which touches one block.
         let edited = doc.replacen(
             "A paragraph in section 40",
@@ -2045,16 +2998,23 @@ mod tests {
             1,
         );
         p.sync(&edited, 2);
-        assert_eq!(
-            p.heights.iter().flatten().count(),
-            measured,
-            "every height that was known is still known"
-        );
-        let unknown = p.heights.iter().position(|h| h.is_none());
-        assert!(
-            unknown.is_some(),
-            "and the blocks not yet seen are still estimates"
-        );
+        let unknown: Vec<usize> = p
+            .heights
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!unknown.is_empty(), "the edited stretch is laid out again");
+        for (i, h) in p.heights.iter().enumerate() {
+            if !unknown.contains(&i) {
+                assert_eq!(*h, before[i], "block {i} kept its height");
+            }
+        }
+        for _ in 0..3 {
+            pane_frame(&ctx, &mut p, pane, &mut time, Vec::new());
+        }
+        assert!(p.laid_out(), "and the map is exact again");
     }
 
     #[test]
@@ -2545,6 +3505,7 @@ mod line_tests {
         let mut p = shown(&doc, 480.0);
         let before = p.y_of_line(40.0);
         p.heights[2] = p.heights[2].map(|h| h + 100.0);
+        p.recompute_tops();
         let after = p.y_of_line(40.0);
         assert!((after - before - 100.0).abs() < 0.01, "{before} -> {after}");
     }

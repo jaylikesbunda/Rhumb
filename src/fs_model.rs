@@ -30,6 +30,488 @@ impl SortKey {
     }
 }
 
+/// How the file list is broken into headed groups.
+///
+/// The heading is drawn before the first row of each group and is not a row
+/// itself: it cannot be selected, clicked or reached with the keyboard.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum GroupBy {
+    #[default]
+    None,
+    /// A–Z buckets, with anything not starting with a letter under `#`.
+    Name,
+    /// Folders, then the broad families of extension.
+    Type,
+    /// Today / Yesterday / Earlier this week / Earlier this month / A long time ago.
+    Modified,
+    /// Folders, then size bands.
+    Size,
+}
+
+impl GroupBy {
+    /// The choices the menu offers, in the order it shows them.
+    pub const ALL: [GroupBy; 5] = [
+        GroupBy::None,
+        GroupBy::Name,
+        GroupBy::Type,
+        GroupBy::Modified,
+        GroupBy::Size,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GroupBy::None => "None",
+            GroupBy::Name => "Name",
+            GroupBy::Type => "Type",
+            GroupBy::Modified => "Modified",
+            GroupBy::Size => "Size",
+        }
+    }
+
+    /// The name written to prefs.
+    pub fn key(self) -> &'static str {
+        match self {
+            GroupBy::None => "none",
+            GroupBy::Name => "name",
+            GroupBy::Type => "type",
+            GroupBy::Modified => "modified",
+            GroupBy::Size => "size",
+        }
+    }
+
+    pub fn from_key(key: &str) -> GroupBy {
+        match key {
+            "name" => GroupBy::Name,
+            "type" => GroupBy::Type,
+            "modified" => GroupBy::Modified,
+            "size" => GroupBy::Size,
+            _ => GroupBy::None,
+        }
+    }
+}
+
+/// The broad family a file's extension belongs to.
+///
+/// Folders are not files: the caller knows `is_dir` and handles them itself,
+/// so this never has to guess from a name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FileKind {
+    Document,
+    Image,
+    Audio,
+    Video,
+    Archive,
+    Other,
+}
+
+/// Classifies an extension, as [`ext_of`] returns it: lower-case and without
+/// the dot. Anything not recognised is [`FileKind::Other`], which is most of
+/// what a folder holds.
+pub fn kind_of(ext: &str) -> FileKind {
+    const DOCUMENTS: &[&str] = &[
+        "txt", "text", "log", "md", "markdown", "mdown", "mkd", "mdx", "rmd", "rtf", "doc", "docx",
+        "odt", "pdf", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "csv", "tsv", "epub",
+    ];
+    const IMAGES: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "svg", "ico", "heic", "avif",
+        "raw",
+    ];
+    const AUDIO: &[&str] = &[
+        "mp3", "wav", "flac", "aac", "ogg", "oga", "opus", "m4a", "wma", "aiff", "mid", "midi",
+    ];
+    const VIDEO: &[&str] = &[
+        "mp4", "mkv", "mov", "avi", "wmv", "webm", "flv", "m4v", "mpg", "mpeg", "3gp",
+    ];
+    const ARCHIVES: &[&str] = &[
+        "zip", "zipx", "7z", "rar", "tar", "gz", "tgz", "bz2", "tbz", "xz", "txz", "zst", "lz",
+        "lzma", "cab", "iso", "jar", "war", "apk",
+    ];
+    let ext = ext.to_ascii_lowercase();
+    if DOCUMENTS.contains(&ext.as_str()) {
+        FileKind::Document
+    } else if IMAGES.contains(&ext.as_str()) {
+        FileKind::Image
+    } else if AUDIO.contains(&ext.as_str()) {
+        FileKind::Audio
+    } else if VIDEO.contains(&ext.as_str()) {
+        FileKind::Video
+    } else if ARCHIVES.contains(&ext.as_str()) {
+        FileKind::Archive
+    } else {
+        FileKind::Other
+    }
+}
+
+/// One megabyte, the unit the size bands are named in.
+pub const MB: u64 = 1024 * 1024;
+
+/// What kinds of entry the kind filter keeps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum KindFilter {
+    #[default]
+    All,
+    Folders,
+    /// Every non-folder. The extension choices below are subsets of it.
+    Files,
+    Documents,
+    Images,
+    Audio,
+    Video,
+    Archives,
+}
+
+impl KindFilter {
+    pub const ALL: [KindFilter; 8] = [
+        KindFilter::All,
+        KindFilter::Folders,
+        KindFilter::Files,
+        KindFilter::Documents,
+        KindFilter::Images,
+        KindFilter::Audio,
+        KindFilter::Video,
+        KindFilter::Archives,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            KindFilter::All => "All",
+            KindFilter::Folders => "Folders",
+            KindFilter::Files => "Files",
+            KindFilter::Documents => "Documents",
+            KindFilter::Images => "Images",
+            KindFilter::Audio => "Audio",
+            KindFilter::Video => "Video",
+            KindFilter::Archives => "Archives",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            KindFilter::All => "all",
+            KindFilter::Folders => "folders",
+            KindFilter::Files => "files",
+            KindFilter::Documents => "documents",
+            KindFilter::Images => "images",
+            KindFilter::Audio => "audio",
+            KindFilter::Video => "video",
+            KindFilter::Archives => "archives",
+        }
+    }
+
+    pub fn from_key(key: &str) -> KindFilter {
+        match key {
+            "folders" => KindFilter::Folders,
+            "files" => KindFilter::Files,
+            "documents" => KindFilter::Documents,
+            "images" => KindFilter::Images,
+            "audio" => KindFilter::Audio,
+            "video" => KindFilter::Video,
+            "archives" => KindFilter::Archives,
+            _ => KindFilter::All,
+        }
+    }
+
+    /// Whether an entry passes. Folders are only kept by `Folders` and `All`;
+    /// the extension choices apply to files.
+    pub fn accepts(self, entry: &Entry) -> bool {
+        match self {
+            KindFilter::All => true,
+            KindFilter::Folders => entry.is_dir,
+            KindFilter::Files => !entry.is_dir,
+            KindFilter::Documents => is_kind(entry, FileKind::Document),
+            KindFilter::Images => is_kind(entry, FileKind::Image),
+            KindFilter::Audio => is_kind(entry, FileKind::Audio),
+            KindFilter::Video => is_kind(entry, FileKind::Video),
+            KindFilter::Archives => is_kind(entry, FileKind::Archive),
+        }
+    }
+}
+
+fn is_kind(entry: &Entry, want: FileKind) -> bool {
+    !entry.is_dir && kind_of(&entry.ext()) == want
+}
+
+/// How recent an entry must be to pass the modified filter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DateFilter {
+    #[default]
+    Any,
+    Today,
+    Last7,
+    Last30,
+    ThisYear,
+}
+
+impl DateFilter {
+    pub const ALL: [DateFilter; 5] = [
+        DateFilter::Any,
+        DateFilter::Today,
+        DateFilter::Last7,
+        DateFilter::Last30,
+        DateFilter::ThisYear,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DateFilter::Any => "Any time",
+            DateFilter::Today => "Today",
+            DateFilter::Last7 => "Last 7 days",
+            DateFilter::Last30 => "Last 30 days",
+            DateFilter::ThisYear => "This year",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            DateFilter::Any => "any",
+            DateFilter::Today => "today",
+            DateFilter::Last7 => "last7",
+            DateFilter::Last30 => "last30",
+            DateFilter::ThisYear => "thisyear",
+        }
+    }
+
+    pub fn from_key(key: &str) -> DateFilter {
+        match key {
+            "today" => DateFilter::Today,
+            "last7" => DateFilter::Last7,
+            "last30" => DateFilter::Last30,
+            "thisyear" => DateFilter::ThisYear,
+            _ => DateFilter::Any,
+        }
+    }
+
+    /// Whether an entry passes. An entry with no usable date fails every choice
+    /// but `Any`, since nothing about it can be shown to be recent.
+    pub fn accepts(self, entry: &Entry, now: SystemTime) -> bool {
+        match self {
+            DateFilter::Any => true,
+            DateFilter::Today => days_ago(entry.modified, now).is_some_and(|d| d <= 0),
+            DateFilter::Last7 => days_ago(entry.modified, now).is_some_and(|d| d <= 6),
+            DateFilter::Last30 => days_ago(entry.modified, now).is_some_and(|d| d <= 29),
+            DateFilter::ThisYear => same_year(entry.modified, now),
+        }
+    }
+}
+
+/// How big an entry must be to pass the size filter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SizeFilter {
+    #[default]
+    Any,
+    Small,
+    Medium,
+    Large,
+}
+
+impl SizeFilter {
+    pub const ALL: [SizeFilter; 4] = [
+        SizeFilter::Any,
+        SizeFilter::Small,
+        SizeFilter::Medium,
+        SizeFilter::Large,
+    ];
+
+    /// The choices are bands, not ceilings: Small is under 1 MB, Medium is
+    /// 1 MB up to 100 MB, and Large is 100 MB and over.
+    pub fn label(self) -> &'static str {
+        match self {
+            SizeFilter::Any => "Any",
+            SizeFilter::Small => "Small (< 1 MB)",
+            SizeFilter::Medium => "Medium (< 100 MB)",
+            SizeFilter::Large => "Large (\u{2265} 100 MB)",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            SizeFilter::Any => "any",
+            SizeFilter::Small => "small",
+            SizeFilter::Medium => "medium",
+            SizeFilter::Large => "large",
+        }
+    }
+
+    pub fn from_key(key: &str) -> SizeFilter {
+        match key {
+            "small" => SizeFilter::Small,
+            "medium" => SizeFilter::Medium,
+            "large" => SizeFilter::Large,
+            _ => SizeFilter::Any,
+        }
+    }
+
+    /// Whether an entry passes. Folders are exempt: a folder's own byte count
+    /// is not the size of what is in it, so the filter never hides a folder.
+    pub fn accepts(self, entry: &Entry) -> bool {
+        if entry.is_dir || self == SizeFilter::Any {
+            return true;
+        }
+        match self {
+            SizeFilter::Any => true,
+            SizeFilter::Small => entry.size < MB,
+            SizeFilter::Medium => (MB..100 * MB).contains(&entry.size),
+            SizeFilter::Large => entry.size >= 100 * MB,
+        }
+    }
+}
+
+/// The heading an entry falls under for the chosen grouping.
+///
+/// Only the date grouping reads the clock; the others do not ask for it.
+pub fn group_label(entry: &Entry, group_by: GroupBy) -> String {
+    match group_by {
+        GroupBy::None => String::new(),
+        GroupBy::Name => name_group(&entry.name),
+        GroupBy::Type => type_group(entry).to_owned(),
+        GroupBy::Modified => modified_group(entry.modified, SystemTime::now()).to_owned(),
+        GroupBy::Size => size_group(entry).to_owned(),
+    }
+}
+
+/// Sort position of a group heading, so the list shows groups in a fixed,
+/// familiar order rather than in whatever order the entries happened to be in.
+pub fn group_rank(group_by: GroupBy, label: &str) -> usize {
+    match group_by {
+        GroupBy::None => 0,
+        GroupBy::Name => {
+            let first = label.chars().next().unwrap_or('#').to_ascii_uppercase();
+            if first.is_ascii_alphabetic() {
+                // The `#` bucket leads, the way the name sort puts digits and
+                // symbols before letters.
+                (first as usize) - ('A' as usize) + 1
+            } else {
+                0
+            }
+        }
+        GroupBy::Type => rank_in(
+            label,
+            &[
+                "Folders",
+                "Documents",
+                "Images",
+                "Audio",
+                "Video",
+                "Archives",
+                "Other",
+            ],
+        ),
+        GroupBy::Modified => rank_in(
+            label,
+            &[
+                "Today",
+                "Yesterday",
+                "Earlier this week",
+                "Earlier this month",
+                "A long time ago",
+            ],
+        ),
+        GroupBy::Size => rank_in(label, &["Folders", "Small", "Medium", "Large"]),
+    }
+}
+
+fn rank_in(label: &str, order: &[&str]) -> usize {
+    order
+        .iter()
+        .position(|o| *o == label)
+        .unwrap_or(order.len())
+}
+
+/// A–Z buckets, with anything not starting with a letter under `#`.
+fn name_group(name: &str) -> String {
+    let first = name.chars().next().map(|c| c.to_ascii_uppercase());
+    match first {
+        Some(c) if c.is_ascii_alphabetic() => c.to_string(),
+        _ => "#".to_owned(),
+    }
+}
+
+/// Folders, then the broad families of extension.
+fn type_group(entry: &Entry) -> &'static str {
+    if entry.is_dir {
+        return "Folders";
+    }
+    match kind_of(&entry.ext()) {
+        FileKind::Document => "Documents",
+        FileKind::Image => "Images",
+        FileKind::Audio => "Audio",
+        FileKind::Video => "Video",
+        FileKind::Archive => "Archives",
+        FileKind::Other => "Other",
+    }
+}
+
+/// Size bands, matching the size filter: folders first, then by the file's own
+/// bytes.
+fn size_group(entry: &Entry) -> &'static str {
+    if entry.is_dir {
+        return "Folders";
+    }
+    if entry.size < MB {
+        "Small"
+    } else if entry.size < 100 * MB {
+        "Medium"
+    } else {
+        "Large"
+    }
+}
+
+/// The date bucket an entry falls in, relative to `now`.
+///
+/// "This week" is the last seven days and "this month" the last thirty, which
+/// is what the filter choices mean as well, so the two agree.
+pub fn modified_group(t: Option<SystemTime>, now: SystemTime) -> &'static str {
+    bucket_days(days_ago(t, now).unwrap_or(i64::MAX))
+}
+
+/// The name of the bucket `days` whole days back falls in. `i64::MAX` means the
+/// date is unknown, which is treated as the oldest.
+fn bucket_days(days: i64) -> &'static str {
+    match days {
+        i64::MIN..=0 => "Today",
+        1 => "Yesterday",
+        2..=6 => "Earlier this week",
+        7..=29 => "Earlier this month",
+        _ => "A long time ago",
+    }
+}
+
+/// Whole local days between an entry's modified date and `now`, negative for
+/// the future. `None` when either date cannot be read.
+pub fn days_ago(t: Option<SystemTime>, now: SystemTime) -> Option<i64> {
+    let date = civil_date(t?)?;
+    let today = civil_date(now)?;
+    Some(civil_day_number(today) - civil_day_number(date))
+}
+
+fn same_year(t: Option<SystemTime>, now: SystemTime) -> bool {
+    let Some(t) = t else { return false };
+    match (civil_date(t), civil_date(now)) {
+        (Some(a), Some(b)) => a.0 == b.0,
+        _ => false,
+    }
+}
+
+/// The local calendar date of a timestamp as `(year, month, day)`.
+fn civil_date(t: SystemTime) -> Option<(i16, i8, i8)> {
+    let secs = t.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    let ts = jiff::Timestamp::from_second(secs).ok()?;
+    let dt = ts.to_zoned(jiff::tz::TimeZone::system()).datetime();
+    Some((dt.year(), dt.month(), dt.day()))
+}
+
+/// Days since 1970-01-01 for a civil date. Howard Hinnant's `days_from_civil`,
+/// exact for the whole range and needing no calendar library.
+fn civil_day_number((y, m, d): (i16, i8, i8)) -> i64 {
+    let y = i64::from(y) - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (i64::from(m) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
 /// One row in the file list.
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -58,6 +540,15 @@ impl Entry {
 ///
 /// Runs on a worker thread; touches the disk exactly once.
 pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
+    // The Recycle Bin is a place with no folder behind it; its listing is built
+    // from the deleted items' records instead.
+    if crate::recycle::is_root(path) {
+        return Ok(crate::recycle::list());
+    }
+    // "This PC" is the same: its listing is the drives and the user folders.
+    if crate::this_pc::is_root(path) {
+        return Ok(crate::this_pc::list());
+    }
     // An archive, or a place inside one, is read out of the archive.
     if let Some(crate::archive::Inside { archive, inner }) = crate::archive::split(path) {
         let mut entries = crate::archive::list(&archive, &inner)?;
@@ -67,7 +558,10 @@ pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
         return Ok(entries);
     }
     let mut out = Vec::with_capacity(64);
-    for item in fs::read_dir(path)? {
+    // The OS is asked for the verbatim form, which reaches past `MAX_PATH`; the
+    // entries keep the ordinary path, so everything above this (breadcrumbs,
+    // comparisons, the address bar) sees the path the user typed.
+    for item in fs::read_dir(long_path(path))? {
         let Ok(item) = item else { continue };
         let name_os = item.file_name();
         let Some(name) = name_os.to_str() else {
@@ -91,7 +585,7 @@ pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
         let modified = md.as_ref().and_then(|m| m.modified().ok());
         out.push(Entry {
             name: name.to_owned(),
-            path: item.path(),
+            path: path.join(name),
             is_dir,
             is_symlink,
             size,
@@ -286,8 +780,13 @@ pub enum PlaceKind {
     Drive,
 }
 
-/// User folders and mounted drives, in display order.
-pub fn places() -> Vec<Place> {
+/// The user folders shown in the sidebar and on "This PC": Home, Desktop,
+/// Documents, Downloads, Pictures, Music and Videos, in display order.
+///
+/// The Recycle Bin is deliberately not here: it is a place of its own in the
+/// sidebar rather than a folder under This PC, and the magic paths are added by
+/// [`places`].
+pub fn user_folders() -> Vec<Place> {
     let mut out = Vec::new();
     let mut push = |label: &str, path: Option<PathBuf>, kind: PlaceKind| {
         if let Some(path) = path {
@@ -308,6 +807,27 @@ pub fn places() -> Vec<Place> {
     out
 }
 
+/// User folders and mounted drives, in display order.
+pub fn places() -> Vec<Place> {
+    // This PC leads: it is the top of the hierarchy the user folders sit in,
+    // and clicking it opens the view that gathers them with the drives.
+    let mut out = vec![Place {
+        label: String::from("This PC"),
+        path: PathBuf::from(crate::this_pc::ROOT),
+        kind: PlaceKind::Directory,
+    }];
+    out.extend(user_folders());
+    // The Recycle Bin is a place of its own, at the bottom of the user folders.
+    // It is Windows-only: the magic path lists as empty elsewhere.
+    #[cfg(windows)]
+    out.push(Place {
+        label: String::from("Recycle Bin"),
+        path: PathBuf::from(crate::recycle::ROOT),
+        kind: PlaceKind::Directory,
+    });
+    out
+}
+
 /// Mounted volumes. Refreshed on demand because it touches the OS.
 pub fn drives() -> Vec<Place> {
     use sysinfo::Disks;
@@ -317,21 +837,45 @@ pub fn drives() -> Vec<Place> {
         let mount = d.mount_point();
         // Skip pseudo / duplicate mounts so the list stays short and useful.
         let name = d.name().to_string_lossy().to_string();
-        let label = if name.is_empty() {
-            mount.display().to_string()
-        } else {
-            name
-        };
         if out.iter().any(|p: &Place| p.path == mount) {
             continue;
         }
         out.push(Place {
-            label,
+            label: drive_label(mount, &name),
             path: mount.to_path_buf(),
             kind: PlaceKind::Drive,
         });
     }
     out
+}
+
+/// The label for a drive row.
+///
+/// On Windows `Disk::name()` is the volume's own label ("Windows", "Data"),
+/// which on its own leaves the row with no drive letter to identify it. Show
+/// the letter too, the way Explorer does — "Windows (C:)" — or just the letter
+/// when the volume is unlabelled. Other platforms have no letters, so their
+/// volume name is used as-is, falling back to the mount point.
+fn drive_label(mount: &Path, name: &str) -> String {
+    let letter = drive_letter(mount);
+    match (letter, name.is_empty()) {
+        (Some(letter), false) => format!("{name} ({letter})"),
+        (Some(letter), true) => letter,
+        (None, false) => name.to_owned(),
+        (None, true) => mount.display().to_string(),
+    }
+}
+
+/// The drive letter of a Windows mount point (`C:` or `C:\`), if it has one.
+fn drive_letter(mount: &Path) -> Option<String> {
+    let s = mount.to_string_lossy();
+    let s = s.trim_end_matches(['\\', '/']);
+    let bytes = s.as_bytes();
+    if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        Some(s.to_owned())
+    } else {
+        None
+    }
 }
 
 /// What a background read of the volumes hands back.
@@ -438,9 +982,10 @@ fn read_volumes() -> HashMap<PathBuf, (u64, u64)> {
 /// The sidebar's top-level entries — places and drives — as `(label, path,
 /// is_device)`, kept so they are not asked of the OS on every frame.
 ///
-/// The drive list comes from the OS and that can be slow, so it is read once when
-/// the sidebar first draws and then again on a timer by a worker, and a frame only
-/// ever copies what is already here.
+/// The drive list comes from the OS and that can be slow, so a worker reads it
+/// on a timer and a frame only ever copies what is already here. The first frame
+/// shows the user folders, which are cheap, and leaves the drives to that worker
+/// rather than stalling before the window paints.
 #[derive(Default)]
 pub struct Roots {
     list: Vec<(String, PathBuf, bool)>,
@@ -456,9 +1001,18 @@ impl Roots {
     /// The entries, as of the last reading.
     pub fn get(&mut self, ctx: &egui::Context) -> &[(String, PathBuf, bool)] {
         if self.refreshed.is_none() {
-            // The very first frame has nothing to show yet, so it waits once.
-            self.list = read_roots();
-            self.refreshed = Some(std::time::Instant::now());
+            // The very first frame shows the user folders, which are cheap, and
+            // leaves the drives to the worker: enumerating volumes asks the OS
+            // about every one of them, and a network share or a sleeping disk can
+            // take a long time. Waiting for it here is a stall before the window
+            // paints, so the drives arrive a frame or two later instead.
+            self.list = places()
+                .into_iter()
+                .map(|p| {
+                    let device = p.is_device();
+                    (p.label, p.path, device)
+                })
+                .collect();
         }
         if let Some(fresh) = self.incoming.lock().ok().and_then(|mut g| g.take()) {
             self.list = fresh;
@@ -503,6 +1057,15 @@ fn read_roots() -> Vec<(String, PathBuf, bool)> {
 ///
 /// `C:\a\b` becomes `[(C:, C:\), (a, C:\a), (b, C:\a\b)]`.
 pub fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
+    // The Recycle Bin has no folder segments; its magic path would otherwise
+    // show as the literal `::Recycle::` in the address bar.
+    if crate::recycle::is_root(path) {
+        return vec![(String::from("Recycle Bin"), path.to_path_buf())];
+    }
+    // "This PC" is the same: one segment, named rather than spelled out.
+    if crate::this_pc::is_root(path) {
+        return vec![(String::from("This PC"), path.to_path_buf())];
+    }
     let mut parts: Vec<(String, PathBuf)> = Vec::new();
     let mut acc = PathBuf::new();
     let comps: Vec<_> = path.components().collect();
@@ -631,6 +1194,39 @@ pub fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// The verbatim (`\\?\`) form of an absolute path, which lifts Windows'
+/// `MAX_PATH` limit of 260 characters.
+///
+/// A verbatim path is handed to the OS unparsed, so it is cleaned lexically
+/// first: without that, a `.` or `..` in it would be taken literally. A UNC
+/// path takes the `\\?\UNC\` form rather than a plain prefix. A relative path,
+/// one that is already verbatim, and every path off Windows are returned
+/// unchanged, so the helper is a no-op wherever the limit does not exist.
+pub fn long_path(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if p.is_relative() {
+            return p.to_path_buf();
+        }
+        if p.to_string_lossy().starts_with(r"\\?\") {
+            // Already verbatim: leave it exactly as it is, so a path handed to
+            // us in that form is not quietly rewritten.
+            return p.to_path_buf();
+        }
+        let cleaned = normalize(p);
+        let s = cleaned.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\") {
+            PathBuf::from(format!(r"\\?\UNC\{rest}"))
+        } else {
+            PathBuf::from(format!(r"\\?\{s}"))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_path_buf()
+    }
+}
+
 /// Picks a non-colliding destination: `a.txt` -> `a (2).txt`.
 pub fn unique_dest(dest: &Path) -> PathBuf {
     if !dest.exists() {
@@ -686,6 +1282,63 @@ pub fn validate_name(name: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Expands one batch-rename pattern into the name an item at `index` gets.
+///
+/// The tokens are deliberately few and literal, so what the dialog previews is
+/// exactly what a rename does:
+///
+/// * `{name}` - the original stem, everything before the last dot.
+/// * `{ext}`  - the extension without its dot, empty when there is none.
+/// * `{n}`    - the counter, starting wherever the dialog's start number says.
+/// * `{n:3}`  - the same counter padded with leading zeros to three digits.
+///
+/// Anything else, including an unclosed brace, is left exactly as typed: a
+/// pattern is the user's text, and quietly dropping part of it would rename
+/// files to something they never asked for.
+pub fn batch_name(pattern: &str, stem: &str, ext: &str, index: usize) -> String {
+    let mut out = String::with_capacity(pattern.len() + stem.len() + 8);
+    let mut rest = pattern;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                let token = &after[..close];
+                match expand_token(token, stem, ext, index) {
+                    Some(s) => out.push_str(&s),
+                    None => {
+                        out.push('{');
+                        out.push_str(token);
+                        out.push('}');
+                    }
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                // No closing brace at all: the remainder is literal.
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One `{...}` token of a batch-rename pattern, or `None` when it is not a
+/// token this understands and should be kept verbatim.
+fn expand_token(token: &str, stem: &str, ext: &str, index: usize) -> Option<String> {
+    match token {
+        "name" => Some(stem.to_owned()),
+        "ext" => Some(ext.to_owned()),
+        "n" => Some(index.to_string()),
+        _ => {
+            let digits: usize = token.strip_prefix("n:")?.parse().ok()?;
+            Some(format!("{index:0digits$}"))
+        }
+    }
 }
 
 /// Whether these bytes are probably not text.
@@ -905,6 +1558,37 @@ mod tests {
     }
 
     #[test]
+    fn batch_pattern_expands_every_token() {
+        assert_eq!(
+            batch_name("{name}.{ext}", "holiday", "jpg", 1),
+            "holiday.jpg"
+        );
+        assert_eq!(
+            batch_name("{name} - copy", "notes", "txt", 1),
+            "notes - copy"
+        );
+        // The counter starts where the caller says and pads as asked.
+        assert_eq!(batch_name("photo_{n}", "x", "png", 7), "photo_7");
+        assert_eq!(batch_name("img_{n:3}.{ext}", "x", "png", 4), "img_004.png");
+        assert_eq!(batch_name("{n:2}", "x", "", 12), "12");
+    }
+
+    #[test]
+    fn batch_pattern_keeps_a_missing_extension_empty() {
+        // `{ext}` with nothing to expand to is empty, not a stray dot of its own.
+        assert_eq!(batch_name("{name}{ext}", "readme", "", 1), "readme");
+        assert_eq!(batch_name("{name}.{ext}", "readme", "", 1), "readme.");
+        assert_eq!(batch_name("{name}_{n}", "readme", "", 3), "readme_3");
+    }
+
+    #[test]
+    fn batch_pattern_leaves_unknown_tokens_alone() {
+        assert_eq!(batch_name("{name}-{who}", "a", "txt", 1), "a-{who}");
+        assert_eq!(batch_name("{name", "a", "txt", 1), "{name");
+        assert_eq!(batch_name("plain", "a", "txt", 1), "plain");
+    }
+
+    #[test]
     fn breadcrumbs_walk_from_root() {
         let p = if cfg!(windows) {
             PathBuf::from(r"C:\Users\dev\docs")
@@ -992,8 +1676,133 @@ mod tests {
     }
 
     #[test]
+    fn this_pc_breadcrumb_shows_its_name_and_not_the_magic_string() {
+        let root = Path::new(crate::this_pc::ROOT);
+        let bc = breadcrumbs(root);
+        assert_eq!(bc.len(), 1, "This PC is one segment: {bc:?}");
+        assert_eq!(bc[0].0, "This PC");
+        // The segment still leads to the place itself, so a click stays here.
+        assert_eq!(bc[0].1, PathBuf::from(crate::this_pc::ROOT));
+        assert!(
+            !bc.iter().any(|(label, _)| label.contains("::")),
+            "the magic string is shown: {bc:?}"
+        );
+    }
+
+    #[test]
+    fn read_dir_of_the_this_pc_root_lists_the_drives_and_user_folders() {
+        let entries = read_dir(Path::new(crate::this_pc::ROOT), false).unwrap();
+        let expected = crate::this_pc::list();
+        assert_eq!(entries.len(), expected.len(), "{entries:?}");
+        for (got, want) in entries.iter().zip(expected.iter()) {
+            assert_eq!(got.name, want.name);
+            assert_eq!(got.path, want.path);
+            assert!(got.is_dir, "{got:?}");
+        }
+        assert!(entries.iter().any(|e| e.name == "Home"), "{entries:?}");
+    }
+
+    #[test]
+    fn drive_rows_carry_their_letter() {
+        // A labelled Windows volume reads like Explorer's "Windows (C:)".
+        assert_eq!(drive_label(Path::new("C:"), "Windows"), "Windows (C:)");
+        assert_eq!(drive_label(Path::new(r"C:\"), "Windows"), "Windows (C:)");
+        // An unlabelled one is just the letter.
+        assert_eq!(drive_label(Path::new(r"D:\"), ""), "D:");
+        // A mount that is not a bare letter is left alone, name only.
+        assert_eq!(drive_label(Path::new(r"C:\Mounts\Data"), "Data"), "Data");
+        // Other platforms have no letters: the volume name is the label.
+        assert_eq!(drive_label(Path::new("/"), "Macintosh HD"), "Macintosh HD");
+        assert_eq!(drive_label(Path::new("/"), ""), "/");
+    }
+
+    #[test]
     fn normalize_resolves_dot_segments() {
         assert_eq!(normalize(Path::new("a/./b/../c")), PathBuf::from("a/c"));
+    }
+
+    #[test]
+    fn long_path_prefixes_a_drive_path() {
+        if !cfg!(windows) {
+            return;
+        }
+        assert_eq!(
+            long_path(Path::new(r"C:\a\b")),
+            PathBuf::from(r"\\?\C:\a\b")
+        );
+        // The `.` and `..` are cleaned before the prefix goes on: a verbatim path
+        // is handed to the OS unparsed, so it would otherwise be read literally.
+        assert_eq!(
+            long_path(Path::new(r"C:\a\..\b")),
+            PathBuf::from(r"\\?\C:\b")
+        );
+    }
+
+    #[test]
+    fn long_path_prefixes_a_unc_path() {
+        if !cfg!(windows) {
+            return;
+        }
+        assert_eq!(
+            long_path(Path::new(r"\\server\share\a")),
+            PathBuf::from(r"\\?\UNC\server\share\a")
+        );
+    }
+
+    #[test]
+    fn long_path_leaves_relative_and_verbatim_paths_alone() {
+        // A relative path is left exactly as it was given, on every platform.
+        assert_eq!(long_path(Path::new("a/b")), PathBuf::from("a/b"));
+        assert_eq!(long_path(Path::new("/a/b")), PathBuf::from("/a/b"));
+        if cfg!(windows) {
+            let verbatim = PathBuf::from(r"\\?\C:\a\b");
+            assert_eq!(long_path(&verbatim), verbatim);
+            let unc = PathBuf::from(r"\\?\UNC\server\share\a");
+            assert_eq!(long_path(&unc), unc);
+        }
+    }
+
+    /// A path under `root` whose full length clears `min`, so it is past the old
+    /// 260-character limit.
+    fn deeper_than(root: &Path, min: usize) -> PathBuf {
+        let segment = "0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut p = root.to_path_buf();
+        while p.as_os_str().len() <= min {
+            p.push(segment);
+        }
+        p
+    }
+
+    #[test]
+    fn a_path_beyond_max_path_round_trips_through_the_helper() {
+        if !cfg!(windows) {
+            return;
+        }
+        let root = std::env::temp_dir().join("rhumb-long-path");
+        let _ = fs::remove_dir_all(long_path(&root));
+        let deep = deeper_than(&root, 300);
+        assert!(
+            deep.as_os_str().len() > 260,
+            "the test tree is not long enough: {}",
+            deep.as_os_str().len()
+        );
+
+        // Create, write and read back, all through the verbatim form.
+        fs::create_dir_all(long_path(&deep)).unwrap();
+        let file = deep.join("hello.txt");
+        fs::write(long_path(&file), b"deep").unwrap();
+        assert_eq!(fs::read(long_path(&file)).unwrap(), b"deep");
+
+        // Listing goes through the app's own door to the OS and comes back with
+        // ordinary paths, not the verbatim ones.
+        let entries = read_dir(&deep, false).unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].name, "hello.txt");
+        assert_eq!(entries[0].path, file, "the entry keeps the plain path");
+        assert!(!entries[0].is_dir);
+
+        fs::remove_dir_all(long_path(&root)).unwrap();
+        assert!(fs::metadata(long_path(&deep)).is_err(), "the tree survived");
     }
 
     #[test]
@@ -1006,5 +1815,202 @@ mod tests {
     fn current_year_is_sane() {
         let y = current_year();
         assert!((2020..=2100).contains(&y), "unexpected year {y}");
+    }
+
+    /// One entry for the grouping and filtering tests, with only the fields
+    /// those read filled in.
+    fn entry(name: &str, is_dir: bool, size: u64, modified: Option<SystemTime>) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            path: PathBuf::from(name),
+            is_dir,
+            is_symlink: false,
+            size,
+            modified,
+            hidden: false,
+        }
+    }
+
+    fn now() -> SystemTime {
+        SystemTime::now()
+    }
+
+    #[test]
+    fn names_bucket_into_a_to_z_and_the_rest_under_hash() {
+        let cases = [
+            ("apple.txt", "A"),
+            ("Banana.txt", "B"),
+            ("cherry", "C"),
+            ("zebra.zip", "Z"),
+            ("_hidden", "#"),
+            ("123.txt", "#"),
+            (".config", "#"),
+        ];
+        for (name, want) in cases {
+            let e = entry(name, false, 0, None);
+            assert_eq!(
+                group_label(&e, GroupBy::Name),
+                want,
+                "{name} landed in the wrong bucket"
+            );
+        }
+        // The buckets sort # first, then A..Z.
+        assert!(group_rank(GroupBy::Name, "#") < group_rank(GroupBy::Name, "A"));
+        assert!(group_rank(GroupBy::Name, "A") < group_rank(GroupBy::Name, "Z"));
+    }
+
+    #[test]
+    fn kind_classifies_extensions_into_their_families() {
+        assert_eq!(kind_of("txt"), FileKind::Document);
+        assert_eq!(kind_of("PNG"), FileKind::Image);
+        assert_eq!(kind_of("mp3"), FileKind::Audio);
+        assert_eq!(kind_of("mkv"), FileKind::Video);
+        assert_eq!(kind_of("zip"), FileKind::Archive);
+        assert_eq!(kind_of("rs"), FileKind::Other);
+        assert_eq!(kind_of(""), FileKind::Other);
+    }
+
+    #[test]
+    fn type_grouping_puts_folders_first_then_the_families() {
+        let cases = [
+            (entry("docs", true, 0, None), "Folders"),
+            (entry("a.txt", false, 0, None), "Documents"),
+            (entry("b.png", false, 0, None), "Images"),
+            (entry("c.mp3", false, 0, None), "Audio"),
+            (entry("d.mp4", false, 0, None), "Video"),
+            (entry("e.zip", false, 0, None), "Archives"),
+            (entry("f.rs", false, 0, None), "Other"),
+        ];
+        for (e, want) in &cases {
+            assert_eq!(&group_label(e, GroupBy::Type), want, "{}", e.name);
+        }
+        let mut ranks: Vec<usize> = cases
+            .iter()
+            .map(|(_, want)| group_rank(GroupBy::Type, want))
+            .collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(ranks.len(), cases.len(), "the type groups are distinct");
+        assert!(group_rank(GroupBy::Type, "Folders") < group_rank(GroupBy::Type, "Documents"));
+    }
+
+    #[test]
+    fn a_size_lands_in_the_band_the_boundary_says() {
+        let cases = [
+            (0u64, "Small"),
+            (MB - 1, "Small"),
+            (MB, "Medium"),
+            (100 * MB - 1, "Medium"),
+            (100 * MB, "Large"),
+            (u64::MAX, "Large"),
+        ];
+        for (size, want) in cases {
+            let e = entry("f.bin", false, size, None);
+            assert_eq!(group_label(&e, GroupBy::Size), want, "size {size}");
+        }
+        // A folder is its own band, whatever its own byte count is.
+        let folder = entry("dir", true, 100 * MB, None);
+        assert_eq!(group_label(&folder, GroupBy::Size), "Folders");
+    }
+
+    #[test]
+    fn a_date_lands_in_the_bucket_the_boundary_says() {
+        // The boundaries themselves, without depending on the wall clock.
+        assert_eq!(bucket_days(-1), "Today", "a future date reads as today");
+        assert_eq!(bucket_days(0), "Today");
+        assert_eq!(bucket_days(1), "Yesterday");
+        assert_eq!(bucket_days(2), "Earlier this week");
+        assert_eq!(bucket_days(6), "Earlier this week");
+        assert_eq!(bucket_days(7), "Earlier this month");
+        assert_eq!(bucket_days(29), "Earlier this month");
+        assert_eq!(bucket_days(30), "A long time ago");
+        assert_eq!(bucket_days(i64::MAX), "A long time ago");
+    }
+
+    #[test]
+    fn days_ago_counts_whole_local_days() {
+        let t = now();
+        assert_eq!(days_ago(Some(t), t), Some(0));
+        assert_eq!(
+            days_ago(Some(t - std::time::Duration::from_secs(10 * 86_400)), t),
+            Some(10)
+        );
+        assert_eq!(days_ago(None, t), None);
+    }
+
+    #[test]
+    fn kind_filter_keeps_only_what_it_names() {
+        let dir = entry("dir", true, 0, None);
+        let doc = entry("a.txt", false, 0, None);
+        let img = entry("b.png", false, 0, None);
+        let arc = entry("c.zip", false, 0, None);
+        assert!(KindFilter::All.accepts(&dir) && KindFilter::All.accepts(&doc));
+        assert!(KindFilter::Folders.accepts(&dir) && !KindFilter::Folders.accepts(&doc));
+        assert!(!KindFilter::Files.accepts(&dir) && KindFilter::Files.accepts(&doc));
+        assert!(KindFilter::Documents.accepts(&doc) && !KindFilter::Documents.accepts(&img));
+        assert!(KindFilter::Images.accepts(&img) && !KindFilter::Images.accepts(&doc));
+        assert!(KindFilter::Archives.accepts(&arc) && !KindFilter::Archives.accepts(&doc));
+        // A folder never matches an extension choice, however it is named.
+        let folder_txt = entry("folder.txt", true, 0, None);
+        assert!(!KindFilter::Documents.accepts(&folder_txt));
+    }
+
+    #[test]
+    fn date_filter_keeps_only_what_is_recent_enough() {
+        let t = now();
+        let at = |days: u64| {
+            entry(
+                "f",
+                false,
+                0,
+                Some(t - std::time::Duration::from_secs(days * 86_400)),
+            )
+        };
+        assert!(DateFilter::Any.accepts(&entry("f", false, 0, None), t));
+        assert!(DateFilter::Today.accepts(&at(0), t));
+        assert!(!DateFilter::Today.accepts(&at(2), t));
+        assert!(DateFilter::Last7.accepts(&at(3), t));
+        assert!(!DateFilter::Last7.accepts(&at(10), t));
+        assert!(DateFilter::Last30.accepts(&at(10), t));
+        assert!(!DateFilter::Last30.accepts(&at(60), t));
+        assert!(DateFilter::ThisYear.accepts(&at(0), t));
+        // Two years back is safely in an earlier calendar year, whatever today is.
+        assert!(!DateFilter::ThisYear.accepts(&at(800), t));
+        // An entry with no date fails every dated choice but Any.
+        let undated = entry("f", false, 0, None);
+        assert!(!DateFilter::Today.accepts(&undated, t));
+        assert!(!DateFilter::ThisYear.accepts(&undated, t));
+    }
+
+    #[test]
+    fn size_filter_bands_and_exempts_folders() {
+        let small = entry("s.bin", false, MB - 1, None);
+        let medium = entry("m.bin", false, 10 * MB, None);
+        let large = entry("l.bin", false, 200 * MB, None);
+        assert!(SizeFilter::Any.accepts(&small));
+        assert!(SizeFilter::Small.accepts(&small) && !SizeFilter::Small.accepts(&medium));
+        assert!(SizeFilter::Medium.accepts(&medium) && !SizeFilter::Medium.accepts(&large));
+        assert!(SizeFilter::Large.accepts(&large) && !SizeFilter::Large.accepts(&medium));
+        // A folder is never hidden by the size filter.
+        let folder = entry("dir", true, 0, None);
+        for f in SizeFilter::ALL {
+            assert!(f.accepts(&folder), "{f:?} hid a folder");
+        }
+    }
+
+    #[test]
+    fn every_choice_has_a_key_that_reads_back() {
+        for g in GroupBy::ALL {
+            assert_eq!(GroupBy::from_key(g.key()), g, "{g:?}");
+        }
+        for k in KindFilter::ALL {
+            assert_eq!(KindFilter::from_key(k.key()), k, "{k:?}");
+        }
+        for d in DateFilter::ALL {
+            assert_eq!(DateFilter::from_key(d.key()), d, "{d:?}");
+        }
+        for s in SizeFilter::ALL {
+            assert_eq!(SizeFilter::from_key(s.key()), s, "{s:?}");
+        }
     }
 }

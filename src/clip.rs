@@ -112,9 +112,26 @@ mod imp {
     use super::Hdrop;
     use std::path::PathBuf;
 
+    /// There is no CF_HDROP off Windows, so a file list travels as text:
+    /// newline-separated paths, which is what `copy_selection` puts on the
+    /// clipboard through `arboard` and what other file managers accept too.
     pub fn read() -> Option<Hdrop> {
-        None
+        let mut clipboard = arboard::Clipboard::new().ok()?;
+        let text = clipboard.get_text().ok()?;
+        let paths: Vec<PathBuf> = text
+            .lines()
+            .map(|line| PathBuf::from(line.trim()))
+            .filter(|path| path.exists())
+            .collect();
+        if paths.is_empty() {
+            return None;
+        }
+        // Text cannot say "move on paste", so a copy is the only reading.
+        Some(Hdrop { paths, cut: false })
     }
 
+    /// The caller already wrote the paths as text through `arboard`
+    /// (`copy_selection`), and there is no native file format to add, so there
+    /// is nothing more to offer here.
     pub fn write(_paths: &[PathBuf], _cut: bool) {}
 }

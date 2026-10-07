@@ -48,13 +48,15 @@ sizes.
 - [x] Multi-cursor: Alt+Click, Ctrl+D, Ctrl+Shift+L, column selection.
 - [x] Rope-backed buffer; edits and undo no longer scale with file size.
 - [x] Icon font, settings window, size slider, quick-access unpinning.
+- [x] Replace and replace-all in the find bar (Ctrl+H): a second field, with the
+      edit applied in one undo step.
+- [x] File-op collision UI: replace (overwrite/merge), skip, or keep both, with
+      apply-to-all, resolved before the job starts.
 
 ## Now - small, high value, no COM
 
 - [ ] Registry shell verbs - Directory\Background, Drive, Folder\Open\command.
       ~40 lines, opt-in + uninstaller.
-- [ ] Replace and replace-all in the find bar. The bar and the search are
-      built; only the second field and the edit are missing.
 - [ ] Go to line (Ctrl+G) - a line number box, reusing the find bar's row.
 
 ## Performance
@@ -72,23 +74,24 @@ sizes.
 
 ## Reimplement
 
-- [ ] Recycle Bin - parse $I* from C:\$Recycle.Bin\<SID>\. Gets you restore
-      and search.
-- [ ] This PC - WNetGetConnection + WM_DEVICECHANGE, no system-folder noise.
-- [ ] File-op collision UI - merge/replace/skip/rename/compare + apply-to-all.
-- [ ] Pause, rate, ETA, retry on ERROR_SHARING_VIOLATION, cross-volume move.
-- [ ] 7z and RAR archives; writing into archives.
-- [ ] Thumbnails hybrid - image crate up to ~12 formats, shell handler for
-      RAW/PDF/video.
-- [ ] Long paths - \\?\ normalization throughout.
+- [x] Recycle Bin - parse $I* from C:\$Recycle.Bin\<SID>\, browse and restore.
+- [x] This PC - user folders + drives, WNetGetConnection for mapped drives.
+- [x] File-op collision UI - replace/merge/skip/keep both + apply-to-all.
+- [x] Pause, rate, ETA, retry on ERROR_SHARING_VIOLATION, cross-volume move.
+- [x] 7z and RAR archives (read-only); writing into a zip.
+- [x] Thumbnails hybrid - image crate plus the Windows shell handler (video/PDF/RAW).
+- [x] Long paths - \\?\ normalization at the OS boundary (the index walk still
+      uses plain paths).
 
 ## Chores - cheap, just unimplemented
 
-- [ ] Real per-type icons, grouping, date/size/kind filters.
-- [ ] Multi-rename, junction/symlink creation, Extract here.
-- [ ] Better breadcrumbs (separator vs. arrow glyphs), real nav icons.
-- [ ] Editor gaps: language server, tree-sitter highlighting, code folding,
-      IME composition.
-- [ ] Dual-pane view.
-- [ ] Persist the name index between sessions.
-- [ ] Linux: clipboard and single-window handling, then test builds.
+- [x] Real per-type icons (Windows shell), IME composition, name-index persistence.
+- [x] Multi-rename, junction/symlink creation; Extract here already existed.
+- [x] Better breadcrumbs (chevron separators), real nav icons.
+- [x] Editor IME composition.
+- [x] Editor code folding.
+- [ ] Editor gaps: language server, tree-sitter highlighting.
+- [x] Dual-pane view.
+- [x] Persist the name index between sessions.
+- [x] Linux: clipboard and single-window handling (a Linux CI job is in place;
+      not runtime-tested on this machine).

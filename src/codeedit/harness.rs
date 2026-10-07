@@ -457,6 +457,52 @@ impl Harness {
         );
     }
 
+    /// One step of an input-method composition, as the window layer delivers
+    /// it: the candidate text so far, with nothing committed.
+    pub fn ime_preedit(&mut self, s: &str) {
+        self.send(
+            egui::RawInput {
+                events: vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: s.to_owned(),
+                    active_range_chars: None,
+                })],
+                ..Default::default()
+            },
+            false,
+        );
+    }
+
+    /// The input method's committed text: the composition is over and the text
+    /// belongs in the document.
+    pub fn ime_commit(&mut self, s: &str) {
+        self.send(
+            egui::RawInput {
+                events: vec![egui::Event::Ime(egui::ImeEvent::Commit(s.to_owned()))],
+                ..Default::default()
+            },
+            false,
+        );
+    }
+
+    /// The input method being dismissed, as a window reports it when the
+    /// composition is abandoned without committing anything.
+    #[expect(deprecated)]
+    pub fn ime_disabled(&mut self) {
+        self.send(
+            egui::RawInput {
+                events: vec![egui::Event::Ime(egui::ImeEvent::Disabled)],
+                ..Default::default()
+            },
+            false,
+        );
+    }
+
+    /// The input method's composing text, or `None` when nothing is being
+    /// composed.
+    pub fn preedit(&self) -> Option<&str> {
+        self.ed.preedit.as_deref()
+    }
+
     /// A clipboard copy, as the window layer delivers one.
     pub fn send_copy(&mut self) {
         self.took_clipboard = false;
@@ -1063,6 +1109,57 @@ impl Harness {
         self.leaf_rects()
             .into_iter()
             .find(|r| r.left() < 1.0 && r.width() > 5.0 && r.height() > 100.0)
+    }
+
+    // ---- folding ----
+
+    /// The start line of every fold the editor found while drawing, in order.
+    ///
+    /// Folds are looked up a line at a time, so this is the ones on screen. A test
+    /// that folds a small document has all of them.
+    #[allow(dead_code)]
+    pub fn fold_starts(&self) -> Vec<usize> {
+        let mut starts: Vec<usize> = self.ed.visible_folds.iter().map(|(s, _)| *s).collect();
+        starts.sort_unstable();
+        starts.dedup();
+        starts
+    }
+
+    /// Whether the fold opened by `line` is closed.
+    #[allow(dead_code)]
+    pub fn fold_closed(&self, line: usize) -> bool {
+        self.ed.closed.contains_key(&line)
+    }
+
+    /// Where the fold chevron for `line` was drawn last frame, if it has one.
+    ///
+    /// Read from what the editor recorded while painting rather than guessed at,
+    /// so a test clicks where the chevron really is.
+    #[allow(dead_code)]
+    pub fn fold_chevron(&self, line: usize) -> Option<Pos2> {
+        self.ed
+            .fold_buttons
+            .iter()
+            .find(|(l, _)| *l == line)
+            .map(|(_, r)| r.center())
+    }
+
+    /// Closes or opens the fold at `line` as a click on its chevron would, and
+    /// leaves a frame drawn.
+    ///
+    /// A click is used when the chevron is on screen, so the real pointer path is
+    /// exercised; otherwise the same command is run directly, so a test can fold
+    /// a line that has scrolled out of view.
+    #[allow(dead_code)]
+    pub fn toggle_fold(&mut self, line: usize) {
+        match self.fold_chevron(line) {
+            Some(pos) => self.click(pos),
+            None => {
+                let text = &self.text;
+                self.ed.toggle_fold(line, text);
+                self.frame();
+            }
+        }
     }
 
     // ---- the find bar ----

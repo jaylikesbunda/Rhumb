@@ -1,6 +1,7 @@
 //! The title bar, the toolbar above the list, and the window edges.
 
 use super::*;
+use egui::{WidgetInfo, WidgetType};
 
 impl Rhumb {
     /// The window is undecorated, so this bar owns moving, maximising and
@@ -53,6 +54,14 @@ impl Rhumb {
         ] {
             let r = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(sp::WIN_BTN_W, height));
             let rresp = ui.interact(r, Id::new(("win", action as i32)), Sense::click());
+            // The window buttons are glyphs, so each says what it does.
+            let name = match action {
+                WinAction::Minimize => "Minimize",
+                WinAction::Maximize if maximized => "Restore",
+                WinAction::Maximize => "Maximize",
+                WinAction::Close => "Close window",
+            };
+            rresp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
             if ui.is_rect_visible(r) {
                 let painter = ui.painter();
                 let closing = action == WinAction::Close;
@@ -76,9 +85,15 @@ impl Rhumb {
                 } else {
                     c::TEXT_DIM
                 };
+                // The square glyphs fill more of their em than the minus and the
+                // cross, so at the same size they read as larger.
+                let glyph = match action {
+                    WinAction::Maximize => 13.0,
+                    _ => 16.0,
+                };
                 icon.paint_large(
                     painter,
-                    Rect::from_center_size(r.center(), Vec2::splat(16.0)),
+                    Rect::from_center_size(r.center(), Vec2::splat(glyph)),
                     color,
                 );
             }
@@ -187,7 +202,7 @@ impl Rhumb {
         let total = ui.available_width();
         // Reserve room for the fixed clusters, then give the address bar what is
         // left. Below the floor, the address bar collapses to a Go button.
-        let controls_w = 270.0f32; // New, sort, hidden files, settings
+        let controls_w = 358.0f32; // New, sort, filter, hidden files, details, dual, settings
         let search_w = (total * 0.24).clamp(110.0, 240.0);
         // Sidebar toggle, back, forward, up, and refresh.
         let nav_w = 5.0 * 26.0 + 3.0 * 2.0;
@@ -221,7 +236,10 @@ impl Rhumb {
             ui.add_space(sp::SM);
             self.new_button(ui);
             self.sort_button(ui);
+            self.filter_button(ui);
             self.hidden_toggle(ui);
+            self.details_toggle(ui);
+            self.dual_toggle(ui);
             if widgets::icon_button(
                 ui,
                 Icon::Glyph(egui_phosphor::regular::GEAR_SIX),
@@ -332,9 +350,10 @@ impl Rhumb {
         }
     }
 
-    /// Sort column and direction.
+    /// Sort column and direction, plus how the list is grouped.
     pub(super) fn sort_button(&mut self, ui: &mut Ui) {
         let mut action = None;
+        let mut group_action = None;
         let resp = compact_button(
             ui,
             &format!(
@@ -346,8 +365,9 @@ impl Rhumb {
                     "\u{2193}"
                 }
             ),
-            "Sort order (click to change)",
+            "Sort order and grouping (click to change)",
         );
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Sort order"));
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_width(150.0);
             for key in [
@@ -370,6 +390,13 @@ impl Rhumb {
                 action = Some(self.sort);
                 self.ascending = false;
             }
+            ui.separator();
+            widgets::menu_heading(ui, "Group by");
+            for g in GroupBy::ALL {
+                if ui.selectable_label(self.group_by == g, g.label()).clicked() {
+                    group_action = Some(g);
+                }
+            }
         });
         if let Some(key) = action {
             if self.sort == key {
@@ -379,6 +406,88 @@ impl Rhumb {
                 self.ascending = true;
             }
             self.apply_sort();
+        }
+        if let Some(g) = group_action
+            && self.group_by != g
+        {
+            self.group_by = g;
+            self.recompute_visible();
+        }
+    }
+
+    /// The filter menu: kind, modified date and size, which combine with each
+    /// other and with the name box. Lit while any of them is narrowing the list.
+    pub(super) fn filter_button(&mut self, ui: &mut Ui) {
+        use egui_phosphor::regular as ph;
+        let active = self.filters_active();
+        let tip = if active {
+            "Filters are on (click to change)"
+        } else {
+            "Filter by kind, date or size"
+        };
+        let resp = widgets::icon_toggle(ui, Icon::Glyph(ph::FUNNEL), active, tip);
+        let mut kind = None;
+        let mut date = None;
+        let mut size = None;
+        let mut clear = false;
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_width(210.0);
+            ui.spacing_mut().item_spacing = Vec2::new(sp::SM, 2.0);
+            widgets::menu_heading(ui, "Kind");
+            for k in KindFilter::ALL {
+                if ui
+                    .selectable_label(self.kind_filter == k, k.label())
+                    .clicked()
+                {
+                    kind = Some(k);
+                }
+            }
+            ui.add_space(sp::SM);
+            widgets::menu_heading(ui, "Modified");
+            for d in DateFilter::ALL {
+                if ui
+                    .selectable_label(self.date_filter == d, d.label())
+                    .clicked()
+                {
+                    date = Some(d);
+                }
+            }
+            ui.add_space(sp::SM);
+            widgets::menu_heading(ui, "Size");
+            for s in SizeFilter::ALL {
+                if ui
+                    .selectable_label(self.size_filter == s, s.label())
+                    .clicked()
+                {
+                    size = Some(s);
+                }
+            }
+            if active {
+                ui.separator();
+                if ui.button("Clear filters").clicked() {
+                    clear = true;
+                }
+            }
+        });
+        if clear {
+            self.clear_filters();
+            return;
+        }
+        let mut changed = false;
+        if let Some(k) = kind {
+            self.kind_filter = k;
+            changed = true;
+        }
+        if let Some(d) = date {
+            self.date_filter = d;
+            changed = true;
+        }
+        if let Some(s) = size {
+            self.size_filter = s;
+            changed = true;
+        }
+        if changed {
+            self.recompute_visible();
         }
     }
 
@@ -398,6 +507,47 @@ impl Rhumb {
         }
     }
 
+    /// The file list's right-hand pane, on or off. Kept in the toolbar so a pane
+    /// closed from its own header always has a control in plain sight to bring it
+    /// back, even on a window too narrow for the status bar's own switch.
+    pub(super) fn details_toggle(&mut self, ui: &mut Ui) {
+        let on = self.details;
+        let tip = if on {
+            "Details pane is shown (Alt+P)"
+        } else {
+            "Details pane is hidden (Alt+P)"
+        };
+        let icon = Icon::Glyph(egui_phosphor::regular::SQUARE_HALF);
+        if widgets::icon_toggle(ui, icon, on, tip).clicked() {
+            self.details = !self.details;
+            // Turning it on with nothing selected would show an empty pane and look
+            // like nothing happened, so the first row is selected to give it a subject.
+            if self.details
+                && self.sel.is_empty()
+                && !self.visible.is_empty()
+                && let Some(p) = self.path_at(0)
+            {
+                self.sel.insert(p);
+                self.cursor = 0;
+                self.anchor = 0;
+            }
+        }
+    }
+
+    /// The dual-pane view, on or off: two folder lists side by side.
+    pub(super) fn dual_toggle(&mut self, ui: &mut Ui) {
+        let on = self.dual;
+        let tip = if on {
+            "Two folder lists are shown (Ctrl+Shift+D)"
+        } else {
+            "Show two folder lists (Ctrl+Shift+D)"
+        };
+        let icon = Icon::Glyph(egui_phosphor::regular::COLUMNS);
+        if widgets::icon_toggle(ui, icon, on, tip).clicked() {
+            self.toggle_dual();
+        }
+    }
+
     pub(super) fn search_box(&mut self, ui: &mut Ui, width: f32) {
         let mut text = self.filter.clone();
         let running = self.search.running;
@@ -412,6 +562,9 @@ impl Rhumb {
         );
         let scope = self.scope;
         let mut flip_scope = false;
+        let mut clear = false;
+        // Room for the clear button, so the field shrinks rather than the box growing.
+        let clear_w = if text.is_empty() { 0.0 } else { 20.0 };
         let out = Frame::new()
             .fill(c::CODE_BG)
             .stroke(Stroke::new(1.0, c::BORDER))
@@ -436,14 +589,38 @@ impl Rhumb {
                     .id(Id::new(ID_SEARCH))
                     .hint_text(hint)
                     .frame(Frame::NONE)
-                    .desired_width((width - 34.0 - 26.0).max(40.0))
+                    .desired_width((width - 34.0 - 26.0 - clear_w).max(40.0))
                     .text_color(c::TEXT)
                     .show(ui)
                     .response;
+                // Clear the box and keep the caret in it, so a new search can be typed
+                // at once. Only there while there is something to clear.
+                if !text.is_empty() {
+                    let (crect, cresp) =
+                        ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::click());
+                    cresp.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::Button, true, "Clear search")
+                    });
+                    if cresp.hovered() {
+                        ui.painter()
+                            .rect_filled(crect, CornerRadius::same(4), c::HOVER);
+                    }
+                    Icon::Close.paint(
+                        ui.painter(),
+                        crect,
+                        if cresp.hovered() { c::TEXT } else { c::TEXT_FAINT },
+                    );
+                    if cresp.on_hover_text("Clear").clicked() {
+                        clear = true;
+                    }
+                }
                 // Whether the search goes into the folders below or stays in this one:
                 // a button in the box it belongs to, lit while it goes in.
                 let deep = scope == SearchScope::Below;
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(22.0, 18.0), Sense::click());
+                resp.widget_info(|| {
+                    WidgetInfo::selected(WidgetType::Button, true, deep, "Search subfolders")
+                });
                 if deep {
                     ui.painter()
                         .rect_filled(rect, CornerRadius::same(4), c::SEL);
@@ -483,13 +660,17 @@ impl Rhumb {
             self.on_filter_changed();
         }
 
+        if clear {
+            self.filter.clear();
+            self.on_filter_changed();
+            self.search_focus = true;
+        } else if out.changed() {
+            self.filter = text;
+            self.on_filter_changed();
+        }
         if self.search_focus {
             out.request_focus();
             self.search_focus = false;
-        }
-        if out.changed() {
-            self.filter = text;
-            self.on_filter_changed();
         }
     }
 

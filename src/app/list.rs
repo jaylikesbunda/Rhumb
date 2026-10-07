@@ -1,11 +1,20 @@
 //! The file list, its context menu, the details pane, and moving about in it.
 
 use super::*;
+use egui::{WidgetInfo, WidgetType};
+use std::time::SystemTime;
+
+/// The room the details pane's close button takes from the title row, in points.
+const CLOSE_W: f32 = 28.0;
 
 impl Rhumb {
     /// The file list. One code path serves all three views: only the cell
     /// geometry and the painter change.
-    pub(super) fn list_ui(&mut self, ui: &mut Ui) {
+    ///
+    /// `pane` is a widget-id salt, so the live list and the parked second list
+    /// can be drawn in the same frame without their rows, headers and scroll
+    /// areas sharing ids.
+    pub(super) fn list_ui(&mut self, ui: &mut Ui, pane: &'static str) {
         let started = Instant::now();
         let searching = self.searching();
         let count = self.row_count();
@@ -44,10 +53,15 @@ impl Rhumb {
                         Pos2::new(layout.size_left(), header.bottom()),
                     )
                 };
-                if ui
-                    .interact(r, Id::new(("sort", key.label())), Sense::click())
-                    .clicked()
-                {
+                let resp = ui.interact(r, Id::new((pane, "sort", key.label())), Sense::click());
+                resp.widget_info(|| {
+                    WidgetInfo::labeled(
+                        WidgetType::Button,
+                        ui.is_enabled(),
+                        format!("Sort by {}", key.label()),
+                    )
+                });
+                if resp.clicked() {
                     header_click = Some(key);
                 }
             }
@@ -67,7 +81,10 @@ impl Rhumb {
                     Pos2::new(x, header.center().y),
                     Vec2::new(theme::col::GRAB * 2.0, header.height()),
                 );
-                let resp = ui.interact(grab, Id::new(id), Sense::drag());
+                let resp = ui.interact(grab, Id::new((pane, id)), Sense::drag());
+                resp.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::ResizeHandle, true, "Resize column")
+                });
                 if resp.hovered() || resp.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     ui.painter().vline(
@@ -138,6 +155,15 @@ impl Rhumb {
                     "Folder unavailable",
                     "It may have been moved, or you may not have access",
                 )
+            } else if crate::recycle::is_root(&self.cwd) {
+                // Not a folder that happens to be empty: the bin is a place of
+                // its own, and saying so reads better than "Empty folder".
+                ("Recycle Bin is empty", "Deleted items show up here")
+            } else if crate::this_pc::is_root(&self.cwd) {
+                (
+                    "Nothing to show",
+                    "This PC lists the drives and your folders",
+                )
             } else {
                 ("Empty folder", "Nothing to show")
             };
@@ -161,7 +187,6 @@ impl Rhumb {
         } else {
             1
         };
-        let rows_total = count.div_ceil(cols);
         let name_w = if grid {
             tile_w - sp::SM * 2.0
         } else if view.has_columns() {
@@ -169,12 +194,36 @@ impl Rhumb {
         } else {
             (width - 74.0).max(40.0)
         };
+        // Grouping is a property of the folder listing, not of a recursive
+        // search: results are shown flat whatever the grouping is.
+        let grouped = self.group_by != GroupBy::None && !searching;
+        let header_h = sp::SECTION;
+        // The scroll area's content is as tall as its rows. A group header
+        // takes a fixed strip above the rows of its group.
+        let content_h = if grouped {
+            self.groups
+                .iter()
+                .map(|g| header_h + group_rows(g.len, grid, cols) as f32 * cell_h)
+                .sum()
+        } else {
+            count.div_ceil(cols) as f32 * cell_h
+        };
 
         let mut click: Option<(usize, ClickKind)> = None;
         // Collected inside the loop and applied after it: the closure borrows
         // list fields, so it cannot reach into the app to open a menu itself.
         let mut context: Option<PathBuf> = None;
         let scroll_to = self.scroll_to.take();
+        // The cursor is an item index. In the grouped layout a header may sit
+        // above it, so the scroll target is that item's actual row, not its
+        // index.
+        let scroll_offset = scroll_to.map(|(item, _align)| {
+            if grouped {
+                grouped_item_offset(&self.groups, item, grid, cols, header_h, cell_h)
+            } else {
+                item as f32 * cell_h
+            }
+        });
 
         let list_offset = {
             // Immutable list data for the paint loop; the caches are separate
@@ -182,123 +231,208 @@ impl Rhumb {
             let entries = &self.entries;
             let visible = &self.visible;
             let results = &self.search.results;
+            let groups = &self.groups;
             let sel = &self.sel;
 
             let mut area = egui::ScrollArea::vertical()
-                .id_salt(ID_LIST)
+                .id_salt((pane, ID_LIST))
                 .auto_shrink([false, false]);
-            if let Some((row, _align)) = scroll_to {
-                area = area.vertical_scroll_offset(row as f32 * cell_h);
+            if let Some(y) = scroll_offset {
+                area = area.vertical_scroll_offset(y);
             } else if let Some(y) = self.scroll_restore.take() {
                 // A tab has come back, and the list goes to where it was.
                 area = area.vertical_scroll_offset(y);
             }
             let shown = area.show(ui, |ui| {
                 let (content, _) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width().max(1.0), rows_total as f32 * cell_h),
+                    Vec2::new(ui.available_width().max(1.0), content_h.max(1.0)),
                     Sense::hover(),
                 );
                 let clip = ui.clip_rect();
-                let scrolled = clip.min.y - content.min.y;
-                // Only the rows that intersect the clip are ever built.
-                let first_row = ((scrolled / cell_h).floor().max(0.0) as usize).min(rows_total);
-                let visible_rows = (clip.height() / cell_h).ceil() as usize + 2;
-                let last_row = (first_row + visible_rows).min(rows_total);
-
-                for r in first_row..last_row {
-                    for c in 0..cols {
-                        let i = r * cols + c;
-                        if i >= count {
+                if grouped {
+                    // Walk the groups rather than the rows: there are only a
+                    // handful of groups, so finding the first visible row costs
+                    // nothing however many entries a group holds.
+                    let top = (clip.min.y - content.min.y).max(0.0);
+                    let bottom = top + clip.height();
+                    let mut y = 0.0f32;
+                    for g in groups {
+                        let header_y = y;
+                        y += header_h;
+                        let rows = group_rows(g.len, grid, cols);
+                        let items_bottom = y + rows as f32 * cell_h;
+                        // Entirely above the viewport: skip it whole.
+                        if items_bottom < top {
+                            y = items_bottom;
+                            continue;
+                        }
+                        // Entirely below: so is everything after it.
+                        if y > bottom {
                             break;
                         }
-                        let entry: &Entry = if searching {
-                            match results.get(i) {
-                                Some(e) => e,
-                                None => continue,
-                            }
-                        } else {
-                            match visible.get(i).and_then(|e| entries.get(*e)) {
-                                Some(e) => e,
-                                None => continue,
-                            }
-                        };
-                        let cell = if grid {
-                            Rect::from_min_size(
-                                Pos2::new(
-                                    content.min.x + c as f32 * tile_w,
-                                    content.min.y + r as f32 * cell_h,
-                                ),
-                                Vec2::new(tile_w, cell_h),
-                            )
-                        } else {
-                            Rect::from_min_size(
-                                Pos2::new(content.min.x, content.min.y + i as f32 * cell_h),
-                                Vec2::new(content.width(), cell_h),
-                            )
-                        };
-                        let resp = ui.interact(
-                            cell,
-                            Id::new(("row", i)),
-                            Sense::click().union(Sense::drag()),
-                        );
-                        // A folder under the pointer is a drop target.
-                        if entry.is_dir && resp.hovered() {
-                            self.drop_target = Some(entry.path.clone());
+                        if header_y + header_h > top && header_y < bottom {
+                            let rect = Rect::from_min_size(
+                                Pos2::new(content.min.x, content.min.y + header_y),
+                                Vec2::new(content.width(), header_h),
+                            );
+                            widgets::group_header(ui, rect, &g.label);
                         }
-                        if grid {
-                            let name = self.row_cache.tile_name(ui, i, entry, name_w);
-                            let thumb = if entry.is_dir {
-                                None
+                        let first = (((top - y).max(0.0)) / cell_h).floor() as usize;
+                        let last =
+                            ((((bottom - y).max(0.0)) / cell_h).ceil() as usize + 1).min(rows);
+                        for line in first..last {
+                            for c in 0..cols {
+                                let k = line * cols + c;
+                                if k >= g.len {
+                                    break;
+                                }
+                                let item = g.start + k;
+                                let Some(entry) = visible.get(item).and_then(|e| entries.get(*e))
+                                else {
+                                    continue;
+                                };
+                                let cell = if grid {
+                                    Rect::from_min_size(
+                                        Pos2::new(
+                                            content.min.x + c as f32 * tile_w,
+                                            content.min.y + y + line as f32 * cell_h,
+                                        ),
+                                        Vec2::new(tile_w, cell_h),
+                                    )
+                                } else {
+                                    Rect::from_min_size(
+                                        Pos2::new(
+                                            content.min.x,
+                                            content.min.y + y + line as f32 * cell_h,
+                                        ),
+                                        Vec2::new(content.width(), cell_h),
+                                    )
+                                };
+                                let selected = sel.contains(&entry.path);
+                                let resp = paint_item(
+                                    ui,
+                                    entry,
+                                    item,
+                                    cell,
+                                    grid,
+                                    view,
+                                    &layout,
+                                    selected,
+                                    name_w,
+                                    thumb_px,
+                                    pane,
+                                    &mut self.row_cache,
+                                    &mut self.thumbs,
+                                    &mut self.drop_target,
+                                );
+                                if resp.clicked() {
+                                    click = Some((item, click_kind(ui)));
+                                }
+                                if resp.double_clicked() {
+                                    click = Some((item, ClickKind::Open));
+                                }
+                                let right_pressed =
+                                    resp.hovered() && ui.input(|i| i.pointer.secondary_pressed());
+                                if right_pressed || resp.secondary_clicked() {
+                                    context = Some(entry.path.clone());
+                                    // A right click inside the selection keeps it,
+                                    // so the menu can act on the whole of it.
+                                    click = Some((
+                                        item,
+                                        if sel.contains(&entry.path) {
+                                            ClickKind::Context
+                                        } else {
+                                            ClickKind::Plain
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                        y = items_bottom;
+                    }
+                } else {
+                    let scrolled = clip.min.y - content.min.y;
+                    let rows_total = count.div_ceil(cols);
+                    // Only the rows that intersect the clip are ever built.
+                    let first_row = ((scrolled / cell_h).floor().max(0.0) as usize).min(rows_total);
+                    let visible_rows = (clip.height() / cell_h).ceil() as usize + 2;
+                    let last_row = (first_row + visible_rows).min(rows_total);
+
+                    for r in first_row..last_row {
+                        for c in 0..cols {
+                            let i = r * cols + c;
+                            if i >= count {
+                                break;
+                            }
+                            let entry: &Entry = if searching {
+                                match results.get(i) {
+                                    Some(e) => e,
+                                    None => continue,
+                                }
                             } else {
-                                self.thumbs.get(&entry.path, thumb_px)
+                                match visible.get(i).and_then(|e| entries.get(*e)) {
+                                    Some(e) => e,
+                                    None => continue,
+                                }
                             };
-                            widgets::paint_tile(
+                            let cell = if grid {
+                                Rect::from_min_size(
+                                    Pos2::new(
+                                        content.min.x + c as f32 * tile_w,
+                                        content.min.y + r as f32 * cell_h,
+                                    ),
+                                    Vec2::new(tile_w, cell_h),
+                                )
+                            } else {
+                                Rect::from_min_size(
+                                    Pos2::new(content.min.x, content.min.y + i as f32 * cell_h),
+                                    Vec2::new(content.width(), cell_h),
+                                )
+                            };
+                            let selected = sel.contains(&entry.path);
+                            let resp = paint_item(
                                 ui,
                                 entry,
+                                i,
                                 cell,
-                                sel.contains(&entry.path),
-                                resp.hovered(),
-                                &name,
-                                thumb.as_ref(),
+                                grid,
+                                view,
+                                &layout,
+                                selected,
+                                name_w,
+                                thumb_px,
+                                pane,
+                                &mut self.row_cache,
+                                &mut self.thumbs,
+                                &mut self.drop_target,
                             );
-                        } else {
-                            // Views without columns never built a layout, so
-                            // their icon and name rects were zero and every row
-                            // painted at the panel's edge. Build one from the
-                            // cell itself: only its x and width matter here.
-                            let plain = RowLayout::new(cell, 0.0, 0.0);
-                            let rl = if view.has_columns() { layout } else { plain };
-                            let room = (rl.name_limit() - rl.name.x).max(40.0);
-                            let galleys: &widgets::RowGalleys =
-                                self.row_cache.get_or_build(ui, i, entry, room);
-                            widgets::paint_row(
-                                ui,
-                                entry,
-                                &rl,
-                                cell,
-                                sel.contains(&entry.path),
-                                resp.hovered(),
-                                galleys,
-                                view.has_columns(),
-                            );
-                        }
-                        if resp.clicked() {
-                            click = Some((i, click_kind(ui)));
-                        }
-                        if resp.double_clicked() {
-                            click = Some((i, ClickKind::Open));
-                        }
-                        // The menu opens on the press, with the release as a
-                        // fallback. A press is visible globally, while a click
-                        // needs egui to credit this exact widget — credit the
-                        // row loses whenever anything overlaps it. The close
-                        // behaviour below ignores the opening click, so opening
-                        // early cannot dismiss the menu again.
-                        let right_pressed =
-                            resp.hovered() && ui.input(|i| i.pointer.secondary_pressed());
-                        if right_pressed || resp.secondary_clicked() {
-                            context = Some(entry.path.clone());
-                            click = Some((i, ClickKind::Plain));
+                            if resp.clicked() {
+                                click = Some((i, click_kind(ui)));
+                            }
+                            if resp.double_clicked() {
+                                click = Some((i, ClickKind::Open));
+                            }
+                            // The menu opens on the press, with the release as a
+                            // fallback. A press is visible globally, while a click
+                            // needs egui to credit this exact widget — credit the
+                            // row loses whenever anything overlaps it. The close
+                            // behaviour below ignores the opening click, so opening
+                            // early cannot dismiss the menu again.
+                            let right_pressed =
+                                resp.hovered() && ui.input(|i| i.pointer.secondary_pressed());
+                            if right_pressed || resp.secondary_clicked() {
+                                context = Some(entry.path.clone());
+                                // A right click inside the selection keeps it,
+                                // so the menu can act on the whole of it.
+                                click = Some((
+                                    i,
+                                    if sel.contains(&entry.path) {
+                                        ClickKind::Context
+                                    } else {
+                                        ClickKind::Plain
+                                    },
+                                ));
+                            }
                         }
                     }
                 }
@@ -325,7 +459,11 @@ impl Rhumb {
             (now - origin).length() > 5.0 && i.pointer.button_down(egui::PointerButton::Primary)
         });
         if self.drag_payload.is_empty() && moved_far && !self.sel.is_empty() {
-            self.drag_payload = self.sel.iter().cloned().collect();
+            // A deleted item cannot be dragged anywhere: the only thing to do
+            // with one is restore it, and a drop would move the raw `$R` file.
+            if !self.sel.iter().any(|p| crate::recycle::is_item(p)) {
+                self.drag_payload = self.sel.iter().cloned().collect();
+            }
         } else if !self.drag_payload.is_empty() && !ui.input(|i| i.pointer.any_down()) {
             self.drag_payload.clear();
         }
@@ -359,7 +497,21 @@ impl Rhumb {
                 }
                 self.cursor = i;
             }
-            ClickKind::Open => self.open_path(&path),
+            ClickKind::Open => {
+                // A deleted item is not opened where it lies; the useful thing
+                // a double-click can do is put it back.
+                if crate::recycle::is_item(&path) {
+                    self.restore_recycle(&path);
+                } else {
+                    self.open_path(&path);
+                }
+            }
+            ClickKind::Context => {
+                // Right-clicking inside an existing selection keeps it: the
+                // menu is about to offer an action for all of it.
+                self.cursor = i;
+                self.anchor = i;
+            }
         }
     }
 
@@ -387,6 +539,11 @@ impl Rhumb {
         let pinned = self.is_pinned(&path);
         // An archive, or something inside one, can be extracted.
         let is_archive = archive::is_archive_file(&path) || archive::is_virtual(&path);
+        // A deleted item has only the two things that can be done with it.
+        let is_recycle = crate::recycle::is_item(&path);
+        // Rename acts on the whole selection when the menu was opened on one of
+        // several selected rows; the right-click kept that selection for us.
+        let batch = self.sel.len() >= 2 && self.sel.contains(&path);
         let mut action: Option<CtxAction> = None;
 
         // The anchor is the spot that was clicked, recorded when the right
@@ -431,6 +588,32 @@ impl Rhumb {
                 let item = |ui: &mut Ui, icon: Icon, label: &str, hint: &str, danger: bool| {
                     widgets::menu_item(ui, icon, label, hint, danger, true).clicked()
                 };
+                if is_recycle {
+                    // A deleted item cannot be copied, renamed or trashed: it is
+                    // already in the bin. The only choices are to put it back or
+                    // to remove it for good.
+                    if item(
+                        ui,
+                        Icon::Glyph(ph::ARROW_COUNTER_CLOCKWISE),
+                        "Restore",
+                        "",
+                        false,
+                    ) {
+                        action = Some(CtxAction::Restore);
+                    }
+                    widgets::menu_separator(ui);
+                    if item(
+                        ui,
+                        Icon::Glyph(ph::TRASH_SIMPLE),
+                        "Delete permanently\u{2026}",
+                        "",
+                        true,
+                    ) {
+                        action = Some(CtxAction::DeleteRecycle);
+                    }
+                    ui.add_space(4.0);
+                    return;
+                }
                 if editable
                     && item(
                         ui,
@@ -480,6 +663,31 @@ impl Rhumb {
                 ) {
                     action = Some(CtxAction::OpenTerminal);
                 }
+                // Links are made beside the item. Nothing inside an archive has a
+                // disk of its own to hold one, and a recycle item never gets here.
+                if !archive::is_virtual(&path) {
+                    if item(
+                        ui,
+                        Icon::Glyph(ph::LINK_SIMPLE),
+                        "Create symbolic link",
+                        "",
+                        false,
+                    ) {
+                        action = Some(CtxAction::CreateSymlink);
+                    }
+                    #[cfg(windows)]
+                    if is_dir
+                        && item(
+                            ui,
+                            Icon::Glyph(ph::FOLDER_DOTTED),
+                            "Create junction",
+                            "",
+                            false,
+                        )
+                    {
+                        action = Some(CtxAction::CreateJunction);
+                    }
+                }
                 if is_archive && item(ui, Icon::Glyph(ph::FILE_ZIP), "Extract here", "", false) {
                     action = Some(CtxAction::Extract);
                 }
@@ -514,8 +722,18 @@ impl Rhumb {
                         action = Some(CtxAction::Pin);
                     }
                 }
-                if item(ui, Icon::Glyph(ph::PENCIL_LINE), "Rename", "F2", false) {
-                    action = Some(CtxAction::Rename);
+                if item(
+                    ui,
+                    Icon::Glyph(ph::PENCIL_LINE),
+                    if batch { "Rename\u{2026}" } else { "Rename" },
+                    "F2",
+                    false,
+                ) {
+                    action = Some(if batch {
+                        CtxAction::RenameMany
+                    } else {
+                        CtxAction::Rename
+                    });
                 }
                 widgets::menu_separator(ui);
                 if item(ui, Icon::Glyph(ph::TRASH), "Move to trash", "Del", true) {
@@ -564,6 +782,13 @@ impl Rhumb {
             CtxAction::OpenTerminal => self.open_in_terminal(&path),
             CtxAction::Cut => self.copy_selection(true),
             CtxAction::Rename => self.start_rename(&path),
+            CtxAction::RenameMany => {
+                let paths: Vec<PathBuf> = self.sel.iter().cloned().collect();
+                self.start_batch_rename(paths);
+            }
+            CtxAction::CreateSymlink => self.create_symlink(&path),
+            #[cfg(windows)]
+            CtxAction::CreateJunction => self.create_junction(&path),
             CtxAction::Pin => {
                 let name = path.file_name().map_or_else(
                     || path.to_string_lossy().into_owned(),
@@ -580,6 +805,32 @@ impl Rhumb {
             }
             CtxAction::Delete => self.delete_selection(false),
             CtxAction::DeleteForever => self.delete_selection(true),
+            CtxAction::Restore => self.restore_recycle(&path),
+            CtxAction::DeleteRecycle => self.delete_recycle(&path),
+        }
+    }
+
+    /// Puts a Recycle Bin item back where it came from, then re-reads the bin.
+    pub(super) fn restore_recycle(&mut self, path: &Path) {
+        match crate::recycle::restore(path) {
+            Ok(()) => {
+                self.toast(String::from("Restored"));
+                self.sel.clear();
+                self.request_listing();
+            }
+            Err(e) => self.toast_err(format!("Could not restore: {e}")),
+        }
+    }
+
+    /// Removes a Recycle Bin item for good, then re-reads the bin.
+    pub(super) fn delete_recycle(&mut self, path: &Path) {
+        match crate::recycle::delete_permanently(path) {
+            Ok(()) => {
+                self.toast(String::from("Deleted permanently"));
+                self.sel.clear();
+                self.request_listing();
+            }
+            Err(e) => self.toast_err(format!("Could not delete: {e}")),
         }
     }
 
@@ -620,8 +871,34 @@ impl Rhumb {
             path.parent().unwrap_or(&path).to_string_lossy().to_string(),
             false,
             false,
-            0.0,
+            CLOSE_W,
         );
+
+        // The way out: the same switch as Settings and Alt+P turn, so the pane
+        // is never something that can only be got rid of by deselecting.
+        let close = Rect::from_center_size(
+            Pos2::new(
+                title_row.right() - CLOSE_W * 0.5 - 2.0,
+                title_row.center().y,
+            ),
+            Vec2::splat(24.0),
+        );
+        let resp = ui.interact(close, Id::new("details-close"), Sense::click());
+        resp.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::Button, true, "Close the details pane")
+        });
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(close, CornerRadius::same(6), c::HOVER);
+        }
+        Icon::Close.paint(
+            ui.painter(),
+            close,
+            if resp.hovered() { c::TEXT } else { c::TEXT_DIM },
+        );
+        if resp.on_hover_text("Close the details pane").clicked() {
+            self.details = false;
+        }
 
         // Thumbnail or a centred glyph, then the facts.
         // A picture gets the width of the pane, and as many pixels as that width is on
@@ -785,7 +1062,12 @@ impl Rhumb {
         if nav.7
             && let Some(p) = self.cursor_path()
         {
-            self.open_path(&p);
+            // Enter does the same as a double-click: restore, not open.
+            if crate::recycle::is_item(&p) {
+                self.restore_recycle(&p);
+            } else {
+                self.open_path(&p);
+            }
         }
         if nav.8 {
             self.go_up();
@@ -901,8 +1183,14 @@ impl Rhumb {
             return;
         }
         // Inside an archive the list is filtered in place: there is no folder tree on
-        // the disk to walk, or to index.
-        if archive::is_virtual(&self.cwd) {
+        // the disk to walk, or to index. The Recycle Bin and "This PC" are the same
+        // kind of place — magic paths with no folder behind them — so a deep search
+        // there would only ask the disk about a path that names none. Their listed
+        // entries are narrowed in place instead, which is what `watch` assumes too.
+        if archive::is_virtual(&self.cwd)
+            || crate::recycle::is_root(&self.cwd)
+            || crate::this_pc::is_root(&self.cwd)
+        {
             return;
         }
         // Nothing queued is the common case, and this runs every frame. A
@@ -933,21 +1221,83 @@ impl Rhumb {
 
     // ---- navigation ---------------------------------------------------------
 
-    /// Rebuilds the visible index list from the filter.
+    /// Rebuilds the visible index list from the name filter and the three
+    /// filter menus, then orders it into groups when a grouping is chosen.
+    ///
+    /// This runs on every recompute, never per frame, so a folder of a hundred
+    /// thousand entries is walked only when something about the list changes.
     pub(super) fn recompute_visible(&mut self) {
         let filter = self.filter.trim();
-        self.visible.clear();
+        let now = SystemTime::now();
+        let mut items: Vec<usize> = Vec::with_capacity(self.entries.len());
         for (i, e) in self.entries.iter().enumerate() {
-            if filter.is_empty() || search::matches(&e.name, filter) {
-                self.visible.push(i);
+            let named = filter.is_empty() || search::matches(&e.name, filter);
+            if named
+                && self.kind_filter.accepts(e)
+                && self.date_filter.accepts(e, now)
+                && self.size_filter.accepts(e)
+            {
+                items.push(i);
             }
         }
+        self.visible = items;
+        self.build_groups();
         let count = self.visible.len();
         if self.cursor >= count {
             self.cursor = count.saturating_sub(1);
         }
         self.anchor = self.cursor;
         self.row_cache.clear();
+    }
+
+    /// Orders the filtered items into their groups and records where each one
+    /// starts. A no-op when grouping is off.
+    ///
+    /// The sort is stable, so within a group the list keeps the sort order the
+    /// header chose; only the groups themselves are rearranged, and only when
+    /// the entries happened to interleave.
+    fn build_groups(&mut self) {
+        self.groups.clear();
+        if self.group_by == GroupBy::None {
+            return;
+        }
+        let mut labeled: Vec<(usize, String)> = self
+            .visible
+            .iter()
+            .map(|i| (*i, fs_model::group_label(&self.entries[*i], self.group_by)))
+            .collect();
+        labeled.sort_by_key(|(_, label)| fs_model::group_rank(self.group_by, label));
+        self.visible.clear();
+        let mut last: Option<String> = None;
+        for (i, label) in labeled {
+            if last.as_deref() != Some(label.as_str()) {
+                self.groups.push(Group {
+                    label: label.clone(),
+                    start: self.visible.len(),
+                    len: 0,
+                });
+                last = Some(label);
+            }
+            if let Some(g) = self.groups.last_mut() {
+                g.len += 1;
+            }
+            self.visible.push(i);
+        }
+    }
+
+    /// Whether any filter beyond the name box is narrowing the list.
+    pub(super) fn filters_active(&self) -> bool {
+        self.kind_filter != KindFilter::All
+            || self.date_filter != DateFilter::Any
+            || self.size_filter != SizeFilter::Any
+    }
+
+    /// Puts every filter back to showing everything.
+    pub(super) fn clear_filters(&mut self) {
+        self.kind_filter = KindFilter::All;
+        self.date_filter = DateFilter::Any;
+        self.size_filter = SizeFilter::Any;
+        self.recompute_visible();
     }
 
     pub(super) fn apply_sort(&mut self) {
@@ -993,11 +1343,17 @@ impl Rhumb {
 
     /// The selected paths, or the row under the cursor when nothing is selected.
     pub(super) fn target_paths(&self) -> Vec<PathBuf> {
-        if self.sel.is_empty() {
+        let mut paths: Vec<PathBuf> = if self.sel.is_empty() {
             self.cursor_path().into_iter().collect()
         } else {
             self.sel.iter().cloned().collect()
-        }
+        };
+        // A Recycle Bin item is not a file to copy, rename or trash: the only
+        // operations that apply to one are Restore and Delete permanently,
+        // which the menu offers instead. Dropping them here closes the keyboard
+        // routes (Del, Shift+Del, Ctrl+C, Ctrl+X) that never reach the menu.
+        paths.retain(|p| !crate::recycle::is_item(p));
+        paths
     }
 
     pub(super) fn select_all(&mut self) {
@@ -1010,4 +1366,119 @@ impl Rhumb {
     }
 
     // ---- opening files ---------------------------------------------------------
+}
+
+/// How many grid lines a group's items take: one row each in the list views,
+/// and as many rows of `cols` as the tiles need in the grid.
+fn group_rows(len: usize, grid: bool, cols: usize) -> usize {
+    if grid { len.div_ceil(cols.max(1)) } else { len }
+}
+
+/// The y offset of an item in the grouped layout, so scrolling to the cursor
+/// lands on it however many headers sit above it.
+fn grouped_item_offset(
+    groups: &[Group],
+    item: usize,
+    grid: bool,
+    cols: usize,
+    header_h: f32,
+    cell_h: f32,
+) -> f32 {
+    let mut y = 0.0f32;
+    for g in groups {
+        if item < g.start + g.len {
+            let k = item.saturating_sub(g.start);
+            let line = if grid { k / cols.max(1) } else { k };
+            return y + header_h + line as f32 * cell_h;
+        }
+        y += header_h + group_rows(g.len, grid, cols) as f32 * cell_h;
+    }
+    y
+}
+
+/// Paints one entry as a row or a tile and returns its response, so the caller
+/// can read clicks and the context menu. Shared by the flat and grouped
+/// layouts, and by every view.
+///
+/// `item` is the entry's index in the flat item list; it names the widget, so
+/// an id does not move when a header is inserted above it.
+#[allow(clippy::too_many_arguments)]
+fn paint_item(
+    ui: &mut Ui,
+    entry: &Entry,
+    item: usize,
+    cell: Rect,
+    grid: bool,
+    view: ViewMode,
+    layout: &RowLayout,
+    selected: bool,
+    name_w: f32,
+    thumb_px: u32,
+    pane: &'static str,
+    row_cache: &mut RowCache,
+    thumbs: &mut Thumbs,
+    drop_target: &mut Option<PathBuf>,
+) -> egui::Response {
+    let resp = ui.interact(
+        cell,
+        Id::new((pane, "row", item)),
+        Sense::click().union(Sense::drag()),
+    );
+    // A folder under the pointer is a drop target.
+    if entry.is_dir && resp.hovered() {
+        *drop_target = Some(entry.path.clone());
+    }
+    // The row is a selectable button whose name is the file's. The raw name is
+    // borrowed, not cloned, so naming every visible row costs nothing extra.
+    resp.widget_info(|| {
+        WidgetInfo::selected(WidgetType::Button, true, selected, entry.name.as_str())
+    });
+    if grid {
+        let name = row_cache.tile_name(ui, item, entry, name_w);
+        let thumb = if entry.is_dir {
+            None
+        } else {
+            thumbs.get(&entry.path, thumb_px)
+        };
+        // A decoded or shell-requested thumbnail is its own best icon; until
+        // one arrives, or when there is none, the icon the shell shows for the
+        // type stands in, and `paint_tile` draws a glyph if even that is
+        // missing.
+        let shell = if thumb.is_none() {
+            crate::shell_icons::entry_icon(entry, ui.ctx())
+        } else {
+            None
+        };
+        widgets::paint_tile(
+            ui,
+            entry,
+            cell,
+            selected,
+            resp.hovered(),
+            &name,
+            thumb.as_ref(),
+            shell.as_ref(),
+        );
+    } else {
+        // Views without columns never built a layout, so their icon and name
+        // rects were zero and every row painted at the panel's edge. Build one
+        // from the cell itself: only its x and width matter here.
+        let plain = RowLayout::new(cell, 0.0, 0.0);
+        let rl = if view.has_columns() { *layout } else { plain };
+        let room = (rl.name_limit() - rl.name.x).max(40.0);
+        let galleys: &widgets::RowGalleys = row_cache.get_or_build(ui, item, entry, room);
+        let shell = crate::shell_icons::entry_icon(entry, ui.ctx());
+        widgets::paint_row(
+            ui,
+            entry,
+            &rl,
+            cell,
+            selected,
+            resp.hovered(),
+            galleys,
+            view.has_columns(),
+            shell.as_ref(),
+        );
+    }
+    resp
 }

@@ -1,6 +1,7 @@
 //! The sidebar: Quick access, the drives and the folder tree.
 
 use super::*;
+use egui::{WidgetInfo, WidgetType};
 
 impl Rhumb {
     /// Adds a folder to Quick access, telling the user why if it cannot.
@@ -193,6 +194,8 @@ impl Rhumb {
             Vec2::new(width, sp::NAV_ROW),
             Sense::click().union(Sense::drag()),
         );
+        // A pinned folder is a selectable button named by its label.
+        resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, active, label));
         // The button that takes the folder off the list, on the right of the row and
         // only while the row is under the pointer. The room for it is kept whether it
         // is showing or not, so the name does not move when it appears.
@@ -201,6 +204,9 @@ impl Rhumb {
             Vec2::splat(20.0),
         );
         let x_resp = ui.interact(x_rect, Id::new(("unpin", path)), Sense::click());
+        x_resp.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::Button, true, "Remove from Quick access")
+        });
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
             if active {
@@ -295,6 +301,9 @@ impl Rhumb {
             Vec2::new(width, sp::NAV_ROW),
             Sense::click().union(Sense::drag()),
         );
+        // A tree row is a selectable button named by its label; a drive or folder
+        // is not distinguishable to a screen reader otherwise.
+        resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, active, label));
         if resp.hovered() && !is_device {
             self.drop_target = Some(path.to_path_buf());
         }

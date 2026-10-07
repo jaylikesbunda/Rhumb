@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use egui::{
     Color32, CornerRadius, FontId, Galley, Painter, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2,
+    WidgetInfo, WidgetType,
     epaint::text::{LayoutJob, TextWrapping},
 };
 
@@ -225,6 +226,10 @@ pub fn menu_item(
             );
         }
     }
+    // A painted row is invisible to a screen reader until it says what it is.
+    // `enabled` is used rather than `ui.is_enabled()` so a greyed-out item is
+    // announced as disabled.
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
     resp
 }
 
@@ -280,12 +285,19 @@ pub fn size_slider(ui: &mut Ui, rect: Rect, value: &mut f32) -> bool {
             if hot { c::ACCENT } else { c::TEXT },
         );
     }
+    // A slider, not a button: the role and the value both matter here.
+    let v = f64::from(*value);
+    resp.widget_info(|| WidgetInfo::slider(ui.is_enabled(), v, "Size of the items in the list"));
     resp.on_hover_text("Size of the items in the list");
     changed
 }
 
 /// An on/off switch: a pill with a knob that sits at the end that is chosen.
-pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
+///
+/// `label` is what a screen reader calls it. The pill is painted here, so
+/// nothing else would name it, and a switch with no name is a checkbox a reader
+/// cannot tell from the next one.
+pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(38.0, 20.0), Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -312,6 +324,10 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
             if *on { c::BG } else { c::TEXT_DIM },
         );
     }
+    // A checkbox to a screen reader, with its state: the role alone would leave
+    // whether it is on unsaid, and a switch that only says its name is a switch
+    // a reader has to click to understand.
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *on, label));
     resp
 }
 
@@ -346,6 +362,10 @@ pub fn segmented(ui: &mut Ui, options: &[&str], picked: usize) -> Option<usize> 
             ui.id().with(("segment", i, rect.min.x as i32)),
             Sense::click(),
         );
+        // Each choice is its own named, selected control.
+        resp.widget_info(|| {
+            WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), i == picked, *label)
+        });
         if i == picked {
             ui.painter().rect_filled(seg, CornerRadius::same(5), c::SEL);
         } else if resp.hovered() {
@@ -395,7 +415,9 @@ pub fn icon_toggle(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
         };
         icon.paint(painter, rect, color);
     }
-    resp.on_hover_text(tip)
+    let resp = resp.on_hover_text(tip);
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), tip));
+    resp
 }
 
 /// A square icon button with no chrome until hovered.
@@ -409,7 +431,9 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
         let color = if resp.hovered() { c::TEXT } else { c::TEXT_DIM };
         icon.paint(painter, rect, color);
     }
-    resp.on_hover_text(tip)
+    let resp = resp.on_hover_text(tip);
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), tip));
+    resp
 }
 
 /// A compact flat text button.
@@ -434,7 +458,10 @@ pub fn flat_button(ui: &mut Ui, label: &str, tip: &str) -> Response {
             if resp.hovered() { c::TEXT } else { c::TEXT_DIM },
         );
     }
-    resp.on_hover_text(tip)
+    let resp = resp.on_hover_text(tip);
+    // The visible label is the name; the tooltip is only the hint.
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+    resp
 }
 
 /// Column geometry for the file list, so every row lines up exactly.
@@ -654,6 +681,7 @@ impl RowCache {
 }
 
 /// Draws one tile of the large-icon view: a thumbnail or glyph, then the name.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_tile(
     ui: &Ui,
     entry: &Entry,
@@ -662,6 +690,7 @@ pub fn paint_tile(
     hovered: bool,
     name: &Arc<Galley>,
     thumb: Option<&egui::TextureHandle>,
+    shell: Option<&egui::TextureHandle>,
 ) {
     let painter = ui.painter();
     if selected {
@@ -699,21 +728,30 @@ pub fn paint_tile(
                 .paint_at(ui, target);
         }
         None => {
-            let color = if selected {
-                c::SEL_TEXT
-            } else if entry.is_dir {
-                c::TEXT
+            if let Some(tex) = shell {
+                // The shell's own picture, filling the art box exactly, so the
+                // grid keeps the same geometry as the glyph fallback.
+                let size = Vec2::splat(box_px);
+                egui::Image::new(tex)
+                    .fit_to_exact_size(size)
+                    .paint_at(ui, Rect::from_center_size(art.center(), size));
             } else {
-                c::TEXT_FAINT
-            };
-            // A folder glyph scaled up reads better than a tiny one.
-            let icon = Rect::from_center_size(art.center(), Vec2::splat(box_px * 0.7));
-            if entry.is_dir {
-                Icon::Folder.paint_large(painter, icon, color);
-            } else if crate::archive::kind_of(&entry.path).is_some() {
-                Icon::Glyph(egui_phosphor::regular::FILE_ZIP).paint_large(painter, icon, color);
-            } else {
-                Icon::File.paint_large(painter, icon, color);
+                let color = if selected {
+                    c::SEL_TEXT
+                } else if entry.is_dir {
+                    c::TEXT
+                } else {
+                    c::TEXT_FAINT
+                };
+                // A folder glyph scaled up reads better than a tiny one.
+                let icon = Rect::from_center_size(art.center(), Vec2::splat(box_px * 0.7));
+                if entry.is_dir {
+                    Icon::Folder.paint_large(painter, icon, color);
+                } else if crate::archive::kind_of(&entry.path).is_some() {
+                    Icon::Glyph(egui_phosphor::regular::FILE_ZIP).paint_large(painter, icon, color);
+                } else {
+                    Icon::File.paint_large(painter, icon, color);
+                }
             }
         }
     }
@@ -743,6 +781,7 @@ pub fn paint_row(
     hovered: bool,
     galleys: &RowGalleys,
     columns: bool,
+    shell: Option<&egui::TextureHandle>,
 ) {
     let painter = ui.painter();
     if selected {
@@ -772,7 +811,13 @@ pub fn paint_row(
     } else {
         c::TEXT_FAINT
     };
-    if entry.is_dir {
+    if let Some(tex) = shell {
+        // The shell's own picture, at the icon slot's size, so the row reads
+        // like Explorer without the layout moving.
+        egui::Image::new(tex)
+            .fit_to_exact_size(Vec2::splat(icon.height()))
+            .paint_at(ui, icon);
+    } else if entry.is_dir {
         Icon::Folder.paint(painter, icon, icon_color);
     } else if crate::archive::kind_of(&entry.path).is_some() {
         Icon::Glyph(egui_phosphor::regular::FILE_ZIP).paint(painter, icon, icon_color);
@@ -987,6 +1032,38 @@ pub fn list_header(
     }
 }
 
+/// A quiet heading over a group of rows or tiles in the file list.
+///
+/// Same voice as the sidebar and details section headers: small, upper-case and
+/// faint, with a hairline under it so the groups read as blocks.
+pub fn group_header(ui: &Ui, rect: Rect, label: &str) {
+    let painter = ui.painter();
+    let text = layout(ui, label.to_uppercase(), bold_font(10.0), c::TEXT_GHOST);
+    galley_at(
+        painter,
+        Pos2::new(rect.left() + sp::SM, rect.center().y - text.size().y * 0.5),
+        &text,
+        c::TEXT_GHOST,
+    );
+    painter.hline(
+        rect.left()..=rect.right(),
+        rect.max.y - 0.5,
+        Stroke::new(1.0, c::DIVIDER),
+    );
+}
+
+/// A quiet heading above a run of choices in a menu.
+pub fn menu_heading(ui: &mut Ui, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
+    let g = layout(ui, text.to_owned(), bold_font(10.0), c::TEXT_GHOST);
+    galley_at(
+        ui.painter(),
+        Pos2::new(rect.left() + 4.0, rect.center().y - g.size().y * 0.5),
+        &g,
+        c::TEXT_GHOST,
+    );
+}
+
 /// A clickable breadcrumb segment.
 pub fn breadcrumb_segment(ui: &mut Ui, label: &str, current: bool, max_width: f32) -> Response {
     let color = if current { c::TEXT } else { c::TEXT_DIM };
@@ -1005,6 +1082,8 @@ pub fn breadcrumb_segment(ui: &mut Ui, label: &str, current: bool, max_width: f3
             if resp.hovered() { c::ACCENT } else { color },
         );
     }
+    // A breadcrumb is a button that navigates; its segment label is its name.
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     resp
 }
 
@@ -1391,5 +1470,145 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 26.0));
         let l = RowLayout::new(rect, col::SIZE, col::DATE);
         assert!(col_limit(&l, col::DATE) >= col::MIN);
+    }
+
+    #[test]
+    fn the_group_and_menu_headings_draw_without_trouble() {
+        // These are painted from the list's grouped layout and the filter menu,
+        // which no other test opens, so they are drawn here directly.
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_max_size(vec2(300.0, 200.0));
+            menu_heading(ui, "Kind");
+            let (rect, _) = ui.allocate_exact_size(vec2(300.0, sp::SECTION), Sense::hover());
+            group_header(ui, rect, "Documents");
+        });
+        out.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn a_painted_button_names_itself_for_a_screen_reader() {
+        // A control egui did not paint itself is invisible to AccessKit until it
+        // is told its role and name. A click is the one moment egui turns the
+        // widget info into an observable event, so the test clicks the button and
+        // reads what came out: this is what proves the helper attaches the info
+        // at all, which no headless assertion on a painted pixel could.
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        let pos = Pos2::new(20.0, 20.0);
+        let frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_max_size(vec2(200.0, 100.0));
+                    let _ = icon_button(ui, Icon::Back, "Back");
+                },
+            )
+        };
+        // A widget only answers the pointer on the frame after it is drawn.
+        let mut out = frame(vec![]);
+        out.drop_without_applying_deltas();
+        // Press, then release: the release is the click.
+        out = frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]);
+        out.drop_without_applying_deltas();
+        out = frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]);
+        let info = out
+            .platform_output
+            .events
+            .iter()
+            .find_map(|e| match e {
+                egui::output::OutputEvent::Clicked(info) => Some(info.clone()),
+                _ => None,
+            })
+            .expect("clicking the button emitted no widget info");
+        out.drop_without_applying_deltas();
+        assert_eq!(info.typ, WidgetType::Button);
+        assert_eq!(info.label.as_deref(), Some("Back"));
+    }
+
+    #[test]
+    fn a_painted_switch_names_itself_and_says_whether_it_is_on() {
+        // A switch is painted here, so unlike a real `egui::Checkbox` it is
+        // invisible to AccessKit until it is told its role, name and state. A
+        // click is the moment egui turns that into an observable event, so the
+        // test clicks it and reads what came out.
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::fonts());
+        let pos = Pos2::new(20.0, 20.0);
+        let frame = |events: Vec<egui::Event>, on: &mut bool| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_max_size(vec2(200.0, 100.0));
+                    let _ = switch(ui, on, "Show hidden files");
+                },
+            )
+        };
+        let mut on = false;
+        let mut out = frame(vec![], &mut on);
+        out.drop_without_applying_deltas();
+        // Press, then release: the release is the click.
+        out = frame(
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            &mut on,
+        );
+        out.drop_without_applying_deltas();
+        out = frame(
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            &mut on,
+        );
+        let info = out
+            .platform_output
+            .events
+            .iter()
+            .find_map(|e| match e {
+                egui::output::OutputEvent::Clicked(info) => Some(info.clone()),
+                _ => None,
+            })
+            .expect("clicking the switch emitted no widget info");
+        out.drop_without_applying_deltas();
+        assert_eq!(info.typ, WidgetType::Checkbox);
+        assert_eq!(info.label.as_deref(), Some("Show hidden files"));
+        // The state is the one the click just chose.
+        assert_eq!(info.selected, Some(true));
     }
 }

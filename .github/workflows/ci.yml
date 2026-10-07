@@ -9,6 +9,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Everything except the exhaustive editor sweeps, which are the long pole. They
+  # run in their own job so the two halves run side by side instead of end to end.
   test:
     runs-on: windows-latest
     steps:
@@ -19,4 +21,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo test -- --skip codeedit::sweep
+
+  sweep:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test codeedit::sweep
+
+  # The app builds and runs on Linux too, through the portable code paths in
+  # `clip` and `instance`. winit/egui need system libraries the runner does not
+  # ship; the tests themselves run without a display.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install winit/egui system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - run: cargo check --all-targets
+      - run: cargo test -- --skip codeedit::sweep

@@ -1,6 +1,7 @@
 //! The status bar and the toasts.
 
 use super::*;
+use egui::{WidgetInfo, WidgetType};
 
 impl Rhumb {
     pub(super) fn status_ui(&mut self, ui: &mut Ui) {
@@ -75,8 +76,9 @@ impl Rhumb {
             right.as_ref().map(|(l, f)| (l.as_str(), *f)),
         );
 
-        // A running job gets a cancel affordance in the status bar.
+        // A running job gets a pause switch and a cancel affordance in the bar.
         let mut cancel_job = None;
+        let mut toggle_pause = None;
         if !self.jobs.is_empty() {
             let spot = Rect::from_min_max(
                 Pos2::new(rect.right() - 200.0, rect.top()),
@@ -87,8 +89,28 @@ impl Rhumb {
                     if widgets::flat_button(ui, "Cancel", "Stop this operation").clicked() {
                         cancel_job = self.jobs.first().map(|j| j.job.id);
                     }
+                    if let Some(j) = self.jobs.first()
+                        && j.pausable()
+                    {
+                        let (icon, tip) = if j.paused {
+                            (Icon::Glyph(egui_phosphor::regular::PLAY), "Resume")
+                        } else {
+                            (Icon::Glyph(egui_phosphor::regular::PAUSE), "Pause")
+                        };
+                        if widgets::icon_button(ui, icon, tip).clicked() {
+                            toggle_pause = Some(j.job.id);
+                        }
+                    }
                 });
             });
+        }
+        if let Some(id) = toggle_pause
+            && let Some(j) = self.jobs.iter_mut().find(|j| j.job.id == id)
+        {
+            j.paused = !j.paused;
+            j.job
+                .paused
+                .store(j.paused, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(id) = cancel_job
             && let Some(j) = self.jobs.iter_mut().find(|j| j.job.id == id)
@@ -107,20 +129,25 @@ impl Rhumb {
             right_x -= STATUS_CONTROLS_W;
         }
         if let Some(j) = self.jobs.first() {
-            let g = widgets::layout_elided(
-                ui,
-                j.current.clone(),
-                theme::ui_font(tfs::SMALL),
-                c::TEXT_GHOST,
-                150.0,
-            );
+            // What is being worked on now, plus the rate and time left once
+            // there is enough of both to say.
+            let mut text = j.current.clone();
+            let rate = ops::rate_eta_text(j.done_bytes, j.total_bytes, j.job.started.elapsed());
+            if !rate.is_empty() {
+                if !text.is_empty() {
+                    text.push_str("  \u{00B7}  ");
+                }
+                text.push_str(&rate);
+            }
+            let g =
+                widgets::layout_elided(ui, text, theme::ui_font(tfs::SMALL), c::TEXT_GHOST, 220.0);
             widgets::text_right(
                 painter,
                 Pos2::new(right_x, rect.center().y),
                 &g,
                 c::TEXT_GHOST,
             );
-            right_x -= 158.0;
+            right_x -= 228.0;
         }
         // Where the caret is, and how big the file is. The line and column come
         // first because they are the two numbers a reader is actually looking for
@@ -190,6 +217,35 @@ impl Rhumb {
             if (self.zoom - before).abs() > f32::EPSILON {
                 self.row_cache.clear();
             }
+            // The details pane's switch, to the left of the size slider, so the pane
+            // closed from its own header has a way back that is in plain sight.
+            let toggle = Rect::from_min_max(
+                Pos2::new(slider_rect.left() - 10.0 - seg_w, segs_rect.top()),
+                Pos2::new(slider_rect.left() - 10.0, segs_rect.bottom()),
+            );
+            let resp = ui.interact(toggle, Id::new("details-toggle"), Sense::click());
+            resp.widget_info(|| {
+                WidgetInfo::selected(WidgetType::Button, true, self.details, "Details pane")
+            });
+            if self.details || resp.hovered() {
+                ui.painter().rect_filled(
+                    toggle,
+                    CornerRadius::same(4),
+                    if self.details { c::SEL } else { c::HOVER },
+                );
+            }
+            Icon::Glyph(egui_phosphor::regular::SQUARE_HALF).paint(
+                ui.painter(),
+                toggle,
+                if self.details {
+                    c::SEL_TEXT
+                } else {
+                    c::TEXT_DIM
+                },
+            );
+            if resp.on_hover_text("Details pane (Alt+P)").clicked() {
+                self.details = !self.details;
+            }
             let mut picked = None;
             for (i, mode) in ViewMode::ALL.iter().enumerate() {
                 let seg = Rect::from_min_size(
@@ -197,8 +253,12 @@ impl Rhumb {
                     Vec2::new(seg_w, segs_rect.height()),
                 );
                 let resp = ui.interact(seg, Id::new(("view", mode.label())), Sense::click());
+                let active = *mode == self.view;
+                // The three view buttons are one selectable control each.
+                resp.widget_info(|| {
+                    WidgetInfo::selected(WidgetType::Button, true, active, mode.label())
+                });
                 if ui.is_rect_visible(seg) {
-                    let active = *mode == self.view;
                     if active || resp.hovered() {
                         ui.painter().rect_filled(
                             seg,

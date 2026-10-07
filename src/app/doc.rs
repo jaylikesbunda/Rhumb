@@ -398,6 +398,9 @@ impl Rhumb {
     /// `new_child`, not `scope_builder`: the latter advances its parent's
     /// cursor, which would push the second pane off the bottom of the panel.
     pub(super) fn split_ui(&mut self, ui: &mut Ui, rect: Rect) {
+        // Read the wheel before either pane's scroll area consumes it, so `sync_panes`
+        // can tell which pane the reader is scrolling.
+        self.wheel_this_frame = ui.input(|i| i.smooth_scroll_delta.y);
         let divider_w = 7.0f32;
         let usable = (rect.width() - divider_w).max(1.0);
         let left_w = split_left(usable, self.split);
@@ -458,37 +461,56 @@ impl Rhumb {
     /// line each of its blocks starts on, so it can say what line it is showing and be
     /// put at a given one. That holds still while the preview learns how tall its blocks
     /// really are, which a fraction of the way down does not.
+    ///
+    /// Which pane leads is taken from the scroll input and where the pointer is, not
+    /// from a change in position: learning a block's real height moves the preview's
+    /// reported line too, and reading that as a scroll made the two panes fight every
+    /// frame. The leader is kept until the reader scrolls the other pane; only the
+    /// follower is then corrected toward it.
     pub(super) fn sync_panes(&mut self, ui: &Ui) {
-        let ed = self.ed.scroll_line();
-        // The preview's own report of where it is runs behind while it is still making
-        // up for blocks that turned out taller or shorter than expected, so that is
-        // added in: read raw, it looked like the preview had been scrolled.
-        let off = self.preview_off + self.preview.pending_shift();
-        let pv = self.preview.line_at_y(off);
-        let ed_moved = (ed - self.sync_ed).abs() > 0.02;
-        let pv_moved = (pv - self.sync_pv).abs() > 0.02;
-        let over_preview = ui
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|p| self.preview_rect.contains(p));
-        if pv_moved && (over_preview || !ed_moved) {
-            // The preview is the one being scrolled: the editor follows it. At the very
-            // bottom of the preview the editor goes to its own bottom, since the two
-            // ends do not line up by lines.
-            self.editor_leads = false;
-            self.follow_preview(off, pv);
-            ui.ctx().request_repaint();
-        } else if ed_moved {
-            self.editor_leads = true;
-            self.align_preview_to_editor();
-            ui.ctx().request_repaint();
-        } else if self.panes_apart(off, ed, pv) {
-            // Neither was touched, but learning the real heights of blocks has moved the
-            // two apart: the one that was not scrolled last goes back to the other.
-            if self.editor_leads {
-                self.align_preview_to_editor();
-            } else {
-                self.follow_preview(off, pv);
+        // The wheel, or a drag, says which pane the reader is moving. A drag covers
+        // the scroll bar, which produces no wheel delta.
+        let (primary_down, pointer) =
+            ui.input(|i| (i.pointer.primary_down(), i.pointer.hover_pos()));
+        if (self.wheel_this_frame != 0.0 || primary_down)
+            && let Some(p) = pointer
+        {
+            if self.preview_rect.contains(p) {
+                self.editor_leads = false;
+            } else if self.editor_rect.contains(p) {
+                self.editor_leads = true;
             }
+        }
+
+        // The map is exact only once every block has been laid out; until then the
+        // preview is still settling and there is nothing to align to.
+        if !self.preview.laid_out() {
+            return;
+        }
+
+        let off = self.preview_off;
+        // Both at the bottom are at the same place whatever their lines, and there is
+        // nothing left to correct: without this the differing line numbers at the end
+        // would ask for a correction every frame.
+        let ed_end = self.ed.scroll_fraction() >= 0.999;
+        let pv_end = self.preview_range > 0.0 && off >= self.preview_range - 2.0;
+        if ed_end && pv_end {
+            return;
+        }
+
+        let ed = self.ed.scroll_line();
+        let pv = self.preview.line_at_y(off);
+        if self.editor_leads {
+            // The preview follows the editor. Its offset is recomputed from the line
+            // mapping each frame, so a block above the view changing height is already
+            // corrected by the mapping; `show` is told not to correct as well.
+            if self.panes_apart(off, ed, pv) || (pv - ed).abs() > 0.5 {
+                self.align_preview_to_editor();
+                ui.ctx().request_repaint();
+            }
+        } else if self.panes_apart(off, ed, pv) || (ed - pv).abs() > 0.5 {
+            // The editor follows the preview.
+            self.follow_preview(off, pv);
             ui.ctx().request_repaint();
         }
     }
@@ -514,8 +536,6 @@ impl Rhumb {
         } else {
             self.ed.set_scroll_line(pv);
         }
-        self.sync_pv = pv;
-        self.sync_ed = self.ed.scroll_line();
     }
 
     /// Puts the preview where the editor is.
@@ -527,12 +547,11 @@ impl Rhumb {
             self.preview.y_of_line(ed).min(self.preview_range)
         };
         self.preview_set = Some(y);
-        self.sync_ed = ed;
-        self.sync_pv = self.preview.line_at_y(y);
     }
 
     /// The code editor.
     pub(super) fn editor_ui(&mut self, ui: &mut Ui, rect: Rect) {
+        self.editor_rect = rect;
         // The wrapping toggle gives up the gutter, because a wrapped line has no
         // single row to put a number against. The toggle in the header says so.
         let Some(tab) = self.tabs.active_tab() else {
@@ -573,6 +592,14 @@ impl Rhumb {
         let tab = tabs.active_tab_mut().expect("checked above");
         let out = ed.show(ui, rect, &mut tab.doc.text, &opts);
         let focused = ed.focused();
+        // Let the window hand input-method events to the editor while it has the
+        // caret, and put the candidate window by the pane. The editor draws the
+        // preedit itself; without this the OS never sends one.
+        ui.ctx()
+            .send_viewport_cmd(ViewportCommand::IMEAllowed(focused));
+        if focused {
+            ui.ctx().send_viewport_cmd(ViewportCommand::IMERect(rect));
+        }
         if out.edited {
             // The buffer changed under us, so the Markdown preview is stale. It is
             // not brought up to date here: it catches up once typing pauses (see
@@ -652,6 +679,10 @@ impl Rhumb {
         self.preview
             .sync_in_background(ui.ctx(), &self.preview_buffer, version);
 
+        // The directory relative image paths resolve against.
+        let base = self
+            .doc()
+            .and_then(|d| d.path.parent().map(Path::to_path_buf));
         let indent = sp::LG;
         // The `Ui` we were handed is already anchored to `rect`, so the scroll
         // area simply fills it.
@@ -662,8 +693,14 @@ impl Rhumb {
         if let Some(y) = self.preview_set.take() {
             area = area.vertical_scroll_offset(y);
         }
+        let Self {
+            preview,
+            thumbs,
+            remote,
+            ..
+        } = self;
         let out = area.show(ui, |ui| {
-            let height = self.preview.show(ui, indent);
+            let height = preview.show_ctx(ui, indent, Some(thumbs), Some(remote), base.as_deref());
             ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), height + sp::XL),
                 Sense::hover(),

@@ -1,173 +1,118 @@
 """Generates the Rhumb icon set from a single vector description.
 
-Run:  python tools/make_icon.py
+Run:  python tools/make_icon.py        (needs Pillow: pip install pillow)
 
 Writes:
-  assets/icon.png   256x256 RGBA, for the window, AppImage and taskbar
-  assets/icon.ico   multi-size Windows icon for the installer and Explorer
-  assets/icon.svg   source of truth, for anyone who wants to edit it
+  assets/icon.png   256x256 RGBA, for the AppImage and anywhere a single PNG is wanted
+  assets/icon.ico   multi-size Windows icon for the window, installer and Explorer
+  assets/icon.svg   the same drawing as vector, for anyone who wants to edit it
 """
 
-import struct
-import zlib
+import io
+import math
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
 # ---- palette (matches src/theme.rs) ---------------------------------------
-BG = (0x0D, 0x0E, 0x10)
-ACCENT = (0xF6, 0xF7, 0xF8)
-DIM = (0x6A, 0x6E, 0x76)
+BG = (0x0D, 0x0E, 0x10, 255)
+FG = (0xF6, 0xF7, 0xF8, 255)
 
-S = 256  # supersample factor target size
-
-
-def rounded_rect_alpha(x, y, w, h, radius, px, py, samples=3):
-    """Coverage of a rounded rectangle at point (px, py), supersampled."""
-    hits = 0
-    for sy in range(samples):
-        for sx in range(samples):
-            fx = px + (sx + 0.5) / samples
-            fy = py + (sy + 0.5) / samples
-            if not (x <= fx <= x + w and y <= fy <= y + h):
-                continue
-            # Distance to the rounded corner, if in a corner region.
-            cx = min(max(fx, x + radius), x + w - radius)
-            cy = min(max(fy, y + radius), y + h - radius)
-            dx = fx - cx
-            dy = fy - cy
-            if dx * dx + dy * dy <= radius * radius:
-                hits += 1
-    return hits / (samples * samples)
+# ---- drawing, authored in a 256x256 space ---------------------------------
+PLATE_RADIUS = 56
+STROKE = 9.0
+# A closed folder outline: tab at the top left, sloping into the body.
+# Each vertex carries the radius its corner is rounded with.
+FOLDER = [
+    ((42, 68), 11),
+    ((106, 68), 5),
+    ((121, 88), 5),
+    ((214, 88), 11),
+    ((214, 194), 11),
+    ((42, 194), 11),
+]
+CROSS = [((102, 122), (154, 164)), ((154, 122), (102, 164))]
 
 
-def blend(dst, src, a):
-    return tuple(int(round(d + (s - d) * a)) for d, s in zip(dst, src))
+def weight_for(size):
+    """Strokes thicken at small sizes, or they dissolve into grey at 16 and 24."""
+    if size <= 16:
+        return 1.6
+    if size <= 24:
+        return 1.3
+    if size <= 32:
+        return 1.1
+    return 1.0
 
 
-def render(size=S, ss=3):
-    """Renders the icon: a dark rounded square, a folder outline, an X."""
+def rounded_path(corners, steps=10):
+    """Turns corner vertices with radii into a polyline with arcs at each one."""
+    pts = []
+    n = len(corners)
+    for i, (p, r) in enumerate(corners):
+        prev = corners[i - 1][0]
+        nxt = corners[(i + 1) % n][0]
+        v1 = (prev[0] - p[0], prev[1] - p[1])
+        v2 = (nxt[0] - p[0], nxt[1] - p[1])
+        l1 = math.hypot(*v1)
+        l2 = math.hypot(*v2)
+        u1 = (v1[0] / l1, v1[1] / l1)
+        u2 = (v2[0] / l2, v2[1] / l2)
+        angle = math.acos(max(-1.0, min(1.0, u1[0] * u2[0] + u1[1] * u2[1])))
+        # Distance back along each edge to where the arc starts.
+        t = min(r / math.tan(angle / 2), l1 / 2, l2 / 2)
+        rr = t * math.tan(angle / 2)
+        a = (p[0] + u1[0] * t, p[1] + u1[1] * t)
+        b = (p[0] + u2[0] * t, p[1] + u2[1] * t)
+        bis = (u1[0] + u2[0], u1[1] + u2[1])
+        bl = math.hypot(*bis)
+        d = rr / math.sin(angle / 2)
+        c = (p[0] + bis[0] / bl * d, p[1] + bis[1] / bl * d)
+        a0 = math.atan2(a[1] - c[1], a[0] - c[0])
+        a1 = math.atan2(b[1] - c[1], b[0] - c[0])
+        da = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
+        for s in range(steps + 1):
+            ang = a0 + da * s / steps
+            pts.append((c[0] + rr * math.cos(ang), c[1] + rr * math.sin(ang)))
+    return pts
+
+
+def stroke_line(draw, pts, width, closed=False):
+    """A polyline with round joins and caps."""
+    seq = pts + [pts[0]] if closed else pts
+    draw.line(seq, fill=FG, width=round(width), joint="curve")
+    r = width / 2
+    for x, y in (pts if closed else [pts[0], pts[-1]]):
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=FG)
+
+
+def render(size, weight=1.0):
+    ss = 16 if size <= 64 else 8
     n = size * ss
-    k = n / 256.0  # the drawing is authored in a 256x256 space
-    buf = [[(0, 0, 0, 0.0)] * n for _ in range(n)]
-    m = 6 * k  # margin
-    radius = 52 * k
+    k = n / 256.0
+    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, n - 1, n - 1), radius=PLATE_RADIUS * k, fill=BG)
 
-    # Panel plate.
-    for py in range(n):
-        for px in range(n):
-            a = rounded_rect_alpha(m, m, n - 2 * m, n - 2 * m, radius, px, py)
-            if a > 0:
-                buf[py][px] = (*BG, a)
-
-    def stroke(segments, width, color):
-        half = width * k / 2
-        for py in range(n):
-            for px in range(n):
-                best = 0.0
-                for (x1, y1), (x2, y2) in segments:
-                    # Distance from the pixel centre to the segment.
-                    vx, vy = x2 - x1, y2 - y1
-                    wx, wy = px + 0.5 - x1, py + 0.5 - y1
-                    seg = vx * vx + vy * vy
-                    t = 0.0 if seg == 0 else max(0.0, min(1.0, (wx * vx + wy * vy) / seg))
-                    dx = wx - t * vx
-                    dy = wy - t * vy
-                    d = (dx * dx + dy * dy) ** 0.5
-                    cov = max(0.0, min(1.0, half - d + 0.5))
-                    best = max(best, cov)
-                if best > 0:
-                    r, g, b, a = buf[py][px]
-                    buf[py][px] = (*blend((r, g, b), color, best), max(a, best))
-
-    def u(v):
-        return v * k
-
-    def poly(points):
-        """Converts a polyline into consecutive point pairs."""
-        return list(zip(points, points[1:]))
-
-    # Folder outline: tab, then body.
-    fx0, fy0, fx1, fy1 = u(58), u(84), u(198), u(180)
-    tab = [(fx0, fy0), (fx0 + 46, fy0), (fx0 + 60, fy0 + 22), (fx1, fy0 + 22)]
-    body = [(fx0, fy0), (fx0, fy1), (fx1, fy1), (fx1, fy0 + 22)]
-    stroke(poly(tab) + poly(body), 11, ACCENT)
-
-    # The X: two diagonals inside the folder.
-    cx0, cy0, cx1, cy1 = u(94), u(112), u(162), u(158)
-    stroke([((cx0, cy0), (cx1, cy1)), ((cx1, cy0), (cx0, cy1))], 13, ACCENT)
-
-    # Downsample the supersampled buffer.
-    out = bytearray()
-    for y in range(size):
-        out.append(0)  # PNG filter: none
-        for x in range(size):
-            r = g = b = a = 0.0
-            for j in range(ss):
-                for i in range(ss):
-                    pr, pg, pb, pa = buf[y * ss + j][x * ss + i]
-                    r += pr * pa
-                    g += pg * pa
-                    b += pb * pa
-                    a += pa
-            count = ss * ss
-            if a > 0:
-                r, g, b = r / a, g / a, b / a
-            a /= count
-            out += bytes((int(round(r)), int(round(g)), int(round(b)), int(round(a * 255))))
-    return bytes(out)
+    w = STROKE * weight * k
+    outline = [(x * k, y * k) for x, y in rounded_path(FOLDER)]
+    stroke_line(d, outline, w, closed=True)
+    for (x1, y1), (x2, y2) in CROSS:
+        stroke_line(d, [(x1 * k, y1 * k), (x2 * k, y2 * k)], w)
+    return img.resize((size, size), Image.LANCZOS)
 
 
-def write_png(path, size, raw):
-    def chunk(tag, data):
-        return (
-            struct.pack(">I", len(data))
-            + tag
-            + data
-            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-        )
+def svg():
+    def path(corners):
+        pts = rounded_path(corners, steps=6)
+        return "M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in pts) + " Z"
 
-    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
-    png = (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", header)
-        + chunk(b"IDAT", zlib.compress(raw, 9))
-        + chunk(b"IEND", b"")
-    )
-    Path(path).write_bytes(png)
-    return len(png)
-
-
-def write_ico(path, sizes, pngs):
-    """ICO with PNG-compressed entries (Windows Vista and later)."""
-    count = len(sizes)
-    header = struct.pack("<HHH", 0, 1, count)
-    offset = 6 + 16 * count
-    entries = b""
-    data = b""
-    for size, png in zip(sizes, pngs):
-        entries += struct.pack(
-            "<BBBBHHII",
-            0 if size >= 256 else size,
-            0 if size >= 256 else size,
-            0,
-            0,
-            1,
-            32,
-            len(png),
-            offset,
-        )
-        data += png
-        offset += len(png)
-    Path(path).write_bytes(header + entries + data)
-    return len(header + entries + data)
-
-
-SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <rect x="6" y="6" width="244" height="244" rx="52" fill="#0D0E10"/>
-  <g fill="none" stroke="#F6F7F8" stroke-width="11" stroke-linejoin="round">
-    <path d="M58 84 h46 l14 22 h80 v74 H58 Z"/>
-  </g>
-  <g fill="none" stroke="#F6F7F8" stroke-width="13" stroke-linecap="round">
-    <path d="M94 112 L162 158 M162 112 L94 158"/>
+    cross = " ".join(f"M{a[0]} {a[1]} L{b[0]} {b[1]}" for a, b in CROSS)
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="{PLATE_RADIUS}" fill="#0D0E10"/>
+  <g fill="none" stroke="#F6F7F8" stroke-width="{STROKE:g}" stroke-linejoin="round" stroke-linecap="round">
+    <path d="{path(FOLDER)}"/>
+    <path d="{cross}"/>
   </g>
 </svg>
 """
@@ -178,24 +123,20 @@ def main():
     assets = root / "assets"
     assets.mkdir(parents=True, exist_ok=True)
 
-    (assets / "icon.svg").write_text(SVG, encoding="utf-8")
+    (assets / "icon.svg").write_text(svg(), encoding="utf-8")
+    render(256).save(assets / "icon.png")
+    print("assets/icon.png  (256x256)")
 
-    full = render(256, ss=3)
-    n = write_png(assets / "icon.png", 256, full)
-    print(f"assets/icon.png  {n:>7,} bytes (256x256)")
-
-    sizes = [16, 24, 32, 48, 64, 128, 256]
-    pngs = []
-    for s in sizes:
-        ss = 3 if s <= 64 else 2
-        raw = render(s, ss=ss)
-        tmp = assets / f".icon_{s}.png"
-        write_png(tmp, s, raw)
-        pngs.append(tmp.read_bytes())
-    n = write_ico(assets / "icon.ico", sizes, pngs)
-    for s in sizes:
-        (assets / f".icon_{s}.png").unlink()
-    print(f"assets/icon.ico  {n:>7,} bytes ({', '.join(str(s) for s in sizes)})")
+    sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+    frames = [render(s, weight_for(s)) for s in sizes]
+    # Pillow writes a PNG-compressed ICO entry per size when given the frames.
+    frames[-1].save(
+        assets / "icon.ico",
+        format="ICO",
+        sizes=[(s, s) for s in sizes],
+        append_images=frames[:-1],
+    )
+    print(f"assets/icon.ico  ({', '.join(str(s) for s in sizes)})")
 
 
 if __name__ == "__main__":

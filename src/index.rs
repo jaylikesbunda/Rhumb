@@ -10,10 +10,16 @@
 //! The index is kept up to date by being told which folder changed
 //! ([`Index::rescan_dir`]), not by walking again.
 
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 
 use crate::fs_model::Entry;
 
@@ -24,6 +30,17 @@ pub const MAX_ENTRIES: usize = 2_000_000;
 pub const MAX_DEPTH: usize = 32;
 /// How many indexes are kept at once; the one used least recently makes room.
 pub const MAX_INDEXES: usize = 4;
+/// The version of the saved-index format. A file from any other version is
+/// ignored rather than guessed at.
+const INDEX_FORMAT: u32 = 1;
+/// The four bytes every saved index starts with.
+const MAGIC: &[u8] = b"RIDX";
+/// How long a saved index is trusted. After this the disk is walked again,
+/// because a cache that is a day old has missed too much to be believed.
+const INDEX_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Above this many names nothing is saved: an enormous tree is left to be
+/// walked again rather than kept in a file that could grow without bound.
+const MAX_PERSIST: usize = 1_000_000;
 
 /// One name in the index.
 #[derive(Clone, Debug)]
@@ -129,6 +146,15 @@ impl Index {
                 w.truncated = truncated;
                 w.built_at = Instant::now();
                 w.state = State::Ready;
+                // Save the finished names where the next launch will find them. The
+                // write lock is let go first so a search on the window thread is not
+                // held up while the file is compressed. A failure here only costs a
+                // walk next time, so it is ignored.
+                drop(w);
+                if let Ok(r) = inner.read() {
+                    let file = crate::app::index_cache_path(&root);
+                    let _ = write_snapshot(&file, &root, &r.entries, r.truncated);
+                }
             });
         if spawned.is_err() {
             // No thread to build on: an empty index that says so, rather than one that
@@ -323,6 +349,67 @@ impl Index {
         let mut w = self.inner.write().unwrap_or_else(|e| e.into_inner());
         w.entries.retain(|e| !e.path.starts_with(path));
     }
+
+    /// Writes this index to `file`, compressed. Errors are the caller's to
+    /// ignore: a cache that cannot be written only costs a walk next time.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn save_to(&self, file: &Path) -> io::Result<()> {
+        let r = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        write_snapshot(file, &self.root, &r.entries, r.truncated)
+    }
+
+    /// Reads a saved index back. `None` for a missing, corrupt, stale or foreign
+    /// file: the caller then walks the disk, so a bad cache is never fatal.
+    pub fn load_from(file: &Path) -> Option<Index> {
+        let f = File::open(file).ok()?;
+        let mut data = Vec::new();
+        GzDecoder::new(f).read_to_end(&mut data).ok()?;
+        let mut r = Reader::new(&data);
+        if r.take(4)? != MAGIC || r.u32()? != INDEX_FORMAT {
+            return None;
+        }
+        let built = r.u64()?;
+        if now_secs().saturating_sub(built) > INDEX_TTL.as_secs() {
+            return None;
+        }
+        let truncated = r.u8()? != 0;
+        let root = PathBuf::from(r.string()?);
+        let count = r.u32()? as usize;
+        // Every name needs at least a few bytes, so a count bigger than what is
+        // left is corrupt, and one past the limit is not ours.
+        if count > MAX_ENTRIES || count > r.remaining() {
+            return None;
+        }
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let path = PathBuf::from(r.string()?);
+            // The root in the header must be the one the names hang from. A file
+            // whose header and contents disagree is not trusted.
+            if !path.starts_with(&root) {
+                return None;
+            }
+            entries.push(IndexEntry {
+                path,
+                name: r.string()?,
+                lower: r.string()?,
+                is_dir: r.u8()? != 0,
+                size: r.u64()?,
+                modified: nanos_modified(r.u64()?),
+                depth: r.u16()?,
+            });
+        }
+        Some(Index {
+            root,
+            inner: Arc::new(RwLock::new(Inner {
+                entries,
+                state: State::Ready,
+                truncated,
+                built_at: Instant::now(),
+            })),
+            scanned: Arc::new(AtomicU64::new(count as u64)),
+            _guard: Arc::new(Guard(Arc::new(AtomicBool::new(false)))),
+        })
+    }
 }
 
 fn make_entry(entry: &walkdir::DirEntry) -> IndexEntry {
@@ -337,6 +424,143 @@ fn make_entry(entry: &walkdir::DirEntry) -> IndexEntry {
         modified: meta.as_ref().and_then(|m| m.modified().ok()),
         depth: entry.depth().saturating_sub(1) as u16,
     }
+}
+
+// ---- saving and loading -------------------------------------------------------
+
+/// Writes one index to `file`, compressed. The caller owns the timing: this runs
+/// on the build thread, so a large tree is saved without the window waiting.
+fn write_snapshot(
+    file: &Path,
+    root: &Path,
+    entries: &[IndexEntry],
+    truncated: bool,
+) -> io::Result<()> {
+    // An enormous tree is left to be walked again rather than kept in a file that
+    // could be as large as the tree itself.
+    if entries.len() > MAX_PERSIST {
+        return Ok(());
+    }
+    let Some(parent) = file.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent)?;
+    let mut out = Vec::with_capacity(entries.len().saturating_mul(48) + 64);
+    out.extend_from_slice(MAGIC);
+    put_u32(&mut out, INDEX_FORMAT);
+    put_u64(&mut out, now_secs());
+    put_u8(&mut out, u8::from(truncated));
+    put_str(&mut out, &root.to_string_lossy());
+    put_u32(&mut out, entries.len() as u32);
+    for e in entries {
+        put_str(&mut out, &e.path.to_string_lossy());
+        put_str(&mut out, &e.name);
+        put_str(&mut out, &e.lower);
+        put_u8(&mut out, u8::from(e.is_dir));
+        put_u64(&mut out, e.size);
+        put_u64(&mut out, modified_nanos(e.modified));
+        put_u16(&mut out, e.depth);
+    }
+    // Write beside the target and rename it into place, so a crash mid-write
+    // cannot leave a half-written file where a whole one used to be.
+    let tmp = file.with_extension("idx.tmp");
+    let f = File::create(&tmp)?;
+    let mut enc = GzEncoder::new(f, Compression::fast());
+    enc.write_all(&out)?;
+    enc.finish()?;
+    std::fs::rename(&tmp, file)
+}
+
+fn put_u8(out: &mut Vec<u8>, v: u8) {
+    out.push(v);
+}
+
+fn put_u16(out: &mut Vec<u8>, v: u16) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_u64(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// A length-prefixed UTF-8 string.
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    put_u32(out, s.len() as u32);
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// A cursor over the decompressed bytes of a snapshot. Every read is checked
+/// against what is left and returns `None` on a short file, so a truncated or
+/// corrupt snapshot is rejected rather than panicking.
+struct Reader<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(data: &'a [u8]) -> Reader<'a> {
+        Reader { data, at: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.at)
+    }
+
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.at.checked_add(n)?;
+        let slice = self.data.get(self.at..end)?;
+        self.at = end;
+        Some(slice)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn string(&mut self) -> Option<String> {
+        let len = self.u32()? as usize;
+        // A name is never as long as the whole file; refusing a wild length here
+        // stops a corrupt header from asking for a huge allocation.
+        if len > self.remaining() {
+            return None;
+        }
+        String::from_utf8(self.take(len)?.to_vec()).ok()
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// A modification time as nanoseconds since the epoch, or 0 for "no time".
+fn modified_nanos(t: Option<SystemTime>) -> u64 {
+    t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64)
+}
+
+fn nanos_modified(n: u64) -> Option<SystemTime> {
+    if n == 0 {
+        return None;
+    }
+    UNIX_EPOCH.checked_add(Duration::from_nanos(n))
 }
 
 /// How well a name fits the query, the lowest number being the best.
@@ -389,12 +613,43 @@ impl Indexes {
         } else {
             // A new, wider one makes any it covers redundant.
             self.list.retain(|x| !x.root.starts_with(dir));
-            self.list.push(Index::build(dir));
+            // A snapshot from the last session answers at once; otherwise the disk
+            // is walked on a thread of its own.
+            let index = Self::load_cached(dir).unwrap_or_else(|| Index::build(dir));
+            self.list.push(index);
             while self.list.len() > MAX_INDEXES {
                 self.list.remove(0);
             }
         }
         self.list.last().expect("just pushed")
+    }
+
+    /// The saved snapshot for `dir`, if a fresh one is on disk and its root is
+    /// the one asked for. Reading a file is far quicker than walking the tree it
+    /// describes, which is the whole point of keeping it.
+    pub fn load_cached(dir: &Path) -> Option<Index> {
+        let index = Index::load_from(&crate::app::index_cache_path(dir))?;
+        // The file is named for `dir`, but the root it says it holds is checked
+        // too, so a misplaced or renamed file is not mistaken for this one.
+        (index.root == dir).then_some(index)
+    }
+
+    /// Reads back the saved index for `dir` now, if there is one, so the first
+    /// search is answered at once. Unlike [`Indexes::ensure`] it never starts a
+    /// walk: on a first run there is nothing to read, and a folder is indexed
+    /// when it is actually needed.
+    pub fn load_ready(&mut self, dir: &Path) {
+        if self.any_for(dir).is_some() {
+            return;
+        }
+        if let Some(index) = Self::load_cached(dir) {
+            // A new, wider one makes any it covers redundant.
+            self.list.retain(|x| !x.root.starts_with(dir));
+            self.list.push(index);
+            while self.list.len() > MAX_INDEXES {
+                self.list.remove(0);
+            }
+        }
     }
 
     /// The index for `dir` if there is one that has finished.
@@ -939,5 +1194,179 @@ mod tests {
         assert_eq!(rank("reports.txt", &t("report"), "report"), 2);
         assert_eq!(rank("my-report.txt", &t("report"), "report"), 3);
         assert_eq!(rank("myreport.txt", &t("report"), "report"), 4);
+    }
+
+    // ---- saved between sessions ---------------------------------------------------
+
+    /// A file of its own for each test, so parallel tests never share one.
+    fn scratch(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "rhumb-index-file-{name}-{}.idx",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn gunzip(file: &Path) -> Vec<u8> {
+        let mut d = flate2::read::GzDecoder::new(File::open(file).unwrap());
+        let mut out = Vec::new();
+        d.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
+    /// Waits for the build thread to have written `cache`, which it does once the
+    /// walk is ready.
+    fn wait_saved(cache: &Path) -> bool {
+        for _ in 0..2000 {
+            if Index::load_from(cache).is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    #[test]
+    fn a_saved_index_round_trips_through_a_file() {
+        let root = tree("roundtrip");
+        let ix = Index::build(&root);
+        wait(&ix);
+        let file = scratch("roundtrip");
+        ix.save_to(&file).unwrap();
+        let loaded = Index::load_from(&file).expect("the file just written");
+        assert_eq!(loaded.root, ix.root);
+        assert_eq!(loaded.state(), State::Ready);
+        assert_eq!(loaded.truncated(), ix.truncated());
+        let a = ix.inner.read().unwrap_or_else(|e| e.into_inner());
+        let b = loaded.inner.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(a.entries.len(), b.entries.len());
+        for (x, y) in a.entries.iter().zip(&b.entries) {
+            assert_eq!(x.path, y.path);
+            assert_eq!(x.name, y.name);
+            assert_eq!(x.lower, y.lower);
+            assert_eq!(x.is_dir, y.is_dir);
+            assert_eq!(x.size, y.size);
+            assert_eq!(x.depth, y.depth);
+        }
+        drop(a);
+        drop(b);
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_corrupt_or_truncated_snapshot_is_ignored() {
+        let file = scratch("corrupt");
+        std::fs::write(&file, b"this is not a snapshot").unwrap();
+        assert!(Index::load_from(&file).is_none());
+        assert!(Index::load_from(&scratch("missing")).is_none(), "no file");
+
+        let root = tree("corrupt");
+        let ix = Index::build(&root);
+        wait(&ix);
+        ix.save_to(&file).unwrap();
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.truncate(bytes.len() / 2);
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(Index::load_from(&file).is_none(), "cut in half");
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_snapshot_with_the_wrong_version_or_root_is_rejected() {
+        let root = tree("reject");
+        let ix = Index::build(&root);
+        wait(&ix);
+        let file = scratch("reject");
+        ix.save_to(&file).unwrap();
+
+        // A version this build does not know is not guessed at.
+        let mut bytes = gunzip(&file);
+        bytes[4..8].copy_from_slice(&999u32.to_le_bytes());
+        std::fs::write(&file, gzip(&bytes)).unwrap();
+        assert!(Index::load_from(&file).is_none(), "another version");
+
+        // The root in the header must be the one the names hang from. The header
+        // is magic, version, timestamp, flag, then the length-prefixed root.
+        let mut bytes = gunzip(&file);
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let len = u32::from_le_bytes(bytes[17..21].try_into().unwrap()) as usize;
+        assert!(len > 0);
+        for b in &mut bytes[21..21 + len] {
+            *b = b'Z';
+        }
+        std::fs::write(&file, gzip(&bytes)).unwrap();
+        assert!(
+            Index::load_from(&file).is_none(),
+            "a root that is not theirs"
+        );
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fresh_snapshot_is_loaded_instead_of_walking_the_disk_again() {
+        let root = tree("load-cached");
+        let cache = crate::app::index_cache_path(&root);
+        let _ = std::fs::remove_file(&cache);
+        let ix = Index::build(&root);
+        wait(&ix);
+        // The build thread writes the snapshot once the walk is done; wait for it.
+        assert!(wait_saved(&cache), "the finished build was not saved");
+        drop(ix);
+        // A name the snapshot holds but the disk no longer does: only an index read
+        // back from the file can still find it.
+        std::fs::remove_file(root.join("src/main.rs")).unwrap();
+        let mut set = Indexes::default();
+        let loaded = set.ensure(&root).clone();
+        assert_eq!(loaded.state(), State::Ready, "the snapshot, not a walk");
+        assert!(set.ready_for(&root).is_some());
+        assert!(
+            loaded
+                .search(&root, "main.rs", 5)
+                .0
+                .iter()
+                .any(|e| e.name == "main.rs"),
+            "the names came from the cache"
+        );
+        let _ = std::fs::remove_file(&cache);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_warm_load_reads_a_snapshot_without_starting_a_walk() {
+        let root = tree("warm");
+        let cache = crate::app::index_cache_path(&root);
+        let _ = std::fs::remove_file(&cache);
+        let ix = Index::build(&root);
+        wait(&ix);
+        assert!(wait_saved(&cache), "the finished build was not saved");
+        drop(ix);
+        let mut set = Indexes::default();
+        set.load_ready(&root);
+        assert!(set.ready_for(&root).is_some(), "read without a walk");
+        // A folder with no snapshot is left alone, not started: loading is not
+        // indexing, and a first run must not walk a tree nobody asked about.
+        let other = tree("warm-missing");
+        let other_cache = crate::app::index_cache_path(&other);
+        let _ = std::fs::remove_file(&other_cache);
+        set.load_ready(&other);
+        assert!(
+            set.any_for(&other).is_none(),
+            "nothing to read, nothing started"
+        );
+        let _ = std::fs::remove_file(&cache);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&other);
     }
 }

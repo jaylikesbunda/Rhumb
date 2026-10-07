@@ -30,6 +30,36 @@ impl Rhumb {
                     Some(Dialog::Rename { path, name })
                 }
             }
+            Dialog::BatchRename {
+                paths,
+                pattern,
+                start,
+            } => {
+                let mut pattern = pattern;
+                let mut start = start;
+                let mut ok = false;
+                let mut cancel = false;
+                self.batch_rename_dialog(
+                    ctx,
+                    &paths,
+                    &mut pattern,
+                    &mut start,
+                    &mut ok,
+                    &mut cancel,
+                );
+                if ok {
+                    self.apply_batch_rename(&paths, &pattern, &start);
+                    None
+                } else if cancel {
+                    None
+                } else {
+                    Some(Dialog::BatchRename {
+                        paths,
+                        pattern,
+                        start,
+                    })
+                }
+            }
             Dialog::Create { dir, name, folder } => {
                 let mut name = name;
                 let mut ok = false;
@@ -120,6 +150,93 @@ impl Rhumb {
                     None
                 } else {
                     Some(Dialog::ConfirmDelete { paths })
+                }
+            }
+            Dialog::Collision {
+                mut ready,
+                mut conflicts,
+                dest_dir,
+                cut,
+                mut apply_all,
+            } => {
+                let src = conflicts[0].clone();
+                let name = display_name(&src);
+                let folder = src.is_dir();
+                let mut choice: Option<ConflictChoice> = None;
+                let mut cancel = false;
+                Modal::new(Id::new("collision"))
+                    .frame(theme::dialog_frame())
+                    .show(ctx, |ui| {
+                        ui.set_width(430.0);
+                        ui.label(format!(
+                            "\u{201C}{name}\u{201D} already exists in {}",
+                            dest_dir.display()
+                        ));
+                        ui.label(
+                            egui::RichText::new(if folder {
+                                "Replace merges into the folder that is there; Keep both puts a copy beside it."
+                            } else {
+                                "Replace overwrites the file that is there; Keep both puts a copy beside it."
+                            })
+                            .color(c::TEXT_FAINT)
+                            .size(theme::fs::SMALL),
+                        );
+                        ui.add_space(sp::MD);
+                        if conflicts.len() > 1 {
+                            ui.checkbox(
+                                &mut apply_all,
+                                format!("Do this for all {} remaining", conflicts.len()),
+                            );
+                            ui.add_space(sp::XS);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Replace").clicked() {
+                                choice = Some(ConflictChoice::Replace);
+                            }
+                            if ui.button("Skip").clicked() {
+                                choice = Some(ConflictChoice::Skip);
+                            }
+                            if ui.button("Keep both").clicked() {
+                                choice = Some(ConflictChoice::KeepBoth);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                if cancel {
+                    self.toast("Transfer cancelled".into());
+                    None
+                } else if let Some(choice) = choice {
+                    if apply_all {
+                        for src in conflicts.drain(..) {
+                            resolve_conflict(&mut ready, &dest_dir, src, choice);
+                        }
+                        self.finish_transfer(ready, cut);
+                        None
+                    } else {
+                        resolve_conflict(&mut ready, &dest_dir, conflicts.remove(0), choice);
+                        if conflicts.is_empty() {
+                            self.finish_transfer(ready, cut);
+                            None
+                        } else {
+                            Some(Dialog::Collision {
+                                ready,
+                                conflicts,
+                                dest_dir,
+                                cut,
+                                apply_all: false,
+                            })
+                        }
+                    }
+                } else {
+                    Some(Dialog::Collision {
+                        ready,
+                        conflicts,
+                        dest_dir,
+                        cut,
+                        apply_all,
+                    })
                 }
             }
             Dialog::Unsaved { path, close_app } => {
@@ -341,5 +458,170 @@ impl Rhumb {
                     out.response.request_focus();
                 }
             });
+    }
+
+    /// The batch-rename dialog: a pattern, a start number and a live preview of
+    /// the first few `old -> new` pairs, so the result is seen before it happens.
+    pub(super) fn batch_rename_dialog(
+        &mut self,
+        ctx: &Context,
+        paths: &[PathBuf],
+        pattern: &mut String,
+        start: &mut String,
+        ok: &mut bool,
+        cancelled: &mut bool,
+    ) {
+        let start_n: usize = start.trim().parse().unwrap_or(1);
+        Modal::new(Id::new("batch_rename"))
+            .frame(theme::dialog_frame())
+            .show(ctx, |ui| {
+                ui.set_width(480.0);
+                ui.label(egui::RichText::new(format!("Rename {} items", paths.len())).strong());
+                ui.add_space(sp::SM);
+
+                let field = |ui: &mut Ui, value: &mut String, id: &str, width: f32| {
+                    let out = TextEdit::singleline(value)
+                        .id(Id::new(id))
+                        .desired_width(width)
+                        .frame(
+                            Frame::new()
+                                .fill(c::CODE_BG)
+                                .stroke(Stroke::new(1.0, c::BORDER))
+                                .corner_radius(CornerRadius::same(sp::RADIUS))
+                                .inner_margin(Margin::symmetric(sp::SM_I, 6)),
+                        )
+                        .show(ui);
+                    // Keep the caret in whichever field is being typed in as
+                    // the dialog rebuilds itself every frame.
+                    if out.response.changed() {
+                        out.response.request_focus();
+                    }
+                };
+
+                ui.label(
+                    egui::RichText::new("Pattern")
+                        .color(c::TEXT_FAINT)
+                        .size(theme::fs::SMALL),
+                );
+                field(ui, pattern, "batch_rename_pattern", f32::INFINITY);
+
+                ui.add_space(sp::XS);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Start at")
+                            .color(c::TEXT_FAINT)
+                            .size(theme::fs::SMALL),
+                    );
+                    field(ui, start, "batch_rename_start", 64.0);
+                });
+                ui.add_space(sp::XS);
+                ui.label(
+                    egui::RichText::new(
+                        "Tokens: {name} the original name, {ext} the extension, \
+                         {n} a counter. {n:3} pads the counter to three digits.",
+                    )
+                    .color(c::TEXT_FAINT)
+                    .size(theme::fs::SMALL),
+                );
+
+                ui.add_space(sp::MD);
+                ui.label(
+                    egui::RichText::new("Preview")
+                        .color(c::TEXT_FAINT)
+                        .size(theme::fs::SMALL),
+                );
+                // Only a handful of pairs are drawn; a folder of thousands is
+                // still one short list in the dialog.
+                let mut all_valid = true;
+                for (i, p) in paths.iter().take(8).enumerate() {
+                    let stem = p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let ext = p
+                        .extension()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let new = fs_model::batch_name(pattern, &stem, &ext, start_n + i);
+                    let bad = fs_model::validate_name(new.trim()).is_err();
+                    all_valid &= !bad;
+                    ui.label(
+                        egui::RichText::new(format!("{}  \u{2192}  {}", display_name(p), new))
+                            .color(if bad { c::DANGER } else { c::TEXT_DIM })
+                            .size(theme::fs::SMALL),
+                    );
+                }
+                if paths.len() > 8 {
+                    ui.label(
+                        egui::RichText::new(format!("\u{2026} and {} more", paths.len() - 8))
+                            .color(c::TEXT_FAINT)
+                            .size(theme::fs::SMALL),
+                    );
+                }
+
+                ui.add_space(sp::MD);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(all_valid, egui::Button::new("Rename"))
+                        .clicked()
+                    {
+                        *ok = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        *cancelled = true;
+                    }
+                });
+            });
+    }
+}
+
+/// Puts one resolved conflict into the list of pairs to transfer: the destination
+/// name it keeps is the plain name for replace, and a fresh one for "keep both".
+fn resolve_conflict(
+    ready: &mut Vec<(PathBuf, PathBuf)>,
+    dest_dir: &Path,
+    src: PathBuf,
+    choice: ConflictChoice,
+) {
+    let Some(name) = src.file_name() else {
+        return;
+    };
+    let target = dest_dir.join(name);
+    match choice {
+        ConflictChoice::Replace => ready.push((src, target)),
+        ConflictChoice::Skip => {}
+        ConflictChoice::KeepBoth => ready.push((src, fs_model::unique_dest(&target))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn each_conflict_choice_picks_the_right_destination() {
+        let root = std::env::temp_dir().join(format!("rhumb-conflict-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (dst, other) = (root.join("dst"), root.join("other"));
+        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        // The name is taken at the destination.
+        fs::write(dst.join("a.txt"), b"old").unwrap();
+        let src = other.join("a.txt");
+        fs::write(&src, b"new").unwrap();
+
+        let mut ready = Vec::new();
+        resolve_conflict(&mut ready, &dst, src.clone(), ConflictChoice::Replace);
+        assert_eq!(ready, vec![(src.clone(), dst.join("a.txt"))]);
+
+        ready.clear();
+        resolve_conflict(&mut ready, &dst, src.clone(), ConflictChoice::Skip);
+        assert!(ready.is_empty(), "skip places nothing");
+
+        ready.clear();
+        resolve_conflict(&mut ready, &dst, src.clone(), ConflictChoice::KeepBoth);
+        assert_eq!(ready, vec![(src, dst.join("a (2).txt"))]);
+        let _ = fs::remove_dir_all(&root);
     }
 }

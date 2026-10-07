@@ -65,6 +65,12 @@ impl Rhumb {
         if let Some(v) = b("focus") {
             self.focus = v;
         }
+        if let Some(v) = b("dual") {
+            self.dual = v;
+        }
+        if let Some(v) = f("dual_split") {
+            self.dual_split = v.clamp(0.2, 0.8);
+        }
         if let Some(name) = map.get("sort") {
             self.sort = match *name {
                 "size" => SortKey::Size,
@@ -72,6 +78,18 @@ impl Rhumb {
                 "ext" => SortKey::Ext,
                 _ => SortKey::Name,
             };
+        }
+        if let Some(name) = map.get("group") {
+            self.group_by = GroupBy::from_key(name);
+        }
+        if let Some(name) = map.get("kind") {
+            self.kind_filter = KindFilter::from_key(name);
+        }
+        if let Some(name) = map.get("date") {
+            self.date_filter = DateFilter::from_key(name);
+        }
+        if let Some(name) = map.get("size") {
+            self.size_filter = SizeFilter::from_key(name);
         }
         if let Some(v) = map.get("col_size").and_then(|v| v.parse::<f32>().ok()) {
             self.col_size = v.clamp(theme::col::MIN, theme::col::MAX);
@@ -130,14 +148,19 @@ impl Rhumb {
             .collect();
         let body = format!(
             "sidebar={}\nsidebar_w={}\ndoc_w={}\nsplit={}\nsort={}\nascending={}\n\
+             group={}\nkind={}\ndate={}\nsize={}\n\
              show_hidden={}\nwrap={}\ncol_size={}\ncol_date={}\npreview_visible={}\nsync_scroll={}\nzoom={}\n\
-             view={}\ndetails={}\ncwd={}\nwindow={}\nfocus={}\n{pins}",
+             view={}\ndetails={}\ncwd={}\nwindow={}\nfocus={}\ndual={}\ndual_split={}\n{pins}",
             self.sidebar,
             self.sidebar_w,
             self.doc_w,
             self.split,
             sort_name(self.sort),
             self.ascending,
+            self.group_by.key(),
+            self.kind_filter.key(),
+            self.date_filter.key(),
+            self.size_filter.key(),
             self.show_hidden,
             self.wrap,
             self.col_size,
@@ -148,10 +171,12 @@ impl Rhumb {
             self.view.label(),
             self.details,
             self.cwd.to_string_lossy(),
-            self.focus,
             self.window_rect
                 .map(|[x, y, w, h]| format!("{x},{y},{w},{h}"))
                 .unwrap_or_else(|| "-".to_owned()),
+            self.focus,
+            self.dual,
+            self.dual_split,
         );
         if let Err(e) = std::fs::write(&dir, body) {
             log::warn!("cannot write prefs: {e}");
@@ -195,6 +220,7 @@ impl Rhumb {
             ("General", ph::SLIDERS_HORIZONTAL),
             ("Appearance", ph::PALETTE),
             ("Editor", ph::CODE),
+            ("About", ph::INFO),
         ];
         for (i, (label, glyph)) in sections.iter().enumerate() {
             let row = Rect::from_min_size(
@@ -281,7 +307,7 @@ impl Rhumb {
                     "List files and folders that are marked as hidden",
                     |ui| {
                         let mut on = self.show_hidden;
-                        if widgets::switch(ui, &mut on).changed() {
+                        if widgets::switch(ui, &mut on, "Show hidden files").changed() {
                             self.show_hidden = on;
                             self.request_listing();
                         }
@@ -293,7 +319,7 @@ impl Rhumb {
                     "A search looks in the folders below this one as well",
                     |ui| {
                         let mut on = self.scope == SearchScope::Below;
-                        if widgets::switch(ui, &mut on).changed() {
+                        if widgets::switch(ui, &mut on, "Search inside folders").changed() {
                             self.scope = if on {
                                 SearchScope::Below
                             } else {
@@ -308,7 +334,7 @@ impl Rhumb {
                     "Sidebar",
                     "The folder tree and Quick access at the left",
                     |ui| {
-                        widgets::switch(ui, &mut self.sidebar);
+                        widgets::switch(ui, &mut self.sidebar, "Sidebar");
                     },
                 );
                 setting_row(
@@ -316,7 +342,7 @@ impl Rhumb {
                     "Details pane",
                     "A preview and the properties of what is selected",
                     |ui| {
-                        widgets::switch(ui, &mut self.details);
+                        widgets::switch(ui, &mut self.details, "Details pane");
                     },
                 );
             }
@@ -350,13 +376,13 @@ impl Rhumb {
                     },
                 );
             }
-            _ => {
+            2 => {
                 setting_row(
                     &mut rows,
                     "Wrap long lines",
                     "Long lines continue on the next row instead of running off the side",
                     |ui| {
-                        widgets::switch(ui, &mut self.wrap);
+                        widgets::switch(ui, &mut self.wrap, "Wrap long lines");
                     },
                 );
                 setting_row(
@@ -364,7 +390,7 @@ impl Rhumb {
                     "Markdown preview",
                     "Show the rendered page beside a Markdown file",
                     |ui| {
-                        widgets::switch(ui, &mut self.preview_visible);
+                        widgets::switch(ui, &mut self.preview_visible, "Markdown preview");
                     },
                 );
                 setting_row(
@@ -373,7 +399,7 @@ impl Rhumb {
                     "The editor and the preview scroll together",
                     |ui| {
                         let mut on = self.sync_scroll;
-                        if widgets::switch(ui, &mut on).changed() {
+                        if widgets::switch(ui, &mut on, "Lock scrolling").changed() {
                             self.sync_scroll = on;
                             if on {
                                 self.align_preview_to_editor();
@@ -382,8 +408,71 @@ impl Rhumb {
                     },
                 );
             }
+            _ => about(&mut rows),
         }
     }
 
     // ---- dialogs -----------------------------------------------------------
+}
+
+/// Where the source lives, shown in the About section.
+const REPO_URL: &str = "https://github.com/jaylikesbunda/Rhumb";
+
+/// The app icon as a texture, decoded once and kept in the context.
+fn app_icon(ctx: &Context) -> Option<egui::TextureHandle> {
+    let id = Id::new("about-icon");
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(tex);
+    }
+    let png = include_bytes!("../../assets/icon.png");
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    let rgba = img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let tex = ctx.load_texture(
+        "about-icon",
+        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+        egui::TextureOptions::LINEAR,
+    );
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    Some(tex)
+}
+
+/// The About section: the icon, the name, the version and a link to the source.
+fn about(ui: &mut Ui) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        if let Some(tex) = app_icon(ui.ctx()) {
+            ui.add(egui::Image::new(&tex).fit_to_exact_size(Vec2::splat(72.0)));
+        }
+        ui.add_space(16.0);
+        ui.vertical(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Rhumb")
+                    .font(theme::bold_font(20.0))
+                    .color(c::TEXT),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                    .font(theme::ui_font(tfs::BODY))
+                    .color(c::TEXT_DIM),
+            );
+        });
+    });
+    ui.add_space(20.0);
+    let link = ui.add(
+        egui::Label::new(
+            egui::RichText::new("github.com/jaylikesbunda/Rhumb")
+                .font(theme::ui_font(tfs::BODY))
+                .color(c::TEXT),
+        )
+        .sense(Sense::click()),
+    );
+    if link
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
+        let _ = open::that(REPO_URL);
+    }
 }

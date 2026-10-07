@@ -41,31 +41,15 @@ impl Rhumb {
                     entries,
                     error,
                 } => {
-                    if token != self.req || path != self.cwd {
-                        continue;
+                    // The live pane first; a listing that is not its own may be
+                    // the parked pane's, which asked before it was parked.
+                    if token == self.req && path == self.cwd {
+                        self.apply_listing(entries, error);
+                        let cwd = self.cwd.clone();
+                        self.watch(&cwd);
+                    } else {
+                        self.deliver_second_listing(token, &path, entries, error);
                     }
-                    match error {
-                        Some(e) => {
-                            log::warn!("listing failed: {e}");
-                            self.entries.clear();
-                            self.visible.clear();
-                            self.listing = Listing::Failed;
-                        }
-                        None => {
-                            self.entries = entries;
-                            self.listed_at = Some(Instant::now());
-                            fs_model::sort(&mut self.entries, self.sort, self.ascending);
-                            self.listing = Listing::Ready;
-                            self.row_cache.clear();
-                            self.thumbs.clear();
-                            self.recompute_visible();
-                            if let Some(a) = self.restore_anchor.take() {
-                                self.anchor = a.min(self.visible.len().saturating_sub(1));
-                            }
-                        }
-                    }
-                    let cwd = self.cwd.clone();
-                    self.watch(&cwd);
                 }
                 Msg::Loaded {
                     path, doc, error, ..
@@ -157,6 +141,8 @@ impl Rhumb {
                         self.toast_err(msg.clone());
                     }
                     self.request_listing();
+                    // A transfer may have landed in the parked pane's folder.
+                    self.request_listing_for_second();
                     match outcome {
                         Outcome::Done { ok, failed } => {
                             if failed.is_empty() {
@@ -205,6 +191,15 @@ impl Rhumb {
                 } => {
                     self.thumbs.insert(path, px, rgba, w, h, ctx);
                 }
+                Msg::RemoteImage {
+                    url,
+                    px,
+                    rgba,
+                    w,
+                    h,
+                } => {
+                    self.remote.insert(url, px, rgba, w, h, ctx);
+                }
                 Msg::Measured { path, measure } => {
                     self.measures.set(path, measure);
                 }
@@ -225,6 +220,34 @@ impl Rhumb {
                     {
                         doc.check_external_change();
                     }
+                }
+            }
+        }
+    }
+
+    /// Applies a finished listing to the list state currently held in `self`,
+    /// whether that is the live pane or, after a swap, the parked one.
+    ///
+    /// Watching is deliberately not part of this: there is one watcher, and it
+    /// follows the live pane.
+    pub(super) fn apply_listing(&mut self, entries: Vec<Entry>, error: Option<String>) {
+        match error {
+            Some(e) => {
+                log::warn!("listing failed: {e}");
+                self.entries.clear();
+                self.visible.clear();
+                self.listing = Listing::Failed;
+            }
+            None => {
+                self.entries = entries;
+                self.listed_at = Some(Instant::now());
+                fs_model::sort(&mut self.entries, self.sort, self.ascending);
+                self.listing = Listing::Ready;
+                self.row_cache.clear();
+                self.thumbs.clear();
+                self.recompute_visible();
+                if let Some(a) = self.restore_anchor.take() {
+                    self.anchor = a.min(self.visible.len().saturating_sub(1));
                 }
             }
         }
@@ -313,6 +336,11 @@ impl Rhumb {
             self.recompute_visible();
             return;
         }
+        // The Recycle Bin is a root of its own; there is nothing above it, and
+        // the magic path has no real parent to step to. "This PC" is the same.
+        if crate::recycle::is_root(&self.cwd) || crate::this_pc::is_root(&self.cwd) {
+            return;
+        }
         let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf()) else {
             return;
         };
@@ -365,6 +393,13 @@ impl Rhumb {
 
     /// Watches one folder for changes, so external edits show up on their own.
     pub(super) fn watch(&mut self, path: &Path) {
+        // The Recycle Bin's magic path is not on any disk, so there is nothing
+        // to watch; its listing is refreshed by hand after a restore or delete.
+        // "This PC" is the same, and its drives refresh on the Roots worker's
+        // timer rather than through a watcher.
+        if crate::recycle::is_root(path) || crate::this_pc::is_root(path) {
+            return;
+        }
         // Nothing on the disk to watch inside an archive; the file itself is in the
         // folder above, which is watched when that is shown.
         if archive::is_virtual(path) {

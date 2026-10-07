@@ -124,15 +124,34 @@ impl Rhumb {
     }
 
     /// Kicks off a copy or move, recording it for undo.
+    ///
+    /// A destination name that is already taken is not silently renamed: the transfer
+    /// is held and the collision dialog asks what to do, so "replace" and "merge" are
+    /// reachable and the old never-overwrite behaviour is still one of the choices.
     pub(super) fn start_transfer(&mut self, sources: Vec<PathBuf>, dest: PathBuf, cut: bool) {
         if sources.is_empty() {
             return;
         }
-        if archive::is_virtual(&dest) {
-            self.toast("Archives are read-only: extract them to change anything".into());
+        let mut sources = sources;
+        if let Some(inside) = archive::split(&dest) {
+            // A zip can be written into, the way Explorer edits a compressed
+            // folder; every other archive stays read-only. A cut into one is a
+            // copy: the source stays where it was, which is what Explorer does.
+            if archive::kind_of(&inside.archive) != Some(archive::Kind::Zip) {
+                self.toast("Archives are read-only: extract them to change anything".into());
+                return;
+            }
+            // Something inside an archive has to be brought out before it can go
+            // into another one.
+            if sources.iter().any(|p| archive::is_virtual(p)) {
+                let Some(real) = self.materialized(sources) else {
+                    return;
+                };
+                sources = real;
+            }
+            self.start_add_to_zip(inside.archive, inside.inner, sources);
             return;
         }
-        let mut sources = sources;
         if sources.iter().any(|p| archive::is_virtual(p)) {
             if cut {
                 self.toast("Archives are read-only: copy out of one, do not move".into());
@@ -143,35 +162,71 @@ impl Rhumb {
             };
             sources = real;
         }
-        // Work out where everything lands so undo knows the reverse mapping.
-        let mut pairs = Vec::with_capacity(sources.len());
-        for src in &sources {
+        let dest_norm = fs_model::normalize(&dest);
+        let mut ready = Vec::with_capacity(sources.len());
+        let mut conflicts = Vec::new();
+        for src in sources {
             let Some(name) = src.file_name() else {
                 continue;
             };
-            // Never overwrite: a colliding name gets " (2)" and friends.
+            // Copying or moving a folder into itself would recurse forever.
+            if src.is_dir() && dest_norm.starts_with(fs_model::normalize(&src)) {
+                self.toast_err(format!("Cannot copy {} into itself", display_name(&src)));
+                continue;
+            }
             let target = dest.join(name);
-            let target = if target == *src || target.exists() {
-                fs_model::unique_dest(&target)
+            if target == src || target.exists() {
+                conflicts.push(src);
             } else {
-                target
+                ready.push((src, target));
+            }
+        }
+        if conflicts.is_empty() {
+            self.finish_transfer(ready, cut);
+        } else {
+            self.dialog = Dialog::Collision {
+                ready,
+                conflicts,
+                dest_dir: dest,
+                cut,
+                apply_all: false,
             };
-            pairs.push((src.clone(), target));
         }
-        if pairs.is_empty() {
-            return;
-        }
+    }
+
+    /// Adds files into the open zip, on a worker; the finished message refreshes
+    /// the listing. Nothing is recorded for undo: an archive rewrite has no
+    /// simple inverse once it has happened.
+    fn start_add_to_zip(&mut self, archive: PathBuf, inner: String, sources: Vec<PathBuf>) {
         let id = self.ids.next();
-        let from: Vec<PathBuf> = pairs.iter().map(|(s, _)| s.clone()).collect();
-        let to: Vec<PathBuf> = pairs.iter().map(|(_, t)| t.clone()).collect();
-        let job = ops::start_transfer_pairs(self.tx.clone(), id, pairs.clone(), cut);
-        let _ = from;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = ops::start_add_to_zip(self.tx.clone(), id, archive, inner, sources, cancel);
         self.jobs.push(ActiveJob {
             done_items: 0,
             total_items: 0,
             done_bytes: 0,
             total_bytes: 0,
             current: String::new(),
+            paused: false,
+            job,
+        });
+    }
+
+    /// Starts a transfer whose destinations are all decided, recording it for undo.
+    pub(super) fn finish_transfer(&mut self, pairs: Vec<(PathBuf, PathBuf)>, cut: bool) {
+        if pairs.is_empty() {
+            return;
+        }
+        let id = self.ids.next();
+        let to: Vec<PathBuf> = pairs.iter().map(|(_, t)| t.clone()).collect();
+        let job = ops::start_transfer_pairs(self.tx.clone(), id, pairs.clone(), cut);
+        self.jobs.push(ActiveJob {
+            done_items: 0,
+            total_items: 0,
+            done_bytes: 0,
+            total_bytes: 0,
+            current: String::new(),
+            paused: false,
             job,
         });
         self.pending_undo = Some(if cut {
@@ -268,6 +323,7 @@ impl Rhumb {
             done_bytes: 0,
             total_bytes: 0,
             current: String::new(),
+            paused: false,
             job,
         });
         self.pending_undo = Some(Undo::Created(Vec::new()));
@@ -298,6 +354,7 @@ impl Rhumb {
             done_bytes: 0,
             total_bytes: 0,
             current: String::new(),
+            paused: false,
             job,
         });
         self.pending_undo = Some(Undo::Created(vec![dest]));
@@ -324,7 +381,18 @@ impl Rhumb {
             return;
         }
         if paths.iter().any(|p| archive::is_virtual(p)) {
-            self.toast("Archives are read-only: extract them to change anything".into());
+            // Deleting from a zip rewrites the archive. A non-zip archive stays
+            // read-only, and there is no recycle bin inside one, so both delete
+            // routes take a zip entry out at once.
+            let all_zips = paths.iter().all(|p| {
+                archive::split(p)
+                    .is_some_and(|i| archive::kind_of(&i.archive) == Some(archive::Kind::Zip))
+            });
+            if all_zips {
+                self.start_remove_from_zip(paths);
+            } else {
+                self.toast("Archives are read-only: extract them to change anything".into());
+            }
             return;
         }
         if permanent {
@@ -342,6 +410,37 @@ impl Rhumb {
         }
     }
 
+    /// Takes entries out of the zip(s) holding them, one worker per archive, and
+    /// lets the finished message refresh the listing. There is no undo for an
+    /// archive edit: the old bytes are gone once the archive is rewritten.
+    fn start_remove_from_zip(&mut self, paths: Vec<PathBuf>) {
+        let mut by_archive: std::collections::BTreeMap<PathBuf, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for p in paths {
+            if let Some(inside) = archive::split(&p) {
+                by_archive
+                    .entry(inside.archive)
+                    .or_default()
+                    .push(inside.inner);
+            }
+        }
+        for (archive, entries) in by_archive {
+            let id = self.ids.next();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let job = ops::start_remove_from_zip(self.tx.clone(), id, archive, entries, cancel);
+            self.jobs.push(ActiveJob {
+                done_items: 0,
+                total_items: 0,
+                done_bytes: 0,
+                total_bytes: 0,
+                current: String::new(),
+                paused: false,
+                job,
+            });
+        }
+        self.sel.clear();
+    }
+
     pub(super) fn start_permanent_delete(&mut self, paths: Vec<PathBuf>) {
         let id = self.ids.next();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -352,6 +451,7 @@ impl Rhumb {
             done_bytes: 0,
             total_bytes: 0,
             current: String::new(),
+            paused: false,
             job,
         });
         self.pending_undo = Some(Undo::Created(paths));
@@ -398,6 +498,266 @@ impl Rhumb {
                 self.request_listing();
             }
             Err(e) => self.toast_err(format!("Rename failed: {e}")),
+        }
+    }
+
+    /// Opens the batch-rename dialog for a whole selection. A selection of one
+    /// keeps the single-file dialog, which is what F2 on one item has always
+    /// done; anything that cannot be renamed on disk is dropped first.
+    pub(super) fn start_batch_rename(&mut self, paths: Vec<PathBuf>) {
+        let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        if self.refuse_in_archive(&refs) {
+            return;
+        }
+        let mut paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| !crate::recycle::is_item(p))
+            .collect();
+        // One item is the ordinary rename, not a one-line batch.
+        if paths.len() == 1 {
+            self.start_rename(&paths[0]);
+            return;
+        }
+        if paths.is_empty() {
+            return;
+        }
+        // A stable order, so the counter runs down the list the way the reader
+        // sees it rather than in whatever order a hash set hands the paths over.
+        paths.sort();
+        self.dialog = Dialog::BatchRename {
+            paths,
+            pattern: "{name}".to_owned(),
+            start: "1".to_owned(),
+        };
+    }
+
+    /// Renames a whole selection at once from a pattern.
+    ///
+    /// Two phases, because one pass can fail on itself: renaming `1.txt` to
+    /// `2.txt` while `2.txt` is still there either fails or clobbers it. Every
+    /// source is moved to a temporary name of its own first, which empties the
+    /// way, and only then is each put under its final name. A name that is
+    /// already taken by something outside the batch, or a bad one, is skipped
+    /// and reported rather than written over.
+    pub(super) fn apply_batch_rename(
+        &mut self,
+        paths: &[PathBuf],
+        pattern: &str,
+        start_text: &str,
+    ) {
+        let start: usize = start_text.trim().parse().unwrap_or(1);
+        let mut paths: Vec<PathBuf> = paths.to_vec();
+        paths.sort();
+
+        let mut problems: Vec<String> = Vec::new();
+        let mut plans: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        for (i, src) in paths.iter().enumerate() {
+            let Some(parent) = src.parent() else { continue };
+            let stem = src
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let ext = src
+                .extension()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let name = fs_model::batch_name(pattern, &stem, &ext, start + i);
+            let name = name.trim().to_owned();
+            if let Err(msg) = fs_model::validate_name(&name) {
+                problems.push(format!("{}: {msg}", display_name(src)));
+                continue;
+            }
+            let target = parent.join(&name);
+            let target_norm = fs_model::normalize(&target);
+            if target_norm == fs_model::normalize(src) {
+                continue;
+            }
+            if !seen.insert(target_norm.clone()) {
+                problems.push(format!(
+                    "{}: {name} is used more than once",
+                    display_name(src)
+                ));
+                continue;
+            }
+            plans.push((src.clone(), target));
+        }
+        // A target that is already on disk is fine only when what sits there is
+        // another member of the batch that is about to move out of the way.
+        // Anything else would be overwritten by the second phase, so it is
+        // skipped and reported instead. Dropping one plan can leave another
+        // without its swap partner, so this repeats until nothing more falls
+        // away. A member that turned out to be unchanged still counts as an
+        // obstacle here rather than as a swap.
+        loop {
+            let moving: HashSet<PathBuf> =
+                plans.iter().map(|(s, _)| fs_model::normalize(s)).collect();
+            let before = plans.len();
+            let mut kept: Vec<(PathBuf, PathBuf)> = Vec::new();
+            for (src, target) in plans.drain(..) {
+                if target.exists() && !moving.contains(&fs_model::normalize(&target)) {
+                    problems.push(format!(
+                        "{}: {} already exists",
+                        display_name(&src),
+                        display_name(&target)
+                    ));
+                    continue;
+                }
+                kept.push((src, target));
+            }
+            plans = kept;
+            if plans.len() == before {
+                break;
+            }
+        }
+        if plans.is_empty() {
+            if problems.is_empty() {
+                self.toast("Nothing to rename".into());
+            } else {
+                self.toast_err(format!("Rename failed: {}", problems.join("; ")));
+            }
+            return;
+        }
+
+        // Phase one: out of the way. The temporary name carries the process id
+        // and the item's place so no two of them are alike, and `unique_dest`
+        // guards even against a real file already under that name.
+        let mut staged: Vec<(PathBuf, PathBuf, PathBuf)> = Vec::new();
+        for (i, (src, target)) in plans.iter().enumerate() {
+            let Some(parent) = src.parent() else { continue };
+            let tmp = fs_model::unique_dest(
+                &parent.join(format!(".rhumb-rename-{}-{i}", std::process::id())),
+            );
+            if let Err(e) = std::fs::rename(src, &tmp) {
+                problems.push(format!("{}: {e}", display_name(src)));
+                // Whatever already moved goes back, so a failure leaves nothing
+                // sitting under a temporary name.
+                for (moved, _, back) in staged.iter().rev() {
+                    let _ = std::fs::rename(moved, back);
+                }
+                self.toast_err(format!("Rename failed: {}", problems.join("; ")));
+                return;
+            }
+            staged.push((tmp, target.clone(), src.clone()));
+        }
+
+        // Phase two: to the final name. A failure here puts the rest of the
+        // staged items back too, for the same reason.
+        let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (i, (tmp, target, original)) in staged.iter().enumerate() {
+            match std::fs::rename(tmp, target) {
+                Ok(()) => {
+                    if let Some(doc) = self.doc_mut()
+                        && doc.path == *original
+                    {
+                        doc.path = target.clone();
+                    }
+                    renamed.push((original.clone(), target.clone()));
+                }
+                Err(e) => {
+                    problems.push(format!("{}: {e}", display_name(original)));
+                    let _ = std::fs::rename(tmp, original);
+                    for (rest, _, back) in staged.iter().skip(i + 1).rev() {
+                        let _ = std::fs::rename(rest, back);
+                    }
+                    break;
+                }
+            }
+        }
+        if renamed.is_empty() {
+            self.toast_err(format!("Rename failed: {}", problems.join("; ")));
+            return;
+        }
+        self.undo = Some(Undo::RenamedBatch(renamed.clone()));
+        self.undo_stack.push(self.undo.clone().expect("just set"));
+        // The renamed items are the selection now, and the listing catches up.
+        self.sel = renamed.iter().map(|(_, to)| to.clone()).collect();
+        self.request_listing();
+        if problems.is_empty() {
+            self.toast(format!("Renamed {} item(s)", renamed.len()));
+        } else {
+            self.toast_err(format!(
+                "Renamed {} item(s); skipped {}",
+                renamed.len(),
+                problems.join("; ")
+            ));
+        }
+    }
+
+    /// Makes a symbolic link beside `path`, named `<name> - link`, pointing at
+    /// it. On Windows this needs Developer Mode or an elevated window; a refusal
+    /// is reported as a toast, never a panic.
+    pub(super) fn create_symlink(&mut self, path: &Path) {
+        if self.refuse_in_archive(&[path]) || crate::recycle::is_item(path) {
+            return;
+        }
+        let Some(parent) = path.parent() else { return };
+        let Some(name) = path.file_name() else { return };
+        let target =
+            fs_model::unique_dest(&parent.join(format!("{} - link", name.to_string_lossy())));
+        let is_dir = path.is_dir();
+        #[cfg(windows)]
+        let made = if is_dir {
+            std::os::windows::fs::symlink_dir(path, &target)
+        } else {
+            std::os::windows::fs::symlink_file(path, &target)
+        };
+        #[cfg(not(windows))]
+        let made = {
+            let _ = is_dir;
+            std::os::unix::fs::symlink(path, &target)
+        };
+        match made {
+            Ok(()) => {
+                self.toast(format!("Created link {}", display_name(&target)));
+                self.request_listing();
+            }
+            Err(e) => self.toast_err(format!(
+                "Could not create the link: {e}. On Windows a symbolic link needs Developer Mode or an elevated window."
+            )),
+        }
+    }
+
+    /// Makes a directory junction beside a folder, named `<name> - link`.
+    /// Junctions are a Windows thing, and `mklink /J` normally needs no
+    /// privilege, so this is the link that works on a locked-down machine.
+    #[cfg(windows)]
+    pub(super) fn create_junction(&mut self, path: &Path) {
+        if self.refuse_in_archive(&[path]) || crate::recycle::is_item(path) {
+            return;
+        }
+        if !path.is_dir() {
+            self.toast_err("A junction can only point at a folder".into());
+            return;
+        }
+        let Some(parent) = path.parent() else { return };
+        let Some(name) = path.file_name() else { return };
+        let target =
+            fs_model::unique_dest(&parent.join(format!("{} - link", name.to_string_lossy())));
+        // `mklink` is a `cmd` builtin, not an executable, so it has to run
+        // inside a shell. The output is captured so a refusal can be shown.
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&target)
+            .arg(path)
+            .output();
+        match made {
+            Ok(out) if out.status.success() => {
+                self.toast(format!("Created junction {}", display_name(&target)));
+                self.request_listing();
+            }
+            Ok(out) => {
+                let msg = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                let msg = if msg.is_empty() {
+                    "mklink refused".to_owned()
+                } else {
+                    msg
+                };
+                self.toast_err(format!("Could not create the junction: {msg}"));
+            }
+            Err(e) => self.toast_err(format!("Could not create the junction: {e}")),
         }
     }
 
@@ -460,6 +820,20 @@ impl Rhumb {
                     && doc.path == to
                 {
                     doc.path = from;
+                }
+                self.toast("Undo: rename reverted".into());
+            }
+            Undo::RenamedBatch(items) => {
+                // Backwards, so a swap unwinds without the second move landing
+                // on the first: the last item returns first.
+                for (from, to) in items.iter().rev() {
+                    if let Err(e) = std::fs::rename(to, from) {
+                        problems.push(format!("{}: {e}", display_name(to)));
+                    } else if let Some(doc) = self.doc_mut()
+                        && doc.path == *to
+                    {
+                        doc.path = from.clone();
+                    }
                 }
                 self.toast("Undo: rename reverted".into());
             }

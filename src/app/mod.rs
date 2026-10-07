@@ -31,7 +31,7 @@ use crate::archive;
 use crate::codeedit;
 use crate::editing;
 use crate::editor::{self, Doc, DocKind};
-use crate::fs_model::{self, Entry, SortKey};
+use crate::fs_model::{self, DateFilter, Entry, GroupBy, KindFilter, SizeFilter, SortKey};
 use crate::markdown::Preview;
 use crate::ops::{self, Clipboard};
 use crate::search::{self, Search};
@@ -40,7 +40,7 @@ use crate::thumbs::{self, Thumbs};
 use crate::tree::{self, Tree};
 use crate::typeahead::{self, TypeAhead};
 use crate::widgets::{self, Icon, RowCache, RowLayout, ViewMode};
-use crate::workers::{self, Ids, Job, Msg, Outcome};
+use crate::workers::{self, Ids, Job, Msg, OpKind, Outcome};
 
 /// How long to wait after the last keystroke before re-rendering Markdown.
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
@@ -53,9 +53,9 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const WATCH_COOLDOWN: Duration = Duration::from_millis(1500);
 /// How long a toast stays on screen.
 const TOAST_TTL: Duration = Duration::from_secs(4);
-/// The width the status bar keeps at its right end for the size slider and the three
-/// view buttons.
-const STATUS_CONTROLS_W: f32 = 200.0;
+/// The width the status bar keeps at its right end for the details switch, the size
+/// slider and the three view buttons.
+const STATUS_CONTROLS_W: f32 = 236.0;
 /// How wide the sidebar starts, wide enough for a drive's name and what is free on it.
 const SIDEBAR_DEFAULT: f32 = 256.0;
 /// What it used to start at. A saved width of exactly this was never dragged there, so
@@ -83,7 +83,10 @@ const PIN_GAP: f32 = 6.0;
 /// Most folders Quick access will hold, and so the most `pinN=` lines in prefs.
 const MAX_PINS: usize = 24;
 const ID_TITLE_DRAG: &str = "title_drag";
+/// Widget-id salt of the live file list. The parked second list uses a salt of
+/// its own, or the two panes' rows, headers and scroll areas would share ids.
 const ID_LIST: &str = "file_list";
+const ID_LIST_SECOND: &str = "file_list_second";
 const ID_COL_SIZE: &str = "col_size";
 const ID_COL_DATE: &str = "col_date";
 const ID_SEARCH: &str = "search_box";
@@ -93,6 +96,17 @@ enum Listing {
     Loading,
     Ready,
     Failed,
+}
+
+/// One headed group in the file list: its label and the run of items under it.
+///
+/// `start` indexes `visible`, and the header is drawn immediately before that
+/// item. Groups are only used to lay the list out; the item list itself stays
+/// flat so selection, counts and keyboard movement never see a header.
+pub(super) struct Group {
+    pub label: String,
+    pub start: usize,
+    pub len: usize,
 }
 
 /// What a folder tab remembers about where it was, for when it is come back to: the
@@ -112,6 +126,67 @@ struct FolderView {
 
 /// The most tabs there can be at once.
 const MAX_TABS: usize = 24;
+
+/// A whole folder list parked while the other pane of the dual view is live.
+///
+/// Only one list lives directly on the app at a time. This is everything the
+/// other one needs to be drawn and worked on: the entries it listed, how they
+/// are filtered and selected, where it is scrolled, and a row cache of its own.
+/// Swapping it in for a frame moves values and never re-lists anything.
+struct SecondPane {
+    cwd: PathBuf,
+    entries: Vec<Entry>,
+    view: ViewMode,
+    visible: Vec<usize>,
+    listing: Listing,
+    req: u64,
+    history: History,
+    cursor: usize,
+    sel: HashSet<PathBuf>,
+    anchor: usize,
+    scroll_to: Option<(usize, Align2)>,
+    filter: String,
+    scope: SearchScope,
+    groups: Vec<Group>,
+    row_cache: RowCache,
+    list_scroll: f32,
+    scroll_restore: Option<f32>,
+    restore_anchor: Option<usize>,
+    search: Search,
+    search_shown: bool,
+    search_typed: Option<Instant>,
+    typeahead: TypeAhead,
+}
+
+impl SecondPane {
+    /// A pane about to list `cwd`, laid out the way the live list is.
+    fn new(cwd: PathBuf, view: ViewMode) -> SecondPane {
+        SecondPane {
+            cwd,
+            entries: Vec::new(),
+            view,
+            visible: Vec::new(),
+            listing: Listing::Loading,
+            req: 0,
+            history: History::default(),
+            cursor: 0,
+            sel: HashSet::new(),
+            anchor: 0,
+            scroll_to: None,
+            filter: String::new(),
+            scope: SearchScope::Below,
+            groups: Vec::new(),
+            row_cache: RowCache::default(),
+            list_scroll: 0.0,
+            scroll_restore: None,
+            restore_anchor: None,
+            search: Search::default(),
+            search_shown: false,
+            search_typed: None,
+            typeahead: TypeAhead::default(),
+        }
+    }
+}
 
 /// Gives each tab a number of its own, which stays with it however the strip is
 /// rearranged, so that "the folder tab being shown" can be told from its place.
@@ -587,6 +662,8 @@ enum Undo {
     Created(Vec<PathBuf>),
     /// A rename, reversible by renaming back.
     Renamed { from: PathBuf, to: PathBuf },
+    /// A whole batch rename, reversible by renaming every pair back.
+    RenamedBatch(Vec<(PathBuf, PathBuf)>),
     /// A move, reversible by moving the destinations home.
     Moved { items: Vec<(PathBuf, PathBuf)> },
     /// Copies, undone by removing the copies.
@@ -600,12 +677,30 @@ struct Toast {
     born: Instant,
 }
 
+/// What to do about one name that already exists at the destination.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConflictChoice {
+    /// Overwrite a file, or merge into a folder that is already there.
+    Replace,
+    /// Leave the existing item and do not place this one.
+    Skip,
+    /// Place it under a new name, "name (2)".
+    KeepBoth,
+}
+
 /// Modal dialogs.
 enum Dialog {
     None,
     Rename {
         path: PathBuf,
         name: String,
+    },
+    /// A pattern applied to a whole selection at once. `start` is held as typed
+    /// text so an empty or half-finished number survives across frames.
+    BatchRename {
+        paths: Vec<PathBuf>,
+        pattern: String,
+        start: String,
     },
     Create {
         dir: PathBuf,
@@ -617,6 +712,19 @@ enum Dialog {
     },
     ConfirmDelete {
         paths: Vec<PathBuf>,
+    },
+    /// A copy or move with at least one name already taken at the destination. The
+    /// collisions are resolved before the job starts, so the transfer keeps its
+    /// single pre-resolved undo mapping.
+    Collision {
+        /// Sources that do not collide, with the destination each is already bound to.
+        ready: Vec<(PathBuf, PathBuf)>,
+        /// Sources whose destination name is taken, still to be resolved.
+        conflicts: Vec<PathBuf>,
+        dest_dir: PathBuf,
+        cut: bool,
+        /// Whether the next choice applies to every remaining conflict.
+        apply_all: bool,
     },
     /// `close_app` distinguishes quitting from closing the file.
     Unsaved {
@@ -668,6 +776,16 @@ struct ActiveJob {
     done_bytes: u64,
     total_bytes: u64,
     current: String,
+    /// The user's wish, mirrored into the job's atomic the worker watches.
+    paused: bool,
+}
+
+impl ActiveJob {
+    /// Whether pausing this job means anything. Only the transfer worker checks
+    /// the flag, so a compress, extract or delete job would show a dead switch.
+    fn pausable(&self) -> bool {
+        matches!(self.job.kind, OpKind::Copy | OpKind::Move)
+    }
 }
 
 /// What a click in the list means.
@@ -677,6 +795,11 @@ enum ClickKind {
     Toggle,
     Range,
     Open,
+    /// A right click on a row that is already part of the selection: move the
+    /// cursor there but leave the selection whole, so the menu can act on all
+    /// of it. Collapsing to the one row would make a multi-rename unreachable
+    /// from the menu.
+    Context,
 }
 
 /// How the search box filters.
@@ -715,10 +838,21 @@ enum CtxAction {
     Copy,
     Cut,
     Rename,
+    /// The same rename, over everything that is selected.
+    RenameMany,
+    /// Make a symbolic link beside the item, pointing at it.
+    CreateSymlink,
+    /// Make a directory junction beside a folder (Windows only).
+    #[cfg(windows)]
+    CreateJunction,
     Delete,
     DeleteForever,
     Pin,
     Unpin,
+    /// Put a Recycle Bin item back where it came from.
+    Restore,
+    /// Remove a Recycle Bin item for good, without the ordinary file menu.
+    DeleteRecycle,
 }
 
 /// Keys captured this frame, resolved after the UI is drawn so that focused
@@ -753,6 +887,8 @@ struct Keys {
     properties: bool,
     new_menu: bool,
     toggle_details: bool,
+    /// Ctrl+Shift+D shows or hides the second folder list.
+    toggle_dual: bool,
     settings: bool,
     search_go: bool,
     escape: bool,
@@ -798,6 +934,15 @@ pub struct Rhumb {
     ascending: bool,
     show_hidden: bool,
     filter: String,
+    /// How the filtered list is broken into headed groups.
+    group_by: GroupBy,
+    /// Filters that narrow the list alongside the name box. They combine.
+    kind_filter: KindFilter,
+    date_filter: DateFilter,
+    size_filter: SizeFilter,
+    /// The filtered items split into their headed groups, in display order.
+    /// Empty when grouping is off.
+    groups: Vec<Group>,
     search_focus: bool,
     sidebar: bool,
     sidebar_w: f32,
@@ -831,6 +976,17 @@ pub struct Rhumb {
     /// How far the file list was scrolled on its last frame, in points.
     list_scroll: f32,
 
+    // Dual pane
+    /// The second folder list, when the dual view is on and one has been made.
+    second: Option<SecondPane>,
+    /// Whether the two folder lists are shown side by side.
+    dual: bool,
+    /// Which side the live pane is drawn on. Kept so a click in the other pane
+    /// makes it live without either folder jumping across the screen.
+    live_on_left: bool,
+    /// Where the divider between the two lists sits, as a fraction of the room.
+    dual_split: f32,
+
     /// Where to scroll the list to once it has rows to scroll, after a tab comes back.
     scroll_restore: Option<f32>,
     /// Where the selection's anchor goes once the listing has arrived, after a tab
@@ -848,10 +1004,6 @@ pub struct Rhumb {
     preview_visible: bool,
     /// Whether scrolling the editor scrolls the preview and the other way about.
     sync_scroll: bool,
-    /// Where each pane was, as a fraction of how far it can scroll, when the two were
-    /// last brought into line: a pane that has moved since is the one being scrolled.
-    sync_ed: f32,
-    sync_pv: f32,
     /// The preview's scroll position and range on its last frame, in points.
     preview_off: f32,
     preview_range: f32,
@@ -861,6 +1013,11 @@ pub struct Rhumb {
     editor_leads: bool,
     /// Where the preview pane was on its last frame, to tell which pane the pointer is in.
     preview_rect: Rect,
+    /// Where the editor pane was on its last frame, for the same reason.
+    editor_rect: Rect,
+    /// The wheel delta as the frame began, before a scroll area consumed it. Used to
+    /// tell which pane the reader is scrolling.
+    wheel_this_frame: f32,
 
     // Operations
     clip: Option<Clipboard>,
@@ -881,6 +1038,8 @@ pub struct Rhumb {
     listed_at: Option<Instant>,
     /// Decoded image thumbnails, filled on demand by the icon view.
     thumbs: Thumbs,
+    /// Remote images for the Markdown preview, fetched on demand.
+    remote: crate::remote::RemoteImages,
     /// The name indexes searches are answered from.
     indexes: crate::index::Indexes,
     /// Head of the text file the details pane is showing, with its path.
@@ -994,6 +1153,11 @@ impl Rhumb {
             ascending: true,
             show_hidden: false,
             filter: String::new(),
+            group_by: GroupBy::None,
+            kind_filter: KindFilter::All,
+            date_filter: DateFilter::Any,
+            size_filter: SizeFilter::Any,
+            groups: Vec::new(),
             search_focus: false,
             sidebar: true,
             focus: true,
@@ -1012,6 +1176,10 @@ impl Rhumb {
             folder_strip: strip::State::default(),
             doc_strip: strip::State::default(),
             list_scroll: 0.0,
+            second: None,
+            dual: false,
+            live_on_left: true,
+            dual_split: 0.5,
             scroll_restore: None,
             restore_anchor: None,
             loading: None,
@@ -1024,13 +1192,13 @@ impl Rhumb {
             wrap: false,
             preview_visible: true,
             sync_scroll: true,
-            sync_ed: 0.0,
-            sync_pv: 0.0,
             preview_off: 0.0,
             preview_range: 0.0,
             preview_set: None,
             editor_leads: true,
             preview_rect: Rect::NOTHING,
+            editor_rect: Rect::NOTHING,
+            wheel_this_frame: 0.0,
             clip: None,
             jobs: Vec::new(),
             undo: None,
@@ -1043,6 +1211,7 @@ impl Rhumb {
             last_change: None,
             listed_at: None,
             thumbs: Thumbs::new(tx.clone()),
+            remote: crate::remote::RemoteImages::new(tx.clone()),
             indexes: crate::index::Indexes::default(),
             peek: None,
             peek_pending: None,
@@ -1077,7 +1246,17 @@ impl Rhumb {
         app.apply_prefs(arg.as_deref().filter(|p| p.is_dir()));
         // The window starts with one folder tab, for where it opened.
         app.init_folders();
+        // Read back the saved index of the folder being shown, if there is one,
+        // so the first search is answered from it rather than by walking. On a
+        // first run there is none, and nothing is walked.
+        let cwd = app.cwd.clone();
+        app.indexes.load_ready(&cwd);
         app.request_listing();
+        // A window that was left in dual-pane view opens with its second list
+        // reading again, so the two panes start in step.
+        if app.dual {
+            app.ensure_second();
+        }
         if let Some(p) = arg.filter(|p| p.is_file()) {
             app.open_path(&p);
         }
@@ -1239,8 +1418,12 @@ impl Rhumb {
             .show(root, |ui| {
                 if focus_mode {
                     self.doc_ui(ui);
+                } else if self.dual && self.second.is_some() && !self.shows_file_tab() {
+                    // Two folder lists side by side; the toolbar, tabs and
+                    // status bar above and below still speak for the live one.
+                    self.dual_list_ui(ui);
                 } else {
-                    self.list_ui(ui);
+                    self.list_ui(ui, ID_LIST);
                 }
             });
         mark!("central");
@@ -1611,6 +1794,26 @@ fn prefs_path() -> PathBuf {
         .join("prefs.txt")
 }
 
+/// Where a root's saved name index lives, beside the preferences. The name is a
+/// stable hash of the path, so the same tree is found again next launch. Tests
+/// use a folder of their own, so they never read or write the developer's cache.
+pub(crate) fn index_cache_path(root: &Path) -> PathBuf {
+    #[cfg(test)]
+    let dir = std::env::temp_dir().join(format!("rhumb-index-cache-{}", std::process::id()));
+    #[cfg(not(test))]
+    let dir = dirs::data_local_dir()
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("rhumb")
+        .join("indexes");
+    // `DefaultHasher` with its default keys is stable across runs, which is what
+    // lets a file written before a restart be found after it.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut h);
+    dir.join(format!("{:016x}.idx", h.finish()))
+}
+
 fn sort_name(k: SortKey) -> &'static str {
     match k {
         SortKey::Name => "name",
@@ -1631,6 +1834,10 @@ impl eframe::App for Rhumb {
         // Whatever was brought out of an archive to be read goes with the window.
         archive::clear_own_cache();
         log::info!("rhumb exiting");
+        // Prefs are written and the cache is gone; what is left is tearing down
+        // the GPU device and joining workers, which is the wait after the window
+        // has already vanished. The OS reclaims it faster.
+        std::process::exit(0);
     }
 }
 

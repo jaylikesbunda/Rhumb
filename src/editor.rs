@@ -64,7 +64,8 @@ pub struct Doc {
 impl Doc {
     /// Reads a file from disk, returning `None` if it should not be edited here.
     pub fn open(path: &Path) -> Result<Doc, String> {
-        let md = fs::metadata(path).map_err(|e| format!("{}: {e}", display(path)))?;
+        let md = fs::metadata(fs_model::long_path(path))
+            .map_err(|e| format!("{}: {e}", display(path)))?;
         if md.is_dir() {
             return Err(format!("{} is a folder", display(path)));
         }
@@ -91,7 +92,7 @@ impl Doc {
         // front of the rest of the file, so no byte is read twice and a large
         // file never exists in memory as anything but the rope itself.
         let read_err = |e: std::io::Error| format!("{}: {e}", display(path));
-        let mut file = fs::File::open(path).map_err(read_err)?;
+        let mut file = fs::File::open(fs_model::long_path(path)).map_err(read_err)?;
         let mut head = vec![0u8; 8192];
         let mut got = 0;
         while got < head.len() {
@@ -206,7 +207,8 @@ impl Doc {
         // first join a large document into one string.
         let write = || -> std::io::Result<()> {
             use std::io::Write;
-            let mut file = std::io::BufWriter::new(fs::File::create(&self.path)?);
+            let mut file =
+                std::io::BufWriter::new(fs::File::create(fs_model::long_path(&self.path))?);
             for chunk in self.text.chunks() {
                 if self.crlf && chunk.contains('\n') {
                     file.write_all(chunk.replace('\n', "\r\n").as_bytes())?;
@@ -220,7 +222,9 @@ impl Doc {
         self.saved_hash = hash_buffer(&self.text);
         self.saved_len = self.text.len_bytes();
         self.saved_version = self.version;
-        self.saved_mtime = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        self.saved_mtime = fs::metadata(fs_model::long_path(&self.path))
+            .and_then(|m| m.modified())
+            .ok();
         self.externally_changed = false;
         // What is on disk is now what is in the buffer, and the version did not
         // move to say so, so the cached answer has to be dropped by hand.
@@ -274,7 +278,7 @@ impl Doc {
 
     /// Called by the watcher: notes a disk change and whether it matters.
     pub fn check_external_change(&mut self) {
-        let Ok(md) = fs::metadata(&self.path) else {
+        let Ok(md) = fs::metadata(fs_model::long_path(&self.path)) else {
             self.externally_changed = true;
             return;
         };

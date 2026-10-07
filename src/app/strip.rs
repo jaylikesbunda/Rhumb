@@ -6,6 +6,7 @@
 //! opening a new one.
 
 use super::*;
+use egui::{WidgetInfo, WidgetType};
 
 /// One tab to draw.
 pub(super) struct Item {
@@ -150,6 +151,11 @@ pub(super) fn show(
         }
 
         let is_active = i == active;
+        // A tab is a selectable button named by its label, so a screen reader
+        // can tell which one is in front.
+        resp.widget_info(|| {
+            WidgetInfo::selected(WidgetType::Button, true, is_active, item.label.as_str())
+        });
         if is_active {
             strip.rect_filled(tab_rect, CornerRadius::same(sp::RADIUS), c::SEL);
         } else if resp.hovered() {
@@ -207,6 +213,17 @@ pub(super) fn show(
                 Id::new((style.salt, "close", item.id)),
                 Sense::click(),
             );
+            close_resp.widget_info(|| {
+                WidgetInfo::labeled(
+                    WidgetType::Button,
+                    true,
+                    if item.dirty {
+                        "Close without saving"
+                    } else {
+                        "Close"
+                    },
+                )
+            });
             if close_resp.clicked() {
                 action.close = Some(i);
             }
@@ -239,6 +256,7 @@ pub(super) fn show(
             Vec2::new(24.0, rect.height() - 6.0),
         );
         let resp = ui.interact(plus, Id::new((style.salt, "new")), Sense::click());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tip));
         if resp.hovered() {
             ui.painter()
                 .rect_filled(plus, CornerRadius::same(sp::RADIUS), c::HOVER);
@@ -258,6 +276,7 @@ pub(super) fn show(
             Vec2::new(24.0, rect.height() - 6.0),
         );
         let resp = ui.interact(list, Id::new((style.salt, "list")), Sense::click());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "All tabs"));
         if resp.hovered() {
             ui.painter()
                 .rect_filled(list, CornerRadius::same(sp::RADIUS), c::HOVER);

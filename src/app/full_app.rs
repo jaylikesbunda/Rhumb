@@ -1,6 +1,6 @@
 use super::*;
 use std::fs;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 pub struct App {
     ctx: Context,
@@ -1456,36 +1456,63 @@ fn a_file_that_is_not_in_the_archive_says_so_instead_of_opening() {
 }
 
 #[test]
-fn nothing_can_be_pasted_into_an_archive() {
-    let (dir, z) = archive_workspace("rhumb-arch-nopaste");
+fn a_file_can_be_pasted_into_a_zip() {
+    let (dir, z) = archive_workspace("rhumb-arch-paste");
     let mut a = App::new(&dir);
+    // A zip is editable, so this starts a job rather than refusing.
     a.app
         .start_transfer(vec![dir.join("plain.txt")], z.clone(), false);
-    assert!(a.app.jobs.is_empty(), "no job was started");
-    assert!(a.app.toasts.iter().any(|t| t.text.contains("read-only")));
+    assert!(!a.app.jobs.is_empty(), "adding to a zip starts a job");
+    finish_jobs(&mut a);
     a.app
         .start_transfer(vec![dir.join("plain.txt")], z.join("src"), false);
-    assert!(a.app.jobs.is_empty());
+    assert!(!a.app.jobs.is_empty());
+    finish_jobs(&mut a);
+    let names: Vec<String> = archive::list(&z, "")
+        .unwrap()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+    assert!(names.iter().any(|n| n == "plain.txt"), "{names:?}");
+    // The second add went under src/, so it is listed there, not at the root.
+    let inner: Vec<String> = archive::list(&z, "src")
+        .unwrap()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+    assert!(
+        inner.iter().any(|n| n == "plain.txt"),
+        "the file landed under src/: {inner:?}"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn nothing_inside_an_archive_can_be_deleted_renamed_or_created() {
-    let (dir, z) = archive_workspace("rhumb-arch-readonly");
+fn a_zip_entry_can_be_deleted_but_not_renamed_or_created() {
+    let (dir, z) = archive_workspace("rhumb-arch-edit");
     let mut a = App::new(&dir);
     a.app.open_path(&z);
     listed(&mut a);
     a.app.sel.clear();
     a.app.sel.insert(z.join("readme.txt"));
     a.app.delete_selection(false);
-    assert!(a.app.toasts.iter().any(|t| t.text.contains("read-only")));
-    assert!(matches!(a.app.dialog, Dialog::None));
-    a.app.delete_selection(true);
+    assert!(!a.app.jobs.is_empty(), "removing a zip entry starts a job");
     assert!(
         matches!(a.app.dialog, Dialog::None),
-        "not even the confirmation for a permanent delete"
+        "an archive has no recycle bin"
     );
-    a.app.start_rename(&z.join("readme.txt"));
+    finish_jobs(&mut a);
+    let names: Vec<String> = archive::list(&z, "")
+        .unwrap()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n == "readme.txt"),
+        "the entry is gone: {names:?}"
+    );
+    // Renaming and creating inside an archive are still refused.
+    a.app.start_rename(&z.join("src/lib.rs"));
     assert!(matches!(a.app.dialog, Dialog::None));
     a.app.apply_create(&z, "new.txt", false);
     assert!(
@@ -1536,6 +1563,48 @@ fn files_cannot_be_moved_out_of_an_archive() {
             .iter()
             .any(|e| e.name == "readme.txt")
     );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_paste_that_would_overwrite_asks_before_starting() {
+    let (dir, _) = workspace("rhumb-collision", 0, 0);
+    let other = dir.join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("a.txt"), b"new").unwrap();
+    fs::write(dir.join("a.txt"), b"old").unwrap();
+    let mut a = App::new(&dir);
+    a.app
+        .start_transfer(vec![other.join("a.txt")], dir.clone(), false);
+    assert!(
+        a.app.jobs.is_empty(),
+        "nothing runs until the conflict is answered"
+    );
+    assert!(matches!(a.app.dialog, Dialog::Collision { .. }));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_paste_with_no_conflict_starts_at_once() {
+    let (dir, _) = workspace("rhumb-nocollision", 0, 0);
+    let other = dir.join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("b.txt"), b"x").unwrap();
+    let mut a = App::new(&dir);
+    a.app
+        .start_transfer(vec![other.join("b.txt")], dir.clone(), false);
+    assert!(!a.app.jobs.is_empty(), "no conflict, so it starts");
+    assert!(matches!(a.app.dialog, Dialog::None));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copying_a_folder_into_itself_is_refused() {
+    let (dir, _) = workspace("rhumb-selfcopy", 0, 0);
+    let mut a = App::new(&dir);
+    a.app.start_transfer(vec![dir.clone()], dir.clone(), false);
+    assert!(a.app.jobs.is_empty(), "no runaway copy");
+    assert!(a.app.toasts.iter().any(|t| t.text.contains("into itself")));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -2834,5 +2903,594 @@ fn the_files_row_and_the_folder_row_do_not_share_widgets() {
     press_at(&mut a, at, egui::PointerButton::Primary);
     assert_eq!(a.app.active_folder, 0, "the folder tab did not change");
     assert_eq!(a.app.tabs.active, 0);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---- grouping and filters ---------------------------------------------------
+
+/// A folder with one of each kind of file, plus a folder, so the filters and
+/// groupings have something to sort.
+fn filter_workspace(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("folder")).unwrap();
+    fs::write(dir.join("notes.txt"), b"x").unwrap();
+    fs::write(dir.join("photo.png"), b"x").unwrap();
+    fs::write(dir.join("song.mp3"), b"x").unwrap();
+    fs::write(dir.join("clip.mp4"), b"x").unwrap();
+    fs::write(dir.join("pack.zip"), b"x").unwrap();
+    dir
+}
+
+/// The names in the order the list shows them, not sorted.
+fn listed_names(a: &App) -> Vec<String> {
+    a.app
+        .visible
+        .iter()
+        .filter_map(|i| a.app.entries.get(*i))
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+#[test]
+fn a_kind_filter_narrows_the_list_and_combines_with_the_name() {
+    let dir = filter_workspace("rhumb-filter-kind");
+    let mut a = App::new(&dir);
+    listed(&mut a);
+    assert_eq!(a.app.row_count(), 6, "a folder and five files");
+
+    a.app.kind_filter = KindFilter::Images;
+    a.app.recompute_visible();
+    assert_eq!(a.app.row_count(), 1);
+    assert_eq!(shown_names(&a), vec!["photo.png"]);
+
+    // The name box still applies on top of the kind filter.
+    a.app.filter = "photo".into();
+    a.app.recompute_visible();
+    assert_eq!(a.app.row_count(), 1);
+    a.app.filter = "song".into();
+    a.app.recompute_visible();
+    assert_eq!(a.app.row_count(), 0, "song is not an image");
+
+    // Folders are their own choice.
+    a.app.filter.clear();
+    a.app.kind_filter = KindFilter::Folders;
+    a.app.recompute_visible();
+    assert_eq!(shown_names(&a), vec!["folder"]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_size_filter_bands_files_and_never_hides_a_folder() {
+    let dir = filter_workspace("rhumb-filter-size");
+    let mut a = App::new(&dir);
+    listed(&mut a);
+    a.app.size_filter = SizeFilter::Large;
+    a.app.recompute_visible();
+    // No file here reaches 100 MB, but the folder is exempt and stays.
+    assert_eq!(shown_names(&a), vec!["folder"]);
+    a.app.size_filter = SizeFilter::Small;
+    a.app.recompute_visible();
+    assert_eq!(a.app.row_count(), 6, "every small file and the folder");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_date_filter_drops_files_older_than_the_choice() {
+    let dir = filter_workspace("rhumb-filter-date");
+    let old = dir.join("old.txt");
+    fs::write(&old, b"x").unwrap();
+    let f = fs::OpenOptions::new().write(true).open(&old).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(60 * 86_400))
+        .unwrap();
+    let mut a = App::new(&dir);
+    listed(&mut a);
+    a.app.date_filter = DateFilter::Last30;
+    a.app.recompute_visible();
+    assert!(!shown_names(&a).contains(&"old.txt".to_owned()));
+    assert!(shown_names(&a).contains(&"notes.txt".to_owned()));
+    a.app.date_filter = DateFilter::Any;
+    a.app.recompute_visible();
+    assert!(shown_names(&a).contains(&"old.txt".to_owned()));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn grouping_by_name_orders_the_list_into_letter_buckets_with_headers() {
+    let dir = std::env::temp_dir().join(format!("rhumb-group-name-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["apple.txt", "banana.txt", "cherry.txt", "1file.txt"] {
+        fs::write(dir.join(name), b"x").unwrap();
+    }
+    let mut a = App::new(&dir);
+    listed(&mut a);
+    a.app.group_by = GroupBy::Name;
+    a.app.recompute_visible();
+    let labels: Vec<&str> = a.app.groups.iter().map(|g| g.label.as_str()).collect();
+    assert_eq!(labels, vec!["#", "A", "B", "C"], "{labels:?}");
+    // Headers are extra rows, not extra items: the items are unchanged.
+    assert_eq!(a.app.row_count(), 4);
+    assert_eq!(
+        a.app.groups.iter().map(|g| g.len).sum::<usize>(),
+        a.app.row_count()
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn grouping_gathers_interleaved_kinds_together_and_keeps_the_sort_inside_them() {
+    // Sorted by name the kinds alternate: a.txt, b.png, c.txt. Grouping by
+    // type has to pull the two documents together, keeping their name order.
+    let dir = std::env::temp_dir().join(format!("rhumb-group-type-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["a.txt", "b.png", "c.txt"] {
+        fs::write(dir.join(name), b"x").unwrap();
+    }
+    let mut a = App::new(&dir);
+    listed(&mut a);
+    a.app.group_by = GroupBy::Type;
+    a.app.recompute_visible();
+    let labels: Vec<&str> = a.app.groups.iter().map(|g| g.label.as_str()).collect();
+    assert_eq!(labels, vec!["Documents", "Images"], "{labels:?}");
+    assert_eq!(listed_names(&a), vec!["a.txt", "c.txt", "b.png"]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn grouping_draws_headers_in_every_view() {
+    let dir = filter_workspace("rhumb-group-views");
+    let mut a = App::new(&dir);
+    listed(&mut a);
+    a.app.group_by = GroupBy::Type;
+    a.app.recompute_visible();
+    assert!(a.app.groups.len() >= 2, "more than one kind is listed");
+    for view in ViewMode::ALL {
+        a.app.set_view(view);
+        for _ in 0..3 {
+            a.frame();
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_grouping_and_filters_round_trip_through_prefs() {
+    let dir = filter_workspace("rhumb-prefs-group");
+    let mut a = App::new(&dir);
+    a.app.group_by = GroupBy::Type;
+    a.app.kind_filter = KindFilter::Images;
+    a.app.date_filter = DateFilter::Last7;
+    a.app.size_filter = SizeFilter::Large;
+    // A prefs file of this test's own, so it never races another.
+    let prefs = std::env::temp_dir()
+        .join(format!("rhumb-prefs-roundtrip-{}", std::process::id()))
+        .join("prefs.txt");
+    let _ = fs::remove_dir_all(prefs.parent().unwrap());
+    PREFS_OVERRIDE.with(|p| *p.borrow_mut() = Some(prefs.clone()));
+    a.app.write_prefs();
+    let text = fs::read_to_string(&prefs).unwrap();
+    assert!(text.contains("group=type"), "{text}");
+    assert!(text.contains("kind=images"), "{text}");
+    assert!(text.contains("date=last7"), "{text}");
+    assert!(text.contains("size=large"), "{text}");
+    // A fresh app reading that text gets the choices back.
+    let mut b = App::new(&dir);
+    b.app.apply_prefs_text(&text, None);
+    assert_eq!(b.app.group_by, GroupBy::Type);
+    assert_eq!(b.app.kind_filter, KindFilter::Images);
+    assert_eq!(b.app.date_filter, DateFilter::Last7);
+    assert_eq!(b.app.size_filter, SizeFilter::Large);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(prefs.parent().unwrap());
+}
+
+/// A folder `dir` with a few files, and a subfolder `sub` with one file of its
+/// own, so the two panes of a dual view start at folders that both list.
+fn nested_folders(name: &str) -> (PathBuf, PathBuf) {
+    let (dir, _) = workspace(name, 4, 2);
+    let sub = dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("inner.txt"), "inner").unwrap();
+    (dir, sub)
+}
+
+/// Opens `dir`, steps into `sub`, and turns the dual view on with both lists
+/// settled, which every dual-pane test starts from.
+fn dual_view(name: &str) -> (App, PathBuf, PathBuf) {
+    let (dir, sub) = nested_folders(name);
+    let mut a = App::new(&dir);
+    a.app.navigate(&sub);
+    a.settle(|a| matches!(a.app.listing, Listing::Ready));
+    a.app.toggle_dual();
+    a.settle(|a| {
+        a.app
+            .second
+            .as_ref()
+            .is_some_and(|s| matches!(s.listing, Listing::Ready))
+    });
+    (a, dir, sub)
+}
+
+#[test]
+fn toggling_dual_pane_shows_two_lists_and_the_second_lists_another_folder() {
+    let (a, dir, sub) = dual_view("rhumb-dual-on");
+    assert!(a.app.dual, "the view is on");
+    let second = a.app.second.as_ref().expect("a second list was made");
+    assert_ne!(
+        second.cwd, a.app.cwd,
+        "the second list is a different folder"
+    );
+    assert_eq!(second.cwd, dir, "it starts in the folder above the first");
+    assert!(!second.entries.is_empty(), "and it listed what is there");
+    assert!(!a.app.entries.is_empty(), "the first list is still there");
+    assert_eq!(a.app.cwd, sub);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn navigating_the_second_pane_leaves_the_first_alone() {
+    let (mut a, dir, sub) = dual_view("rhumb-dual-navigate");
+    // A click in the second pane makes it the live one, on the side it was
+    // drawn on; the first is parked.
+    a.app.activate_second();
+    assert!(
+        !a.app.live_on_left,
+        "the clicked pane is live on its own side"
+    );
+    assert_eq!(a.app.cwd, dir, "the second list is now the live one");
+
+    let first = a.app.second.as_ref().unwrap();
+    assert_eq!(first.cwd, sub, "the first list kept its folder");
+    let first_sel = first.sel.clone();
+
+    // Move the live (second) list somewhere else.
+    a.app.navigate(&sub);
+    a.settle(|a| matches!(a.app.listing, Listing::Ready));
+
+    let first = a.app.second.as_ref().unwrap();
+    assert_eq!(first.cwd, sub, "the parked first list did not move");
+    assert_eq!(first.sel, first_sel, "nor did its selection");
+    assert_eq!(a.app.cwd, sub, "the live list did move");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_paste_while_the_second_pane_is_live_lands_in_its_folder() {
+    let (mut a, dir, sub) = dual_view("rhumb-dual-paste");
+    // A file in the first list's folder, put on the clipboard as if copied.
+    let source = sub.join("move_me.txt");
+    fs::write(&source, "payload").unwrap();
+    a.app.clip = Some(ops::Clipboard {
+        paths: vec![source.clone()],
+        cut: false,
+    });
+
+    // The second pane is now live, and its folder is `dir`.
+    a.app.activate_second();
+    assert_eq!(a.app.cwd, dir);
+    a.app.paste();
+    a.settle(|a| a.app.jobs.is_empty());
+
+    assert!(
+        dir.join("move_me.txt").exists(),
+        "the copy landed in the second pane's folder"
+    );
+    assert!(source.exists(), "the original is still there");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn toggling_dual_off_returns_to_the_single_list() {
+    let (mut a, dir, sub) = dual_view("rhumb-dual-off");
+    a.app.toggle_dual();
+    assert!(!a.app.dual, "off again");
+    for _ in 0..3 {
+        a.frame();
+    }
+    assert_eq!(a.app.cwd, sub, "the live list is where it was");
+    assert!(
+        a.app.entries.iter().any(|e| e.name == "inner.txt"),
+        "and it is still listed"
+    );
+    // The parked list is kept, so turning the view back on finds it as it was.
+    assert!(a.app.second.is_some());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dual_pane_state_survives_a_prefs_round_trip() {
+    let (dir, _) = workspace("rhumb-dual-prefs", 3, 2);
+    let mut a = App::new(&dir);
+    a.app.dual = true;
+    a.app.dual_split = 0.37;
+    // A prefs file of this test's own, so it never races another.
+    let prefs = std::env::temp_dir()
+        .join(format!("rhumb-prefs-dual-{}", std::process::id()))
+        .join("prefs.txt");
+    let _ = fs::remove_dir_all(prefs.parent().unwrap());
+    PREFS_OVERRIDE.with(|p| *p.borrow_mut() = Some(prefs.clone()));
+    a.app.write_prefs();
+    let text = fs::read_to_string(&prefs).unwrap();
+    assert!(text.contains("dual=true"), "{text}");
+
+    a.app.dual = false;
+    a.app.dual_split = 0.5;
+    a.app.apply_prefs_text(&text, None);
+    assert!(a.app.dual, "the dual view came back");
+    assert!(
+        (a.app.dual_split - 0.37).abs() < 0.001,
+        "and where the divider was"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(prefs.parent().unwrap());
+}
+
+// ---- batch rename -------------------------------------------------------------
+
+#[test]
+fn a_batch_rename_applies_a_pattern_to_every_selected_file() {
+    let dir = std::env::temp_dir().join(format!("rhumb-batch-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for n in ["alpha.txt", "beta.txt", "gamma.txt"] {
+        fs::write(dir.join(n), n).unwrap();
+    }
+    let mut a = App::new(&dir);
+    a.frame();
+    // Three selected files, the way a reader gets there with Ctrl+click.
+    a.app.sel = ["alpha.txt", "beta.txt", "gamma.txt"]
+        .iter()
+        .map(|n| dir.join(n))
+        .collect();
+    let selected: Vec<PathBuf> = a.app.sel.iter().cloned().collect();
+    a.app.start_batch_rename(selected);
+    assert!(
+        matches!(a.app.dialog, Dialog::BatchRename { .. }),
+        "more than one item opens the batch dialog"
+    );
+    a.app.dialog = Dialog::None;
+
+    let selected: Vec<PathBuf> = a.app.sel.iter().cloned().collect();
+    a.app
+        .apply_batch_rename(&selected, "{name}_v{n}.{ext}", "1");
+    listed(&mut a);
+
+    for n in ["alpha_v1.txt", "beta_v2.txt", "gamma_v3.txt"] {
+        assert!(
+            dir.join(n).is_file(),
+            "{n} should exist: {:?}",
+            shown_names(&a)
+        );
+    }
+    assert!(!dir.join("alpha.txt").exists(), "the old names are gone");
+    // The renamed items are the selection now.
+    assert_eq!(a.app.sel.len(), 3);
+    assert!(a.app.sel.contains(&dir.join("beta_v2.txt")));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_batch_rename_shifts_names_that_collide_with_each_other() {
+    let dir = std::env::temp_dir().join(format!("rhumb-batch-shift-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for (n, body) in [("1.txt", "one"), ("2.txt", "two"), ("3.txt", "three")] {
+        fs::write(dir.join(n), body).unwrap();
+    }
+    let mut a = App::new(&dir);
+    a.frame();
+    let paths: Vec<PathBuf> = ["1.txt", "2.txt", "3.txt"]
+        .iter()
+        .map(|n| dir.join(n))
+        .collect();
+    // 1 -> 2, 2 -> 3, 3 -> 4: every target but the last is a name that was
+    // still on disk when the batch began, which only works because each source
+    // is moved to a temporary name before any final name is written.
+    a.app.apply_batch_rename(&paths, "{n}.txt", "2");
+    listed(&mut a);
+    assert_eq!(fs::read_to_string(dir.join("2.txt")).unwrap(), "one");
+    assert_eq!(fs::read_to_string(dir.join("3.txt")).unwrap(), "two");
+    assert_eq!(fs::read_to_string(dir.join("4.txt")).unwrap(), "three");
+    assert!(!dir.join("1.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_batch_rename_leaves_an_existing_name_it_would_have_overwritten() {
+    let dir = std::env::temp_dir().join(format!("rhumb-batch-taken-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "a").unwrap();
+    fs::write(dir.join("b.txt"), "b").unwrap();
+    // Not part of the batch, and not to be touched.
+    fs::write(dir.join("a_1.txt"), "keep").unwrap();
+    let mut a = App::new(&dir);
+    a.frame();
+    let paths = vec![dir.join("a.txt"), dir.join("b.txt")];
+    a.app.apply_batch_rename(&paths, "{name}_{n}.{ext}", "1");
+    listed(&mut a);
+    assert_eq!(
+        fs::read_to_string(dir.join("a_1.txt")).unwrap(),
+        "keep",
+        "the file that was already there is untouched"
+    );
+    assert!(
+        dir.join("a.txt").exists(),
+        "the rename that would have clobbered it was skipped"
+    );
+    assert!(
+        dir.join("b_2.txt").is_file(),
+        "the free one went through, numbered by its place"
+    );
+    assert!(!dir.join("b.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_batch_rename_dialog_draws_and_previews_without_trouble() {
+    let (dir, _) = workspace("rhumb-batch-dialog", 5, 10);
+    let mut a = App::new(&dir);
+    a.frame();
+    let paths: Vec<PathBuf> = (0..3)
+        .map(|i| dir.join(format!("file_{i:05}.txt")))
+        .collect();
+    a.app.dialog = Dialog::BatchRename {
+        paths,
+        pattern: "{name}_{n:2}".into(),
+        start: "1".into(),
+    };
+    for _ in 0..3 {
+        a.frame();
+    }
+    assert!(
+        matches!(a.app.dialog, Dialog::BatchRename { .. }),
+        "it stays up while it is being filled in"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---- links --------------------------------------------------------------------
+
+#[test]
+#[cfg(windows)]
+fn a_junction_is_created_beside_a_folder() {
+    let dir = std::env::temp_dir().join(format!("rhumb-junction-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let target = dir.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("inside.txt"), b"x").unwrap();
+    let mut a = App::new(&dir);
+    a.app.create_junction(&target);
+    let link = dir.join("target - link");
+    if !link.exists() {
+        // `mklink /J` normally needs no privilege, but a locked-down machine can
+        // still refuse it. Say so and move on rather than fail the run.
+        eprintln!("junction creation was refused on this machine; skipping the checks");
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    assert!(link.is_dir(), "a junction reads as a directory");
+    assert!(
+        link.join("inside.txt").is_file(),
+        "and reaches what it points at"
+    );
+    // A junction is a reparse point: its own metadata is a directory, and
+    // removing the link must leave the target alone.
+    let md = fs::symlink_metadata(&link).unwrap();
+    assert!(md.file_type().is_symlink() || md.is_dir());
+    let _ = fs::remove_dir(&link);
+    assert!(target.join("inside.txt").is_file(), "the target survives");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_symbolic_link_is_created_beside_a_file_when_the_system_allows_it() {
+    let dir = std::env::temp_dir().join(format!("rhumb-symlink-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("note.txt");
+    fs::write(&file, b"hello").unwrap();
+    let mut a = App::new(&dir);
+    a.app.create_symlink(&file);
+    let link = dir.join("note.txt - link");
+    if !link.exists() {
+        // A symbolic link needs Developer Mode or elevation on Windows; this is
+        // the tolerant branch for a machine that has neither.
+        eprintln!("symbolic links are not permitted here; skipping the checks");
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(fs::read_to_string(&link).unwrap(), "hello");
+    let _ = fs::remove_file(&link);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---- searching a virtual location ------------------------------------------
+
+/// A made-up entry, so a test of the Recycle Bin or This PC does not depend on
+/// what happens to be in the real one on the machine running it.
+fn virtual_entry(root: &str, name: &str) -> fs_model::Entry {
+    fs_model::Entry {
+        name: name.to_owned(),
+        path: PathBuf::from(root).join(name),
+        is_dir: false,
+        is_symlink: false,
+        size: 0,
+        modified: None,
+        hidden: false,
+    }
+}
+
+/// An app showing a virtual root with two made-up entries.
+///
+/// The root is read for real once — the same call the listing worker makes — so
+/// that "without error" is checked, but the rows themselves are made up so what
+/// gets filtered does not depend on the machine's own recycle bin or drives.
+fn virtual_listing(name: &str, root: &str) -> (App, PathBuf) {
+    let (dir, _) = workspace(name, 3, 5);
+    let mut a = App::new(&dir);
+    assert!(
+        fs_model::read_dir(Path::new(root), false).is_ok(),
+        "the virtual root reads without error"
+    );
+    a.app.cwd = PathBuf::from(root);
+    a.app.entries = vec![
+        virtual_entry(root, "report.txt"),
+        virtual_entry(root, "notes.md"),
+    ];
+    a.app.listing = Listing::Ready;
+    a.app.recompute_visible();
+    (a, dir)
+}
+
+#[test]
+fn filtering_the_recycle_bin_narrows_in_place_without_starting_a_search() {
+    let (mut a, dir) = virtual_listing("rhumb-recycle-filter", crate::recycle::ROOT);
+    let indexed_before = a.app.indexes.len();
+    a.app.scope = SearchScope::Below;
+    a.app.filter = "report".into();
+    a.app.on_filter_changed();
+    // A search that is due, so the only thing that can stop it is the virtual
+    // root itself.
+    a.app.search_typed = Some(Instant::now() - Duration::from_secs(5));
+    for _ in 0..5 {
+        a.frame();
+    }
+    assert_eq!(
+        shown_names(&a),
+        vec!["report.txt"],
+        "the filter narrowed it"
+    );
+    assert!(!a.app.search.running, "no walk of the bin was started");
+    assert!(!a.app.searching(), "the list is filtered in place");
+    assert_eq!(
+        a.app.indexes.len(),
+        indexed_before,
+        "and nothing was indexed"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn filtering_this_pc_narrows_in_place_without_starting_a_search() {
+    let (mut a, dir) = virtual_listing("rhumb-thispc-filter", crate::this_pc::ROOT);
+    let indexed_before = a.app.indexes.len();
+    a.app.scope = SearchScope::Below;
+    a.app.filter = "notes".into();
+    a.app.on_filter_changed();
+    a.app.search_typed = Some(Instant::now() - Duration::from_secs(5));
+    for _ in 0..5 {
+        a.frame();
+    }
+    assert_eq!(shown_names(&a), vec!["notes.md"]);
+    assert!(!a.app.search.running, "no walk of This PC was started");
+    assert!(!a.app.searching(), "the list is filtered in place");
+    assert_eq!(
+        a.app.indexes.len(),
+        indexed_before,
+        "and nothing was indexed"
+    );
     let _ = fs::remove_dir_all(&dir);
 }

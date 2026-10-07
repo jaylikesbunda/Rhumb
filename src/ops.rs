@@ -10,9 +10,61 @@ use std::sync::mpsc::Sender;
 
 #[cfg(test)]
 use crate::fs_model;
+use crate::fs_model::long_path;
 use crate::workers::{Job, Msg, OpKind, Outcome, Progress};
 
 const CHUNK: usize = 512 * 1024;
+/// How many times an operation that is momentarily locked by someone else is
+/// tried again before the error is reported.
+const RETRY_ATTEMPTS: u32 = 5;
+/// The first nap between retries, in milliseconds. It doubles each time, so a
+/// lock that clears at once costs almost nothing and a long one is not polled
+/// hard.
+const RETRY_FIRST_MS: u64 = 10;
+
+/// Whether an error is the OS saying the file is locked by another process for
+/// a moment. Windows reports 32 (sharing violation) and 33 (lock violation);
+/// on other platforms the codes simply never match.
+fn is_sharing_violation(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(32) | Some(33))
+}
+
+/// Runs `f`, trying again a few times when the OS says the file is briefly
+/// locked by another process.
+///
+/// This is what stops an antivirus scanner or an open editor from turning a
+/// copy into a spurious failure: the lock is usually gone within a few tens of
+/// milliseconds, so a short nap and a retry is enough.
+fn retrying<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut wait = RETRY_FIRST_MS;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < RETRY_ATTEMPTS && is_sharing_violation(&e) => {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                wait = wait.saturating_mul(2);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Blocks a worker while `paused` is set.
+///
+/// Naps rather than waiting on a condition variable: the flag is a plain atomic
+/// the UI writes and there is no other thread to signal, and a 50 ms nap keeps
+/// the thread at nothing while still noticing a resume or a cancel promptly.
+fn wait_while_paused(paused: &AtomicBool, cancel: &AtomicBool) {
+    while paused.load(Ordering::Relaxed) {
+        // A pause must never make a cancel unreachable.
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
 
 /// What the copy/paste clipboard holds.
 #[derive(Clone, Debug)]
@@ -34,6 +86,7 @@ pub fn start_transfer_pairs(
     let total_items = sources.len();
     let total_bytes: u64 = sources.iter().map(|p| dir_size(p)).sum();
     let cancel = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
     let verb = if cut { "Moving" } else { "Copying" };
     let job = Job {
         id,
@@ -43,6 +96,7 @@ pub fn start_transfer_pairs(
             if total_items == 1 { "" } else { "s" }
         ),
         cancel: cancel.clone(),
+        paused: paused.clone(),
         started: std::time::Instant::now(),
     };
 
@@ -62,6 +116,7 @@ pub fn start_transfer_pairs(
             let mut ok = 0usize;
             let mut failed: Vec<String> = Vec::new();
             for (n, (src, dest)) in pairs.iter().enumerate() {
+                wait_while_paused(&paused, &cancel);
                 if cancel.load(Ordering::Relaxed) {
                     let _ = tx.send(Msg::Finished {
                         id,
@@ -71,9 +126,9 @@ pub fn start_transfer_pairs(
                 }
                 progress.current = short(src);
                 let r = if cut {
-                    move_path(src, dest, &tx, &mut progress, &cancel)
+                    move_path(src, dest, &tx, &mut progress, &cancel, &paused)
                 } else {
-                    copy_path(src, dest, &tx, &mut progress, &cancel)
+                    copy_path(src, dest, &tx, &mut progress, &cancel, &paused)
                 };
                 match r {
                     Ok(()) => ok += 1,
@@ -101,6 +156,7 @@ pub fn start_transfer(
     cut: bool,
 ) -> Job {
     let cancel = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
     let label = format!(
         "{} {} item{}",
         if cut { "Moving" } else { "Copying" },
@@ -112,6 +168,7 @@ pub fn start_transfer(
         kind: if cut { OpKind::Move } else { OpKind::Copy },
         label,
         cancel: cancel.clone(),
+        paused: paused.clone(),
         started: std::time::Instant::now(),
     };
 
@@ -120,12 +177,13 @@ pub fn start_transfer(
         kind: job.kind,
         label: job.label.clone(),
         cancel: cancel.clone(),
+        paused: paused.clone(),
         started: job.started,
     };
 
     std::thread::Builder::new()
         .name("rhumb-op".into())
-        .spawn(move || run_transfer(tx, id, sources, dest_dir, cut, cancel))
+        .spawn(move || run_transfer(tx, id, sources, dest_dir, cut, cancel, paused))
         .expect("spawn transfer thread");
 
     spawned
@@ -139,6 +197,7 @@ fn run_transfer(
     dest_dir: PathBuf,
     cut: bool,
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
 ) {
     let total_items = sources.len();
     let total_bytes: u64 = sources.iter().map(|p| dir_size(p)).sum();
@@ -179,6 +238,7 @@ fn run_transfer(
     let mut failed: Vec<String> = progress.failed.clone();
 
     for (i, src) in sources.iter().enumerate() {
+        wait_while_paused(&paused, &cancel);
         if cancel.load(Ordering::Relaxed) {
             let _ = tx.send(Msg::Finished {
                 id,
@@ -210,9 +270,9 @@ fn run_transfer(
         }
 
         let result = if cut {
-            move_path(src, &dest, &tx, &mut progress, &cancel)
+            move_path(src, &dest, &tx, &mut progress, &cancel, &paused)
         } else {
-            copy_path(src, &dest, &tx, &mut progress, &cancel)
+            copy_path(src, &dest, &tx, &mut progress, &cancel, &paused)
         };
 
         match result {
@@ -248,6 +308,50 @@ fn short(p: &Path) -> String {
     p.file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| p.display().to_string())
+}
+
+/// Bytes per second and the time left, from the bytes done so far.
+///
+/// `None` until there is a total and enough elapsed time for the estimate to be
+/// worth showing: a rate read from a few milliseconds swings wildly and would
+/// read as a lie. A job that is already there, or has no total, has nothing to
+/// estimate either.
+pub fn rate_and_eta(
+    done: u64,
+    total: u64,
+    elapsed: std::time::Duration,
+) -> Option<(f64, std::time::Duration)> {
+    if total == 0 || done == 0 || done >= total {
+        return None;
+    }
+    let secs = elapsed.as_secs_f64();
+    // Half a second is long enough that the first number is not noise.
+    if secs < 0.5 {
+        return None;
+    }
+    let rate = done as f64 / secs;
+    if !rate.is_finite() || rate <= 0.0 {
+        return None;
+    }
+    let left = (total - done) as f64 / rate;
+    Some((rate, std::time::Duration::from_secs_f64(left)))
+}
+
+/// The rate and ETA as one status-bar phrase, e.g. `12.3 MB/s · 4s left`.
+/// Empty when there is nothing worth saying.
+pub fn rate_eta_text(done: u64, total: u64, elapsed: std::time::Duration) -> String {
+    let Some((rate, left)) = rate_and_eta(done, total, elapsed) else {
+        return String::new();
+    };
+    let rate = crate::fs_model::fmt_size(rate as u64);
+    let secs = left.as_secs();
+    let left = if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        // Never "0s left" while there is still work: round up to one.
+        format!("{}s", secs.max(1))
+    };
+    format!("{rate}/s \u{00B7} {left} left")
 }
 
 /// Total bytes under a path (file size, or recursive sum for folders).
@@ -392,10 +496,12 @@ fn copy_path(
     tx: &Sender<Msg>,
     progress: &mut Progress,
     cancel: &AtomicBool,
+    paused: &AtomicBool,
 ) -> io::Result<()> {
     if src.is_dir() {
-        fs::create_dir_all(dest)?;
+        fs::create_dir_all(long_path(dest))?;
         for entry in walkdir::WalkDir::new(src).min_depth(1).sort_by_file_name() {
+            wait_while_paused(paused, cancel);
             if cancel.load(Ordering::Relaxed) {
                 return Ok(());
             }
@@ -406,11 +512,11 @@ fn copy_path(
                 .map_err(|e| io::Error::other(e.to_string()))?;
             let target = dest.join(rel);
             if entry.file_type().is_dir() {
-                fs::create_dir_all(&target)?;
+                fs::create_dir_all(long_path(&target))?;
             } else {
                 let name = rel.display().to_string();
                 progress.current = name.clone();
-                copy_file(entry.path(), &target, tx, progress, cancel)?;
+                copy_file(entry.path(), &target, tx, progress, cancel, paused)?;
                 if let Ok(md) = entry.metadata() {
                     let _ = copy_times(&target, &md);
                 }
@@ -424,7 +530,7 @@ fn copy_path(
             .to_string_lossy()
             .to_string();
         progress.current = name;
-        copy_file(src, dest, tx, progress, cancel)
+        copy_file(src, dest, tx, progress, cancel, paused)
     }
 }
 
@@ -456,6 +562,7 @@ pub fn start_zip(
         kind: OpKind::Compress,
         label,
         cancel: cancel.clone(),
+        paused: Arc::new(AtomicBool::new(false)),
         started: std::time::Instant::now(),
     };
     let archive_name = archive_name_for(&sources);
@@ -503,7 +610,7 @@ pub fn start_zip(
                 }
                 Err(e) => {
                     // A half-written archive is worse than none at all.
-                    let _ = fs::remove_file(&dest);
+                    let _ = fs::remove_file(long_path(&dest));
                     let _ = tx.send(Msg::Finished {
                         id,
                         outcome: Outcome::Failed(e),
@@ -512,6 +619,113 @@ pub fn start_zip(
             }
         })
         .expect("spawn zip thread");
+    job
+}
+
+/// Adds `sources` into an existing zip, on a thread of its own, the way Explorer
+/// lets you paste into a compressed folder. The archive is rewritten beside
+/// itself and only swapped in when the whole write has succeeded, so a failure
+/// leaves the original alone.
+pub fn start_add_to_zip(
+    tx: Sender<Msg>,
+    id: u64,
+    archive: PathBuf,
+    inner: String,
+    sources: Vec<PathBuf>,
+    cancel: Arc<AtomicBool>,
+) -> Job {
+    let name = short(&archive);
+    let job = Job {
+        id,
+        kind: OpKind::Compress,
+        label: format!("Adding to {name}"),
+        cancel: cancel.clone(),
+        paused: Arc::new(AtomicBool::new(false)),
+        started: std::time::Instant::now(),
+    };
+    std::thread::Builder::new()
+        .name("rhumb-zip-add".into())
+        .spawn(move || {
+            let total_items = sources.iter().map(|p| count_items(p)).sum::<usize>();
+            let progress = Progress {
+                id,
+                done_items: 0,
+                total_items,
+                done_bytes: 0,
+                total_bytes: 0,
+                current: name,
+                failed: Vec::new(),
+            };
+            let _ = tx.send(Msg::Progress(progress));
+            // The rewrite itself cannot be stopped part-way, so a cancel is only
+            // honoured before it begins.
+            let outcome = if cancel.load(Ordering::Relaxed) {
+                Outcome::Cancelled { done: 0 }
+            } else {
+                match crate::archive::add_to_zip(&archive, &inner, &sources) {
+                    Ok(n) => Outcome::Done {
+                        ok: n,
+                        failed: Vec::new(),
+                    },
+                    Err(e) => Outcome::Failed(e),
+                }
+            };
+            let _ = tx.send(Msg::Finished { id, outcome });
+        })
+        .expect("spawn zip-add thread");
+    job
+}
+
+/// Removes `entries` (inner paths) from a zip, on a thread of its own. The
+/// rewrite is written beside the archive and swapped in only when it is whole.
+pub fn start_remove_from_zip(
+    tx: Sender<Msg>,
+    id: u64,
+    archive: PathBuf,
+    entries: Vec<String>,
+    cancel: Arc<AtomicBool>,
+) -> Job {
+    let name = short(&archive);
+    let count = entries.len();
+    let job = Job {
+        id,
+        kind: OpKind::Delete,
+        label: format!(
+            "Removing {count} item{} from {name}",
+            if count == 1 { "" } else { "s" }
+        ),
+        cancel: cancel.clone(),
+        paused: Arc::new(AtomicBool::new(false)),
+        started: std::time::Instant::now(),
+    };
+    std::thread::Builder::new()
+        .name("rhumb-zip-del".into())
+        .spawn(move || {
+            let progress = Progress {
+                id,
+                done_items: 0,
+                total_items: count,
+                done_bytes: 0,
+                total_bytes: 0,
+                current: name,
+                failed: Vec::new(),
+            };
+            let _ = tx.send(Msg::Progress(progress));
+            // As with an add, a cancel is only honoured before the rewrite starts.
+            let outcome = if cancel.load(Ordering::Relaxed) {
+                Outcome::Cancelled { done: 0 }
+            } else {
+                match crate::archive::remove_from_zip(&archive, &entries) {
+                    Ok(n) => Outcome::Done {
+                        ok: n,
+                        failed: Vec::new(),
+                    },
+                    Err(e) => Outcome::Failed(e),
+                }
+            };
+            let _ = tx.send(Msg::Finished { id, outcome });
+        })
+        .expect("spawn zip-del thread");
     job
 }
 
@@ -535,6 +749,7 @@ pub fn start_extract(
         kind: OpKind::Extract,
         label: format!("Extracting {name}"),
         cancel: cancel.clone(),
+        paused: Arc::new(AtomicBool::new(false)),
         started: std::time::Instant::now(),
     };
     std::thread::Builder::new()
@@ -572,7 +787,7 @@ pub fn start_extract(
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                     // Half an extraction is worse than none: what this job made goes.
                     if made {
-                        let _ = fs::remove_dir_all(&dest);
+                        let _ = fs::remove_dir_all(long_path(&dest));
                     }
                     Outcome::Cancelled {
                         done: progress.done_items,
@@ -580,7 +795,7 @@ pub fn start_extract(
                 }
                 Err(e) => {
                     if made {
-                        let _ = fs::remove_dir_all(&dest);
+                        let _ = fs::remove_dir_all(long_path(&dest));
                     }
                     Outcome::Failed(e.to_string())
                 }
@@ -614,7 +829,7 @@ fn write_zip(
 ) -> Result<(), String> {
     use zip::write::SimpleFileOptions;
 
-    let file = fs::File::create(dest).map_err(|e| e.to_string())?;
+    let file = fs::File::create(long_path(dest)).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -643,7 +858,8 @@ fn write_zip(
                 break;
             }
             progress.current = short(from);
-            let mut r = fs::File::open(from).map_err(|e| format!("{}: {e}", short(from)))?;
+            let mut r =
+                fs::File::open(long_path(from)).map_err(|e| format!("{}: {e}", short(from)))?;
             // Names inside a zip always use forward slashes.
             let name = to.to_string_lossy().replace('\\', "/");
             zip.start_file(name, options)
@@ -676,15 +892,18 @@ fn copy_file(
     tx: &Sender<Msg>,
     progress: &mut Progress,
     cancel: &AtomicBool,
+    paused: &AtomicBool,
 ) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(long_path(parent))?;
     }
-    let mut r = fs::File::open(src)?;
-    let mut w = fs::File::create(dest)?;
+    // Another process may hold either end for a moment; retry rather than fail.
+    let mut r = retrying(|| fs::File::open(long_path(src)))?;
+    let mut w = retrying(|| fs::File::create(long_path(dest)))?;
     let mut buf = vec![0u8; CHUNK];
     let mut last_report = std::time::Instant::now();
     loop {
+        wait_while_paused(paused, cancel);
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -706,8 +925,11 @@ fn copy_file(
 
 /// Best effort: keep the modification time of the original.
 fn copy_times(dest: &Path, md: &fs::Metadata) -> io::Result<()> {
-    let file = fs::File::options().write(true).open(dest)?;
-    file.set_modified(md.modified()?)
+    // The destination can still be held by a scanner or indexer at this point.
+    retrying(|| {
+        let file = fs::File::options().write(true).open(long_path(dest))?;
+        file.set_modified(md.modified()?)
+    })
 }
 
 fn move_path(
@@ -716,9 +938,12 @@ fn move_path(
     tx: &Sender<Msg>,
     progress: &mut Progress,
     cancel: &AtomicBool,
+    paused: &AtomicBool,
 ) -> io::Result<()> {
-    // Fast path: same volume, no data copy needed.
-    match fs::rename(src, dest) {
+    // Fast path: same volume, no data copy needed. A rename can be refused
+    // while something else has the file open, so it is retried; a genuine
+    // cross-device failure falls through to copy + delete below.
+    match retrying(|| fs::rename(long_path(src), long_path(dest))) {
         Ok(()) => {
             progress.done_bytes += dir_size(src);
             return Ok(());
@@ -726,16 +951,16 @@ fn move_path(
         Err(_) => { /* cross-device: fall through to copy + delete */ }
     }
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(long_path(parent))?;
     }
-    copy_path(src, dest, tx, progress, cancel)?;
+    copy_path(src, dest, tx, progress, cancel, paused)?;
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
     if src.is_dir() {
-        fs::remove_dir_all(src)
+        fs::remove_dir_all(long_path(src))
     } else {
-        fs::remove_file(src)
+        fs::remove_file(long_path(src))
     }
 }
 
@@ -744,13 +969,14 @@ fn move_path(
 /// volumes.
 pub fn move_now(src: &Path, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(long_path(parent)).map_err(|e| e.to_string())?;
     }
-    if fs::rename(src, dest).is_ok() {
+    if fs::rename(long_path(src), long_path(dest)).is_ok() {
         return Ok(());
     }
     let (tx, rx) = crate::workers::bus();
     let cancel = AtomicBool::new(false);
+    let paused = AtomicBool::new(false);
     let mut progress = Progress {
         id: 0,
         done_items: 0,
@@ -761,22 +987,22 @@ pub fn move_now(src: &Path, dest: &Path) -> Result<(), String> {
         failed: Vec::new(),
     };
     if src.is_dir() {
-        fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+        fs::create_dir_all(long_path(dest)).map_err(|e| e.to_string())?;
         for entry in walkdir::WalkDir::new(src).min_depth(1).sort_by_file_name() {
             let entry = entry.map_err(|e| e.to_string())?;
             let rel = entry.path().strip_prefix(src).map_err(|e| e.to_string())?;
             let target = dest.join(rel);
             if entry.file_type().is_dir() {
-                fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+                fs::create_dir_all(long_path(&target)).map_err(|e| e.to_string())?;
             } else {
-                copy_file(entry.path(), &target, &tx, &mut progress, &cancel)
+                copy_file(entry.path(), &target, &tx, &mut progress, &cancel, &paused)
                     .map_err(|e| e.to_string())?;
             }
         }
-        fs::remove_dir_all(src).map_err(|e| e.to_string())?;
+        fs::remove_dir_all(long_path(src)).map_err(|e| e.to_string())?;
     } else {
-        copy_file(src, dest, &tx, &mut progress, &cancel).map_err(|e| e.to_string())?;
-        fs::remove_file(src).map_err(|e| e.to_string())?;
+        copy_file(src, dest, &tx, &mut progress, &cancel, &paused).map_err(|e| e.to_string())?;
+        fs::remove_file(long_path(src)).map_err(|e| e.to_string())?;
     }
     let _ = rx.try_recv();
     Ok(())
@@ -790,7 +1016,7 @@ pub fn peek_text(path: &Path) -> Option<String> {
     /// Enough for a screenful of preview lines.
     const CAP: usize = 8 * 1024;
     let mut buf = Vec::with_capacity(CAP);
-    let file = fs::File::open(path).ok()?;
+    let file = fs::File::open(long_path(path)).ok()?;
     // Read one byte past the cap so a cut multi-byte character is detectable.
     file.take((CAP + 1) as u64).read_to_end(&mut buf).ok()?;
     if buf.len() > CAP {
@@ -822,6 +1048,7 @@ pub fn start_permanent_delete(
     paths: Vec<PathBuf>,
     cancel: Arc<AtomicBool>,
 ) -> Job {
+    let paused = Arc::new(AtomicBool::new(false));
     let job = Job {
         id,
         kind: OpKind::Delete,
@@ -831,6 +1058,7 @@ pub fn start_permanent_delete(
             if paths.len() == 1 { "" } else { "s" }
         ),
         cancel: cancel.clone(),
+        paused: paused.clone(),
         started: std::time::Instant::now(),
     };
     let spawned = Job {
@@ -838,6 +1066,7 @@ pub fn start_permanent_delete(
         kind: job.kind,
         label: job.label.clone(),
         cancel: cancel.clone(),
+        paused: paused.clone(),
         started: job.started,
     };
     std::thread::Builder::new()
@@ -866,9 +1095,9 @@ pub fn start_permanent_delete(
                     return;
                 }
                 let r = if p.is_dir() {
-                    fs::remove_dir_all(p)
+                    fs::remove_dir_all(long_path(p))
                 } else {
-                    fs::remove_file(p)
+                    fs::remove_file(long_path(p))
                 };
                 match r {
                     Ok(()) => ok += 1,
@@ -1034,6 +1263,56 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A path under `root` whose full length clears `min`, so it is past the old
+    /// 260-character limit.
+    fn deeper_than(root: &Path, min: usize) -> PathBuf {
+        let segment = "0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut p = root.to_path_buf();
+        while p.as_os_str().len() <= min {
+            p.push(segment);
+        }
+        p
+    }
+
+    #[test]
+    fn copy_and_move_reach_past_max_path() {
+        if !cfg!(windows) {
+            return;
+        }
+        let root = tmp("long-path");
+        let deep = deeper_than(&root, 300);
+        assert!(deep.as_os_str().len() > 260, "the tree is not long enough");
+        fs::create_dir_all(fs_model::long_path(&deep)).unwrap();
+        let src = deep.join("a.txt");
+        fs::write(fs_model::long_path(&src), b"hello").unwrap();
+
+        // Copy the deep file out to the short root: this is `copy_file`, which
+        // opens and creates both ends through the helper.
+        let copied = root.join("copy.txt");
+        let (tx, _rx) = bus();
+        let cancel = AtomicBool::new(false);
+        let paused = AtomicBool::new(false);
+        let mut progress = Progress {
+            id: 1,
+            done_items: 0,
+            total_items: 1,
+            done_bytes: 0,
+            total_bytes: 5,
+            current: String::new(),
+            failed: Vec::new(),
+        };
+        copy_file(&src, &copied, &tx, &mut progress, &cancel, &paused).unwrap();
+        assert_eq!(fs::read(&copied).unwrap(), b"hello");
+
+        // Move it back down, which exercises `rename` on a verbatim path.
+        let moved = deep.join("moved.txt");
+        move_now(&copied, &moved).unwrap();
+        assert_eq!(fs::read(fs_model::long_path(&moved)).unwrap(), b"hello");
+        assert!(!copied.exists());
+
+        let _ = fs::remove_dir_all(fs_model::long_path(&root));
+    }
+
     #[test]
     fn copy_does_not_overwrite_existing_files() {
         let root = tmp("conflict");
@@ -1132,5 +1411,140 @@ mod tests {
             "report.zip"
         );
         assert_eq!(archive_name_for(&[]), "archive.zip");
+    }
+
+    #[test]
+    fn retrying_retries_a_sharing_violation_then_succeeds() {
+        let mut calls = 0;
+        let r: io::Result<u32> = retrying(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(io::Error::from_raw_os_error(32))
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(r.unwrap(), 7);
+        assert_eq!(calls, 3, "should have tried again until it worked");
+    }
+
+    #[test]
+    fn retrying_gives_up_after_its_attempts() {
+        let mut calls = 0;
+        let r: io::Result<()> = retrying(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(33))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, RETRY_ATTEMPTS, "gave up before the limit");
+    }
+
+    #[test]
+    fn retrying_does_not_retry_an_unrelated_error() {
+        let mut calls = 0;
+        let r: io::Result<()> = retrying(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(2))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, 1, "a missing file is not worth trying again");
+    }
+
+    #[test]
+    fn rate_and_eta_reports_a_sane_rate_and_time() {
+        // 1 MiB in 1 s means 1 MiB/s and, with 2 MiB to go, 2 s left.
+        let (rate, eta) = rate_and_eta(
+            1024 * 1024,
+            3 * 1024 * 1024,
+            std::time::Duration::from_secs(1),
+        )
+        .expect("a rate once there is a total and some time");
+        assert!((rate - 1024.0 * 1024.0).abs() < 1.0, "rate was {rate}");
+        assert_eq!(eta.as_secs(), 2);
+    }
+
+    #[test]
+    fn rate_and_eta_is_none_when_there_is_nothing_to_go_on() {
+        let a_second = std::time::Duration::from_secs(1);
+        assert!(rate_and_eta(0, 100, a_second).is_none(), "no progress yet");
+        assert!(rate_and_eta(50, 0, a_second).is_none(), "unknown total");
+        assert!(rate_and_eta(100, 100, a_second).is_none(), "already there");
+        assert!(
+            rate_and_eta(50, 100, std::time::Duration::from_millis(10)).is_none(),
+            "too soon to guess"
+        );
+    }
+
+    #[test]
+    fn rate_eta_text_reads_like_a_status_line() {
+        let text = rate_eta_text(
+            1024 * 1024,
+            3 * 1024 * 1024,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(text.contains("/s"), "{text}");
+        assert!(text.contains("left"), "{text}");
+        assert_eq!(rate_eta_text(0, 0, std::time::Duration::from_secs(1)), "");
+    }
+
+    #[test]
+    fn a_paused_copy_waits_until_it_is_resumed() {
+        let root = tmp("pause");
+        let src = root.join("src.bin");
+        let data = vec![7u8; 256 * 1024];
+        fs::write(&src, &data).unwrap();
+        let dest = root.join("dest.bin");
+
+        let (tx, _rx) = bus();
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Held from the very first chunk, so the copy cannot run ahead of the
+        // check below however the threads are scheduled.
+        let paused = Arc::new(AtomicBool::new(true));
+        let mut progress = Progress {
+            id: 1,
+            done_items: 0,
+            total_items: 1,
+            done_bytes: 0,
+            total_bytes: data.len() as u64,
+            current: String::new(),
+            failed: Vec::new(),
+        };
+
+        let (p, c) = (paused.clone(), cancel.clone());
+        let (s, d) = (src.clone(), dest.clone());
+        let worker = std::thread::spawn(move || copy_file(&s, &d, &tx, &mut progress, &c, &p));
+
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert_eq!(
+            fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+            0,
+            "bytes were written while the job was paused"
+        );
+
+        paused.store(false, Ordering::Relaxed);
+        worker.join().unwrap().unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), data, "the copy never finished");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cancel_releases_a_paused_worker() {
+        let paused = Arc::new(AtomicBool::new(true));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (p, c) = (paused.clone(), cancel.clone());
+        let worker = std::thread::spawn(move || {
+            wait_while_paused(&p, &c);
+            done_tx.send(()).unwrap();
+        });
+        // A pause must not make a cancel unreachable.
+        cancel.store(true, Ordering::Relaxed);
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok(),
+            "a cancelled worker stayed stuck behind the pause"
+        );
+        worker.join().unwrap();
     }
 }

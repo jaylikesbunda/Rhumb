@@ -1,24 +1,28 @@
 //! Archives as folders.
 //!
-//! A `.zip`, `.tar` or `.tar.gz` can be opened like a folder: its path followed by a
-//! path inside it, `C:\files\photos.zip\2024\beach.jpg`, names a place the file list
-//! can show, the address bar can say and the history can come back to. Nothing on the
+//! A `.zip`, `.tar`, `.tar.gz`, `.7z` or `.rar` can be opened like a folder: its path followed
+//! by a path inside it, `C:\files\photos.zip\2024\beach.jpg`, names a place the file
+//! list can show, the address bar can say and the history can come back to. Nothing on the
 //! disk has such a path, so this module is the one place that knows how to read it:
 //! [`split`] finds where the archive stops and the path inside starts, [`list`] reads
 //! one level of what is inside, and [`extract_to`] and [`materialize`] bring files out
 //! to somewhere real, which is what opening, copying and dragging need.
 //!
-//! Archives are read-only here: nothing is ever written back into one.
+//! Archives are read-only except for a zip, which can be written into the way
+//! Explorer edits a compressed folder: [`add_to_zip`] appends files and
+//! [`remove_from_zip`] rewrites the archive without the names asked for. Every
+//! other format stays read-only.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::fs_model::Entry;
+use crate::fs_model::{Entry, long_path};
 
 /// The archive formats that can be read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,6 +30,8 @@ pub enum Kind {
     Zip,
     Tar,
     TarGz,
+    SevenZ,
+    Rar,
 }
 
 /// What a name says about being an archive, by its extension.
@@ -37,6 +43,10 @@ pub fn kind_of(path: &Path) -> Option<Kind> {
         Some(Kind::TarGz)
     } else if name.ends_with(".tar") {
         Some(Kind::Tar)
+    } else if name.ends_with(".7z") {
+        Some(Kind::SevenZ)
+    } else if name.ends_with(".rar") {
+        Some(Kind::Rar)
     } else {
         None
     }
@@ -142,7 +152,7 @@ fn clean(name: &str) -> Option<String> {
 }
 
 fn table(archive: &Path) -> io::Result<Arc<Table>> {
-    let meta = std::fs::metadata(archive)?;
+    let meta = std::fs::metadata(long_path(archive))?;
     let (len, modified) = (meta.len(), meta.modified().ok());
     if let Some(t) = cache()
         .lock()
@@ -156,10 +166,12 @@ fn table(archive: &Path) -> io::Result<Arc<Table>> {
     let kind = kind_of(archive).ok_or_else(|| invalid("not an archive"))?;
     let items = match kind {
         Kind::Zip => read_zip(archive)?,
-        Kind::Tar => read_tar(BufReader::new(File::open(archive)?))?,
+        Kind::Tar => read_tar(BufReader::new(File::open(long_path(archive))?))?,
         Kind::TarGz => read_tar(flate2::read::GzDecoder::new(BufReader::new(File::open(
             archive,
         )?)))?,
+        Kind::SevenZ => read_7z(archive)?,
+        Kind::Rar => read_rar(archive)?,
     };
     let t = Arc::new(Table {
         len,
@@ -200,7 +212,8 @@ fn zip_time(d: zip::DateTime) -> Option<SystemTime> {
 }
 
 fn read_zip(archive: &Path) -> io::Result<Vec<Item>> {
-    let mut z = zip::ZipArchive::new(BufReader::new(File::open(archive)?)).map_err(invalid)?;
+    let mut z =
+        zip::ZipArchive::new(BufReader::new(File::open(long_path(archive))?)).map_err(invalid)?;
     let mut items = Vec::with_capacity(z.len());
     for i in 0..z.len() {
         // The raw entry: its header is all that is wanted, and an encrypted file has
@@ -242,6 +255,79 @@ fn read_tar<R: Read>(reader: R) -> io::Result<Vec<Item>> {
                 .mtime()
                 .ok()
                 .map(|s| UNIX_EPOCH + Duration::from_secs(s)),
+        });
+    }
+    Ok(items)
+}
+
+/// A 7z time as a `SystemTime`, if the archive recorded one. Kept clear of
+/// `SystemTime::from`, which panics on a time it cannot hold; a corrupt archive
+/// must be an error, not a crash.
+fn sevenz_time(e: &sevenz_rust::SevenZArchiveEntry) -> Option<SystemTime> {
+    if !e.has_last_modified_date {
+        return None;
+    }
+    let secs = e.last_modified_date().to_unix_time();
+    let d = Duration::from_secs(secs.unsigned_abs());
+    if secs >= 0 {
+        UNIX_EPOCH.checked_add(d)
+    } else {
+        UNIX_EPOCH.checked_sub(d)
+    }
+}
+
+fn read_7z(archive: &Path) -> io::Result<Vec<Item>> {
+    // Only the header is read here; the file data stays packed until something
+    // is extracted. A solid block shares one decoder, so listing must not decode.
+    let sz = sevenz_rust::SevenZReader::open(long_path(archive), sevenz_rust::Password::empty())
+        .map_err(invalid)?;
+    let mut items = Vec::with_capacity(sz.archive().files.len());
+    for e in &sz.archive().files {
+        let Some(path) = clean(e.name()) else {
+            continue;
+        };
+        items.push(Item {
+            path,
+            is_dir: e.is_directory(),
+            size: e.size(),
+            modified: sevenz_time(e),
+        });
+    }
+    Ok(items)
+}
+
+/// A RAR time as a `SystemTime`, if the archive recorded one. RAR 5 stores Unix
+/// seconds while older RAR stores DOS wall-clock fields; the crate knows which
+/// and its own conversion is range-checked, but a corrupt archive must be an
+/// error and not a crash, so nothing here is allowed to overflow.
+fn rar_time(m: &rars::ArchiveMemberMeta) -> Option<SystemTime> {
+    let raw = m.file_time?;
+    if m.family == rars::ArchiveFamily::Rar50Plus {
+        // The refinement is documented to sit below one second; clamp anyway so
+        // a malformed value cannot overflow `Duration`.
+        let nanos = m
+            .mtime_refinement
+            .map_or(0, |r| r.nanoseconds.min(999_999_999));
+        return UNIX_EPOCH.checked_add(Duration::new(u64::from(raw), nanos));
+    }
+    // Older families refuse impossible DOS fields themselves, returning `None`.
+    m.modification_time()
+}
+
+fn read_rar(archive: &Path) -> io::Result<Vec<Item>> {
+    // The archive stays an open file rather than being read into memory: only
+    // the headers are wanted to list it, and the payloads are read on extraction.
+    let ar = rars::ArchiveReader::read_reader(File::open(long_path(archive))?).map_err(invalid)?;
+    let mut items = Vec::new();
+    for m in ar.members() {
+        let Some(path) = clean(&m.meta.name_lossy()) else {
+            continue;
+        };
+        items.push(Item {
+            path,
+            is_dir: m.meta.is_directory,
+            size: m.meta.unpacked_size,
+            modified: rar_time(&m.meta),
         });
     }
     Ok(items)
@@ -364,6 +450,193 @@ fn under(dest: &Path, name: &str) -> Option<PathBuf> {
     out.starts_with(dest).then_some(out)
 }
 
+/// A short name for an error message, falling back to the whole path.
+fn shown(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// A temporary name beside `path`, on the same volume so the finished file can
+/// replace the original with a rename. A counter keeps two edits of one archive
+/// from choosing the same name.
+fn temp_beside(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!(
+        ".{}.rhumb-{}-{n}.tmp",
+        shown(path),
+        std::process::id()
+    ))
+}
+
+/// Adds `sources` to an existing zip, under `inner_dir` (empty is the top), the
+/// way Explorer adds to a compressed folder. Every entry already in the archive
+/// is copied across unchanged and the new files are appended; the result is
+/// written beside the archive and only swapped in once it is whole, so a failure
+/// leaves the original untouched.
+///
+/// Returns how many files were added. A folder contributes its files at every
+/// depth, with `/` between the names, and keeps its own entry too, so an empty
+/// folder survives. Only zip archives can be changed; a tar, 7z or rar is
+/// refused, and so is a name that would climb out of the archive.
+pub fn add_to_zip(zip: &Path, inner_dir: &str, sources: &[PathBuf]) -> Result<usize, String> {
+    if kind_of(zip) != Some(Kind::Zip) {
+        return Err(format!(
+            "{} is not a zip archive: only zips can be changed",
+            shown(zip)
+        ));
+    }
+    let dir = if inner_dir.trim_matches(['/', '\\']).is_empty() {
+        String::new()
+    } else {
+        clean(inner_dir).ok_or_else(|| format!("unsafe folder {inner_dir:?}"))?
+    };
+    // Work out every name before touching the archive, so a bad one is refused
+    // with the archive still as it was.
+    let mut new: Vec<(PathBuf, String, bool)> = Vec::new();
+    for src in sources {
+        let Some(base) = src.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let top = if dir.is_empty() {
+            base
+        } else {
+            format!("{dir}/{base}")
+        };
+        if src.is_dir() {
+            new.push((src.clone(), top.clone(), true));
+            for entry in walkdir::WalkDir::new(src).min_depth(1).sort_by_file_name() {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let kind = entry.file_type();
+                // Links and device files have no bytes to store, so they are
+                // left out rather than followed.
+                if !(kind.is_file() || kind.is_dir()) {
+                    continue;
+                }
+                let rel = entry
+                    .path()
+                    .strip_prefix(src)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                new.push((
+                    entry.path().to_path_buf(),
+                    format!("{top}/{rel}"),
+                    kind.is_dir(),
+                ));
+            }
+        } else {
+            new.push((src.clone(), top, false));
+        }
+    }
+    if new.is_empty() {
+        return Ok(0);
+    }
+    // The same last line of defence the reader uses, so nothing is ever written
+    // under a name that could climb out.
+    for (_, name, _) in &new {
+        if under(Path::new(""), name).is_none() {
+            return Err(format!("unsafe name {name:?}"));
+        }
+    }
+
+    let tmp = temp_beside(zip);
+    let result = (|| -> Result<usize, String> {
+        let mut reader = zip::ZipArchive::new(BufReader::new(
+            File::open(long_path(zip)).map_err(|e| e.to_string())?,
+        ))
+        .map_err(|e| e.to_string())?;
+        let mut writer =
+            zip::ZipWriter::new(File::create(long_path(&tmp)).map_err(|e| e.to_string())?);
+        // Existing entries keep their bytes and their compression; only the
+        // directory around them changes.
+        for i in 0..reader.len() {
+            let f = reader.by_index_raw(i).map_err(|e| e.to_string())?;
+            writer.raw_copy_file(f).map_err(|e| e.to_string())?;
+        }
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        let mut files = 0usize;
+        for (from, name, is_dir) in &new {
+            if *is_dir {
+                writer
+                    .add_directory(name.clone(), options)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                writer
+                    .start_file(name.clone(), options)
+                    .map_err(|e| e.to_string())?;
+                let mut r = File::open(long_path(from)).map_err(|e| e.to_string())?;
+                io::copy(&mut r, &mut writer).map_err(|e| e.to_string())?;
+                files += 1;
+            }
+        }
+        writer.finish().map_err(|e| e.to_string())?;
+        // Windows will not rename over a file that is still open, so the reader
+        // is let go before the swap.
+        drop(reader);
+        std::fs::rename(long_path(&tmp), long_path(zip)).map_err(|e| e.to_string())?;
+        Ok(files)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(long_path(&tmp));
+    }
+    result
+}
+
+/// Rewrites a zip without the named entries, each an inner path with `/` between
+/// the names and none at the ends. Removing a folder removes everything under
+/// it. The rewrite goes beside the archive and replaces it only on success, so a
+/// failure leaves the original whole.
+///
+/// Returns how many entries were removed. Only zip archives can be changed.
+pub fn remove_from_zip(zip: &Path, entries: &[String]) -> Result<usize, String> {
+    if kind_of(zip) != Some(Kind::Zip) {
+        return Err(format!(
+            "{} is not a zip archive: only zips can be changed",
+            shown(zip)
+        ));
+    }
+    let targets: Vec<String> = entries.iter().filter_map(|e| clean(e)).collect();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    let tmp = temp_beside(zip);
+    let result = (|| -> Result<usize, String> {
+        let mut reader = zip::ZipArchive::new(BufReader::new(
+            File::open(long_path(zip)).map_err(|e| e.to_string())?,
+        ))
+        .map_err(|e| e.to_string())?;
+        let mut writer =
+            zip::ZipWriter::new(File::create(long_path(&tmp)).map_err(|e| e.to_string())?);
+        let mut removed = 0usize;
+        for i in 0..reader.len() {
+            let f = reader.by_index_raw(i).map_err(|e| e.to_string())?;
+            let gone = clean(f.name()).is_some_and(|n| {
+                targets
+                    .iter()
+                    .any(|t| n == *t || n.starts_with(&format!("{t}/")))
+            });
+            if gone {
+                removed += 1;
+                continue;
+            }
+            writer.raw_copy_file(f).map_err(|e| e.to_string())?;
+        }
+        writer.finish().map_err(|e| e.to_string())?;
+        drop(reader);
+        std::fs::rename(long_path(&tmp), long_path(zip)).map_err(|e| e.to_string())?;
+        Ok(removed)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(long_path(&tmp));
+    }
+    result
+}
+
 /// Writes what is at `inner` (a file, a folder with all it holds, or with `inner`
 /// empty the whole archive) into `dest`, which is made if it is not there. A file or
 /// folder lands as `dest/<its name>`; the whole archive lands as its contents. Names
@@ -388,14 +661,14 @@ pub fn extract_with(
     };
     let wanted =
         |name: &str| inner.is_empty() || name == inner || name.starts_with(&format!("{inner}/"));
-    std::fs::create_dir_all(dest)?;
+    std::fs::create_dir_all(long_path(dest))?;
     let kind = kind_of(archive).ok_or_else(|| invalid("not an archive"))?;
     let mut files = 0usize;
     let mut found = false;
     match kind {
         Kind::Zip => {
-            let mut z =
-                zip::ZipArchive::new(BufReader::new(File::open(archive)?)).map_err(invalid)?;
+            let mut z = zip::ZipArchive::new(BufReader::new(File::open(long_path(archive))?))
+                .map_err(invalid)?;
             for i in 0..z.len() {
                 let mut f = z.by_index(i).map_err(invalid)?;
                 let Some(name) = clean(f.name()) else {
@@ -410,15 +683,15 @@ pub fn extract_with(
                     continue;
                 };
                 if f.is_dir() || f.name().ends_with('/') {
-                    std::fs::create_dir_all(&out)?;
+                    std::fs::create_dir_all(long_path(&out))?;
                 } else {
                     if !step(&name, f.size()) {
                         return Err(cancelled());
                     }
                     if let Some(parent) = out.parent() {
-                        std::fs::create_dir_all(parent)?;
+                        std::fs::create_dir_all(long_path(parent))?;
                     }
-                    let mut w = File::create(&out)?;
+                    let mut w = File::create(long_path(&out))?;
                     io::copy(&mut f, &mut w)?;
                     w.flush()?;
                     files += 1;
@@ -426,7 +699,7 @@ pub fn extract_with(
             }
         }
         Kind::Tar => extract_tar(
-            BufReader::new(File::open(archive)?),
+            BufReader::new(File::open(long_path(archive))?),
             &wanted,
             &strip,
             dest,
@@ -435,7 +708,7 @@ pub fn extract_with(
             step,
         )?,
         Kind::TarGz => extract_tar(
-            flate2::read::GzDecoder::new(BufReader::new(File::open(archive)?)),
+            flate2::read::GzDecoder::new(BufReader::new(File::open(long_path(archive))?)),
             &wanted,
             &strip,
             dest,
@@ -443,6 +716,8 @@ pub fn extract_with(
             &mut found,
             step,
         )?,
+        Kind::SevenZ => extract_7z(archive, &wanted, &strip, dest, &mut files, &mut found, step)?,
+        Kind::Rar => extract_rar(archive, &wanted, &strip, dest, &mut files, &mut found, step)?,
     }
     if !found && !inner.is_empty() {
         // A folder the archive only implies has no entry of its own to have matched.
@@ -489,20 +764,195 @@ fn extract_tar<R: Read>(
             continue;
         };
         if t.is_dir() {
-            std::fs::create_dir_all(&out)?;
+            std::fs::create_dir_all(long_path(&out))?;
         } else {
             if !step(&name, entry.header().size().unwrap_or(0)) {
                 return Err(cancelled());
             }
             if let Some(parent) = out.parent() {
-                std::fs::create_dir_all(parent)?;
+                std::fs::create_dir_all(long_path(parent))?;
             }
-            let mut w = File::create(&out)?;
+            let mut w = File::create(long_path(&out))?;
             io::copy(&mut entry, &mut w)?;
             w.flush()?;
             *files += 1;
         }
     }
+    Ok(())
+}
+
+/// Reads and throws away the rest of one entry's data. In a solid 7z block the
+/// next file's bytes begin where this one's end, so even a file that is not
+/// wanted has to be decoded before the one after it can be read. Where files are
+/// packed one to a block there is nothing to line up, so the data is left alone.
+/// A failure is parked in `stop` so the caller can stop with the real reason.
+fn drain(reader: &mut dyn Read, solid: bool, stop: &mut Option<io::Error>) -> bool {
+    if !solid {
+        return true;
+    }
+    match io::copy(reader, &mut io::sink()) {
+        Ok(_) => true,
+        Err(e) => {
+            *stop = Some(e);
+            false
+        }
+    }
+}
+
+fn extract_7z(
+    archive: &Path,
+    wanted: &dyn Fn(&str) -> bool,
+    strip: &str,
+    dest: &Path,
+    files: &mut usize,
+    found: &mut bool,
+    step: &mut dyn FnMut(&str, u64) -> bool,
+) -> io::Result<()> {
+    let mut sz =
+        sevenz_rust::SevenZReader::open(long_path(archive), sevenz_rust::Password::empty())
+            .map_err(invalid)?;
+    // A block holding more than one file is solid, and its files can only be
+    // decoded in order.
+    let solid = sz
+        .archive()
+        .folders
+        .iter()
+        .any(|f| f.num_unpack_sub_streams > 1);
+    // The library's closure returns its own error type, so an `io::Error` is kept
+    // here and answering `false` stops the walk.
+    let mut stop: Option<io::Error> = None;
+    let res = sz.for_each_entries(|entry, reader| {
+        let Some(name) = clean(entry.name()) else {
+            return Ok(drain(reader, solid, &mut stop));
+        };
+        if !wanted(&name) {
+            return Ok(drain(reader, solid, &mut stop));
+        }
+        *found = true;
+        let rel = name.strip_prefix(strip).unwrap_or(&name);
+        let Some(out) = under(dest, rel) else {
+            return Ok(drain(reader, solid, &mut stop));
+        };
+        if entry.is_directory() {
+            if let Err(e) = std::fs::create_dir_all(long_path(&out)) {
+                stop = Some(e);
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        if !step(&name, entry.size()) {
+            stop = Some(cancelled());
+            return Ok(false);
+        }
+        let write = (|| -> io::Result<()> {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(long_path(parent))?;
+            }
+            let mut w = File::create(long_path(&out))?;
+            io::copy(reader, &mut w)?;
+            w.flush()?;
+            Ok(())
+        })();
+        match write {
+            Ok(()) => {
+                *files += 1;
+                Ok(true)
+            }
+            Err(e) => {
+                stop = Some(e);
+                Ok(false)
+            }
+        }
+    });
+    if let Some(e) = stop {
+        return Err(e);
+    }
+    res.map_err(invalid)?;
+    Ok(())
+}
+
+/// Whether a RAR packs its files against each other, so one file's bytes are
+/// needed to reach the next and an unwanted one cannot simply be skipped. The
+/// facade does not answer this, so each family is asked in its own terms.
+fn rar_is_solid(ar: &rars::Archive) -> bool {
+    match ar {
+        rars::Archive::Rar13(a) => a.main.is_solid(),
+        rars::Archive::Rar15To40(a) => a.main.is_solid() || a.files().any(|f| f.is_solid()),
+        rars::Archive::Rar50Plus(a) => {
+            a.main.is_solid() || a.files().any(|f| f.compression_info & 0x40 != 0)
+        }
+        // A family added later is not known to be solid; skipping a file it
+        // needed would be an error, not a crash.
+        _ => false,
+    }
+}
+
+fn extract_rar(
+    archive: &Path,
+    wanted: &dyn Fn(&str) -> bool,
+    strip: &str,
+    dest: &Path,
+    files: &mut usize,
+    found: &mut bool,
+    step: &mut dyn FnMut(&str, u64) -> bool,
+) -> io::Result<()> {
+    let ar = rars::ArchiveReader::read_reader(File::open(long_path(archive))?).map_err(invalid)?;
+    // In a solid archive an unwanted file still has to be decoded, because the
+    // next file's bytes begin where its end. Its output goes to nothing.
+    let solid = rar_is_solid(&ar);
+    let drain = |m: &rars::ArchiveMember| -> rars::ExtractionDecision {
+        if solid && !m.meta.is_directory && !m.meta.is_redirection {
+            rars::ExtractionDecision::Extract(Box::new(io::sink()))
+        } else {
+            rars::ExtractionDecision::Skip
+        }
+    };
+    // The library's closure returns its own error type, so an `io::Error` is
+    // kept here and answering `Stop` ends the walk with it.
+    let mut stop: Option<io::Error> = None;
+    let outcome = ar.extract_with_control(rars::ArchiveReadOptions::new(), |m| {
+        let name = m.meta.name_lossy();
+        let take = clean(&name).filter(|n| wanted(n));
+        let Some(name) = take else {
+            return Ok(drain(m));
+        };
+        *found = true;
+        let rel = name.strip_prefix(strip).unwrap_or(&name);
+        let Some(out) = under(dest, rel) else {
+            return Ok(drain(m));
+        };
+        if m.meta.is_directory {
+            if let Err(e) = std::fs::create_dir_all(long_path(&out)) {
+                stop = Some(e);
+                return Ok(rars::ExtractionDecision::Stop);
+            }
+            return Ok(rars::ExtractionDecision::Skip);
+        }
+        if !step(&name, m.meta.unpacked_size) {
+            stop = Some(cancelled());
+            return Ok(rars::ExtractionDecision::Stop);
+        }
+        if let Some(parent) = out.parent()
+            && let Err(e) = std::fs::create_dir_all(long_path(parent))
+        {
+            stop = Some(e);
+            return Ok(rars::ExtractionDecision::Stop);
+        }
+        match File::create(long_path(&out)) {
+            Ok(w) => {
+                *files += 1;
+                Ok(rars::ExtractionDecision::Extract(Box::new(w)))
+            }
+            Err(e) => {
+                stop = Some(e);
+                Ok(rars::ExtractionDecision::Stop)
+            }
+        }
+    });
+    if let Some(e) = stop {
+        return Err(e);
+    }
+    outcome.map_err(invalid)?;
     Ok(())
 }
 
@@ -524,7 +974,7 @@ pub fn materialize(path: &Path) -> io::Result<PathBuf> {
             "an archive is not one file; extract it instead",
         ));
     }
-    let meta = std::fs::metadata(&archive)?;
+    let meta = std::fs::metadata(long_path(&archive))?;
     let stamp = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -601,6 +1051,48 @@ mod tests {
         z.finish().unwrap();
     }
 
+    /// A 7z with the given files; a name ending in `/` is a folder entry.
+    fn make_7z(path: &Path, files: &[(&str, &[u8])]) {
+        let mut w = sevenz_rust::SevenZWriter::create(path).unwrap();
+        for (name, body) in files {
+            let mut e = sevenz_rust::SevenZArchiveEntry::new();
+            e.name = name.to_string();
+            e.has_last_modified_date = true;
+            e.last_modified_date =
+                sevenz_rust::nt_time::FileTime::from_unix_time(1_700_000_000).unwrap();
+            if name.ends_with('/') {
+                e.is_directory = true;
+                w.push_archive_entry::<&[u8]>(e, None).unwrap();
+            } else {
+                w.push_archive_entry(e, Some(*body)).unwrap();
+            }
+        }
+        w.finish().unwrap();
+    }
+
+    /// A RAR with the given files; a name ending in `/` is a folder entry.
+    ///
+    /// Built with the crate's writer, which only the test build compiles in;
+    /// the program itself ships the reader alone.
+    fn make_rar(path: &Path, files: &[(&str, &[u8])]) {
+        let mut b = rars::Builder::new(rars::ArchiveVersion::Rar50).store(true);
+        for (name, body) in files {
+            if name.ends_with('/') {
+                b.add_directory(name.as_bytes().to_vec(), Some(1_700_000_000), None)
+                    .unwrap();
+            } else {
+                b.add_bytes(
+                    name.as_bytes().to_vec(),
+                    body.to_vec(),
+                    Some(1_700_000_000),
+                    None,
+                )
+                .unwrap();
+            }
+        }
+        std::fs::write(path, b.to_bytes().unwrap()).unwrap();
+    }
+
     fn make_tar(path: &Path, files: &[(&str, &[u8])], gz: bool) {
         let f = File::create(path).unwrap();
         let w: Box<dyn Write> = if gz {
@@ -639,12 +1131,21 @@ mod tests {
 
     fn each_format(name: &str, f: impl Fn(&Path, &str)) {
         let d = dir(name);
-        for (ext, kind) in [("zip", 0), ("tar", 1), ("tar.gz", 2), ("tgz", 2)] {
+        for (ext, kind) in [
+            ("zip", 0),
+            ("tar", 1),
+            ("tar.gz", 2),
+            ("tgz", 2),
+            ("7z", 3),
+            ("rar", 4),
+        ] {
             let p = d.join(format!("a.{ext}"));
             match kind {
                 0 => make_zip(&p, FILES),
                 1 => make_tar(&p, FILES, false),
-                _ => make_tar(&p, FILES, true),
+                2 => make_tar(&p, FILES, true),
+                3 => make_7z(&p, FILES),
+                _ => make_rar(&p, FILES),
             }
             f(&p, ext);
         }
@@ -666,6 +1167,10 @@ mod tests {
             ("a.tar", Some(Kind::Tar)),
             ("a.tar.gz", Some(Kind::TarGz)),
             ("a.TGZ", Some(Kind::TarGz)),
+            ("a.7z", Some(Kind::SevenZ)),
+            ("A.7Z", Some(Kind::SevenZ)),
+            ("a.rar", Some(Kind::Rar)),
+            ("A.RAR", Some(Kind::Rar)),
             ("a.gz", None),
             ("zip", None),
             ("a.zip.txt", None),
@@ -1142,7 +1647,8 @@ mod tests {
         assert_eq!(std::fs::read(&real).unwrap(), b"fn main() {}");
         assert!(real.starts_with(cache_root()));
         let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(cache_root());
+        // The cache is process-wide; wiping it here raced other tests reading it.
+        // It is left for the app's own sweep, which clears stale ones on launch.
     }
 
     #[test]
@@ -1157,7 +1663,8 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(std::fs::read(&b).unwrap(), b"edited");
         let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(cache_root());
+        // The cache is process-wide; wiping it here raced other tests reading it.
+        // It is left for the app's own sweep, which clears stale ones on launch.
     }
 
     #[test]
@@ -1168,7 +1675,8 @@ mod tests {
         assert!(real.is_dir());
         assert!(real.join("main.rs").is_file());
         let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(cache_root());
+        // The cache is process-wide; wiping it here raced other tests reading it.
+        // It is left for the app's own sweep, which clears stale ones on launch.
     }
 
     #[test]
@@ -1198,7 +1706,8 @@ mod tests {
         let b = materialize(&p.join("f.txt")).unwrap();
         assert_eq!(std::fs::read(&b).unwrap(), b"second one");
         let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(cache_root());
+        // The cache is process-wide; wiping it here raced other tests reading it.
+        // It is left for the app's own sweep, which clears stale ones on launch.
     }
 
     #[test]
@@ -1268,6 +1777,189 @@ mod tests {
         );
     }
 
+    // ---- 7z ------------------------------------------------------------------------------
+
+    #[test]
+    fn a_7z_is_recognised_split_and_listed() {
+        let d = dir("sevenz");
+        let p = d.join("a.7z");
+        make_7z(&p, FILES);
+        assert!(is_archive_file(&p));
+        let s = split(&p.join("src").join("main.rs")).unwrap();
+        assert_eq!(s.archive, p);
+        assert_eq!(s.inner, "src/main.rs");
+        assert!(is_virtual(&p.join("src")));
+        let mut n = names(&list(&p, "").unwrap());
+        n.sort();
+        assert_eq!(n, vec!["docs", "readme.txt", "src"]);
+        let readme = list(&p, "")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "readme.txt")
+            .unwrap();
+        assert!(!readme.is_dir);
+        assert_eq!(readme.size, 5);
+        assert_eq!(
+            readme.modified,
+            Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            "the archive records a date"
+        );
+        assert!(is_dir_inside(&p, "src/deep"));
+        assert!(!is_dir_inside(&p, "readme.txt"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn one_file_is_extracted_from_a_7z() {
+        let d = dir("sevenz-extract");
+        let p = d.join("a.7z");
+        make_7z(&p, FILES);
+        let out = d.join("out");
+        let r = extract_to(&p, "src/main.rs", &out).unwrap();
+        assert_eq!(r.files, 1);
+        assert_eq!(r.at, out.join("main.rs"));
+        assert_eq!(std::fs::read(out.join("main.rs")).unwrap(), b"fn main() {}");
+        assert!(!out.join("readme.txt").exists(), "and nothing else");
+        // And the same file, asked for by its virtual path, becomes real.
+        let real = materialize(&p.join("src").join("main.rs")).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"fn main() {}");
+        let _ = std::fs::remove_dir_all(&d);
+        // The cache is process-wide; wiping it here raced other tests reading it.
+        // It is left for the app's own sweep, which clears stale ones on launch.
+    }
+
+    #[test]
+    fn a_solid_7z_still_extracts_one_file_by_decoding_the_ones_before_it() {
+        let d = dir("sevenz-solid");
+        let src = d.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("first.txt"), b"first").unwrap();
+        std::fs::write(src.join("second.txt"), b"second").unwrap();
+        std::fs::write(src.join("third.txt"), b"third").unwrap();
+        let p = d.join("solid.7z");
+        let mut w = sevenz_rust::SevenZWriter::create(&p).unwrap();
+        // All the files go into one block, so the wanted one cannot be reached
+        // without decoding what comes before it.
+        w.push_source_path(&src, |_| true).unwrap();
+        w.finish().unwrap();
+        let mut n = names(&list(&p, "").unwrap());
+        n.sort();
+        assert_eq!(n, vec!["first.txt", "second.txt", "third.txt"]);
+        let out = d.join("out");
+        let r = extract_to(&p, "third.txt", &out).unwrap();
+        assert_eq!(r.files, 1);
+        assert_eq!(std::fs::read(out.join("third.txt")).unwrap(), b"third");
+        assert!(!out.join("first.txt").exists(), "and nothing else");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_corrupt_7z_is_an_error_and_not_a_panic() {
+        let d = dir("bad-sevenz");
+        std::fs::write(d.join("bad.7z"), b"this is not a 7z file at all").unwrap();
+        assert!(list(&d.join("bad.7z"), "").is_err());
+        std::fs::write(d.join("empty.7z"), b"").unwrap();
+        assert!(list(&d.join("empty.7z"), "").is_err());
+        // The right signature but nothing behind it.
+        std::fs::write(d.join("cut.7z"), b"7z\xbc\xaf\x27\x1c\x00\x02short").unwrap();
+        assert!(list(&d.join("cut.7z"), "").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- rar -----------------------------------------------------------------------------
+
+    #[test]
+    fn a_rar_is_recognised_split_listed_and_extracted() {
+        let d = dir("rar");
+        let p = d.join("a.rar");
+        make_rar(&p, FILES);
+        assert!(is_archive_file(&p));
+        let s = split(&p.join("src").join("main.rs")).unwrap();
+        assert_eq!(s.archive, p);
+        assert_eq!(s.inner, "src/main.rs");
+        assert!(is_virtual(&p.join("src")));
+        let mut n = names(&list(&p, "").unwrap());
+        n.sort();
+        assert_eq!(n, vec!["docs", "readme.txt", "src"]);
+        let readme = list(&p, "")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "readme.txt")
+            .unwrap();
+        assert!(!readme.is_dir);
+        assert_eq!(readme.size, 5);
+        assert_eq!(
+            readme.modified,
+            Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            "the archive records a date"
+        );
+        assert!(is_dir_inside(&p, "src/deep"));
+        assert!(!is_dir_inside(&p, "readme.txt"));
+        // A file comes out of it, and the same one by its virtual path.
+        let out = d.join("out");
+        let r = extract_to(&p, "src/main.rs", &out).unwrap();
+        assert_eq!(r.files, 1);
+        assert_eq!(r.at, out.join("main.rs"));
+        assert_eq!(std::fs::read(out.join("main.rs")).unwrap(), b"fn main() {}");
+        assert!(!out.join("readme.txt").exists(), "and nothing else");
+        let real = materialize(&p.join("src").join("main.rs")).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"fn main() {}");
+        let _ = std::fs::remove_dir_all(&d);
+        // The cache is process-wide; wiping it here raced other tests reading it.
+        // It is left for the app's own sweep, which clears stale ones on launch.
+    }
+
+    #[test]
+    fn a_solid_rar_still_extracts_one_file_by_decoding_the_ones_before_it() {
+        let d = dir("rar-solid");
+        let p = d.join("solid.rar");
+        let mut b = rars::Builder::new(rars::ArchiveVersion::Rar50)
+            .store(true)
+            .solid(true);
+        for (name, body) in [
+            ("first.txt", b"first".as_slice()),
+            ("second.txt", b"second".as_slice()),
+            ("third.txt", b"third".as_slice()),
+        ] {
+            b.add_bytes(
+                name.as_bytes().to_vec(),
+                body.to_vec(),
+                Some(1_700_000_000),
+                None,
+            )
+            .unwrap();
+        }
+        std::fs::write(&p, b.to_bytes().unwrap()).unwrap();
+        let mut n = names(&list(&p, "").unwrap());
+        n.sort();
+        assert_eq!(n, vec!["first.txt", "second.txt", "third.txt"]);
+        // The wanted file is last, so its bytes can only be reached by decoding
+        // what comes before it, which is what a solid archive demands.
+        assert!(rar_is_solid(&rars::ArchiveReader::read_path(&p).unwrap()));
+        let out = d.join("out");
+        let r = extract_to(&p, "third.txt", &out).unwrap();
+        assert_eq!(r.files, 1);
+        assert_eq!(std::fs::read(out.join("third.txt")).unwrap(), b"third");
+        assert!(!out.join("first.txt").exists(), "and nothing else");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_corrupt_rar_is_an_error_and_not_a_panic() {
+        let d = dir("bad-rar");
+        std::fs::write(d.join("bad.rar"), b"this is not a rar file at all").unwrap();
+        assert!(list(&d.join("bad.rar"), "").is_err());
+        std::fs::write(d.join("empty.rar"), b"").unwrap();
+        assert!(list(&d.join("empty.rar"), "").is_err());
+        // The RAR5 signature but nothing behind it.
+        std::fs::write(d.join("cut.rar"), b"Rar!\x1a\x07\x01\x00short").unwrap();
+        assert!(list(&d.join("cut.rar"), "").is_err());
+        // And the older signature, likewise cut off.
+        std::fs::write(d.join("old.rar"), b"Rar!\x1a\x07\x00\x00short").unwrap();
+        assert!(list(&d.join("old.rar"), "").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn clean_names_are_tidy_and_the_unsafe_ones_are_refused() {
         assert_eq!(clean("a/b/c.txt").as_deref(), Some("a/b/c.txt"));
@@ -1281,5 +1973,179 @@ mod tests {
         assert_eq!(clean("C:/x"), None);
         assert_eq!(clean("c:\\x"), None);
         assert_eq!(clean("ok:name").as_deref(), Some("ok:name"));
+    }
+
+    // ---- writing into a zip --------------------------------------------------------------
+
+    /// A real file with `body`, under `dir`, returning its path.
+    fn source(dir: &Path, rel: &str, body: &[u8]) -> PathBuf {
+        let p = dir.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_file_and_a_folder_are_added_into_a_zip() {
+        let d = dir("zip-add");
+        let p = d.join("a.zip");
+        make_zip(&p, &[("keep.txt", b"keep")]);
+        let loose = source(&d, "loose.txt", b"loose");
+        source(&d, "src/one.txt", b"one");
+        source(&d, "src/nested/two.txt", b"two");
+
+        let n = add_to_zip(&p, "", &[loose.clone(), d.join("src")]).unwrap();
+        assert_eq!(n, 3, "the loose file and the folder's two files");
+
+        // The original archive still opens, and now holds everything.
+        let mut top = names(&list(&p, "").unwrap());
+        top.sort();
+        assert_eq!(top, vec!["keep.txt", "loose.txt", "src"]);
+        let mut inner = names(&list(&p, "src").unwrap());
+        inner.sort();
+        assert_eq!(inner, vec!["nested", "one.txt"]);
+        assert_eq!(names(&list(&p, "src/nested").unwrap()), vec!["two.txt"]);
+
+        // And the bytes are the bytes.
+        let out = d.join("out");
+        extract_to(&p, "src", &out).unwrap();
+        assert_eq!(std::fs::read(out.join("src/one.txt")).unwrap(), b"one");
+        assert_eq!(
+            std::fs::read(out.join("src/nested/two.txt")).unwrap(),
+            b"two"
+        );
+        extract_to(&p, "loose.txt", &out).unwrap();
+        assert_eq!(std::fs::read(out.join("loose.txt")).unwrap(), b"loose");
+        extract_to(&p, "keep.txt", &out).unwrap();
+        assert_eq!(std::fs::read(out.join("keep.txt")).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn files_add_under_a_folder_inside_the_zip() {
+        let d = dir("zip-add-inner");
+        let p = d.join("a.zip");
+        make_zip(&p, FILES);
+        let new = source(&d, "new.txt", b"new");
+
+        let n = add_to_zip(&p, "src", &[new]).unwrap();
+        assert_eq!(n, 1);
+        let mut inner = names(&list(&p, "src").unwrap());
+        inner.sort();
+        assert_eq!(inner, vec!["deep", "lib.rs", "main.rs", "new.txt"]);
+        let out = d.join("out");
+        extract_to(&p, "src/new.txt", &out).unwrap();
+        assert_eq!(std::fs::read(out.join("new.txt")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_empty_folder_added_to_a_zip_survives() {
+        let d = dir("zip-add-empty");
+        let p = d.join("a.zip");
+        make_zip(&p, &[]);
+        std::fs::create_dir_all(d.join("hollow")).unwrap();
+
+        let n = add_to_zip(&p, "", &[d.join("hollow")]).unwrap();
+        assert_eq!(n, 0, "a folder entry is not a file");
+        assert_eq!(names(&list(&p, "").unwrap()), vec!["hollow"]);
+        assert!(list(&p, "hollow").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_entry_and_a_folder_subtree_are_removed_from_a_zip() {
+        let d = dir("zip-remove");
+        let p = d.join("a.zip");
+        make_zip(&p, FILES);
+
+        let n = remove_from_zip(&p, &["readme.txt".into(), "src".into()]).unwrap();
+        assert_eq!(n, 4, "readme and the three files under src");
+        let top = names(&list(&p, "").unwrap());
+        assert_eq!(top, vec!["docs"], "the rest survives");
+        assert!(list(&p, "src").is_err(), "the folder is gone");
+        assert!(list(&p, "readme.txt").is_err());
+        let out = d.join("out");
+        extract_to(&p, "docs/guide.md", &out).unwrap();
+        assert_eq!(std::fs::read(out.join("guide.md")).unwrap(), b"guide");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_add_leaves_the_zip_as_it_was() {
+        let d = dir("zip-add-fail");
+        let p = d.join("a.zip");
+        make_zip(&p, &[("keep.txt", b"keep")]);
+        let before = std::fs::read(&p).unwrap();
+
+        // The source is gone, so the add cannot finish.
+        assert!(add_to_zip(&p, "", &[d.join("not-there.txt")]).is_err());
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            before,
+            "the archive must not change"
+        );
+        assert_eq!(names(&list(&p, "").unwrap()), vec!["keep.txt"]);
+        // And no half-written temporary file is left behind.
+        let leftovers: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_remove_leaves_the_zip_as_it_was() {
+        let d = dir("zip-remove-fail");
+        // A file that looks like a zip by its name but is not one cannot be read,
+        // so the rewrite fails with the bytes untouched.
+        let p = d.join("a.zip");
+        std::fs::write(&p, b"this is not a zip at all").unwrap();
+        let before = std::fs::read(&p).unwrap();
+        assert!(remove_from_zip(&p, &["anything".into()]).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn only_a_zip_can_be_written_into() {
+        let d = dir("zip-only");
+        make_tar(&d.join("a.tar"), FILES, false);
+        make_7z(&d.join("a.7z"), FILES);
+        make_rar(&d.join("a.rar"), FILES);
+        let loose = source(&d, "x.txt", b"x");
+        for name in ["a.tar", "a.7z", "a.rar"] {
+            let p = d.join(name);
+            assert!(
+                add_to_zip(&p, "", std::slice::from_ref(&loose)).is_err(),
+                "{name}"
+            );
+            assert!(
+                remove_from_zip(&p, &["readme.txt".into()]).is_err(),
+                "{name}"
+            );
+        }
+        // A plain file is not an archive at all.
+        let plain = source(&d, "plain.txt", b"x");
+        assert!(add_to_zip(&plain, "", &[loose]).is_err());
+        assert!(remove_from_zip(&plain, &["x".into()]).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn adding_under_an_unsafe_folder_is_refused() {
+        let d = dir("zip-add-unsafe");
+        let p = d.join("a.zip");
+        make_zip(&p, &[("keep.txt", b"keep")]);
+        let before = std::fs::read(&p).unwrap();
+        let loose = source(&d, "x.txt", b"x");
+        assert!(add_to_zip(&p, "../out", &[loose]).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

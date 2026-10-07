@@ -178,6 +178,85 @@ fn shift_with_an_arrow_extends_the_selection() {
     assert_eq!(h.selected(), "he");
 }
 
+// ---- input methods ---------------------------------------------------------
+
+/// Whether `s` was drawn on the last frame, anywhere.
+fn drawn_text(h: &Harness, s: &str) -> bool {
+    h.shapes().iter().any(|(_, _, t)| t == s)
+}
+
+#[test]
+fn a_preedit_is_stored_and_drawn_without_touching_the_document() {
+    let mut h = Harness::new("ab");
+    click_char(&mut h, 0, 1);
+    h.ime_preedit("か");
+    assert_eq!(h.text(), "ab", "a candidate is not in the document");
+    assert_eq!(h.caret(), 1, "and the caret has not moved");
+    assert_eq!(h.preedit(), Some("か"), "the composition is held aside");
+    assert!(
+        drawn_text(&h, "か"),
+        "the composition is drawn on the frame"
+    );
+    // A later preedit replaces the one before it, as the IME refines a candidate.
+    h.ime_preedit("かん");
+    assert_eq!(h.preedit(), Some("かん"));
+    assert_eq!(h.text(), "ab", "still only a candidate");
+    // And an empty preedit clears it, as the IME does when it is dismissed.
+    h.ime_preedit("");
+    assert_eq!(h.preedit(), None);
+    assert!(!drawn_text(&h, "かん"), "the overlay went with it");
+}
+
+#[test]
+fn committing_a_composition_types_it_at_the_caret_and_clears_the_preedit() {
+    let mut h = Harness::new("ab");
+    click_char(&mut h, 0, 1);
+    h.ime_preedit("にほん");
+    assert_eq!(h.text(), "ab", "still only a candidate");
+    h.ime_commit("日本");
+    assert_eq!(h.text(), "a日本b", "the committed text landed at the caret");
+    assert_eq!(h.caret(), 3, "and the caret follows it");
+    assert_eq!(h.preedit(), None, "the composition is over");
+    assert!(!drawn_text(&h, "日本"), "and is no longer an overlay");
+}
+
+#[test]
+fn dismissing_the_input_method_drops_the_preedit() {
+    let mut h = Harness::new("ab");
+    click_char(&mut h, 0, 1);
+    h.ime_preedit("か");
+    assert_eq!(h.preedit(), Some("か"));
+    h.ime_disabled();
+    assert_eq!(h.preedit(), None, "the composition is gone");
+    assert_eq!(h.text(), "ab", "and nothing was typed");
+}
+
+#[test]
+fn committing_replaces_a_selection_like_typing_does() {
+    let mut h = Harness::new("one two three");
+    click_char(&mut h, 0, 4);
+    for _ in 0..3 {
+        h.key_mod(Key::ArrowRight, SHIFT);
+    }
+    assert_eq!(h.selected(), "two", "the selection the commit will replace");
+    h.ime_preedit("に");
+    h.ime_commit("2");
+    assert_eq!(h.text(), "one 2 three", "the selection was replaced");
+    assert_eq!(h.caret(), 5);
+    assert_eq!(h.preedit(), None);
+}
+
+#[test]
+fn a_read_only_document_takes_no_committed_text() {
+    let mut h = Harness::new("ab");
+    h.set_editable(false);
+    click_char(&mut h, 0, 1);
+    h.ime_preedit("か");
+    h.ime_commit("日本");
+    assert_eq!(h.text(), "ab", "nothing was inserted");
+    assert_eq!(h.preedit(), None, "but the composition is still over");
+}
+
 // ---- undo ------------------------------------------------------------------
 
 #[test]
@@ -5048,4 +5127,174 @@ fn the_caret_is_never_below_the_bottom_edge_after_moving_down_a_line_at_a_time()
             );
         }
     }
+}
+
+// ---- folding ---------------------------------------------------------------
+
+/// The drawn row that holds document line `line`.
+///
+/// A fold moves the rows, so a test cannot click "row 3" and mean line 3: it asks
+/// which row the line ended up on.
+fn row_of_line(h: &Harness, line: usize) -> usize {
+    let drawn = h.drawn_line_numbers();
+    drawn
+        .iter()
+        .position(|&l| l == line)
+        .unwrap_or_else(|| panic!("line {line} is not on screen: {drawn:?}"))
+}
+
+#[test]
+fn a_brace_block_and_an_indentation_block_are_foldable() {
+    // A brace block: the line ending in `{`, through its matching closer.
+    let h = Harness::new("fn f() {\n    let a = 1;\n    let b = 2;\n}\n");
+    assert!(
+        h.fold_starts().contains(&0),
+        "the brace block should fold, got {:?}",
+        h.fold_starts()
+    );
+
+    // No braces anywhere, so only the indentation can find this one.
+    let h = Harness::new("root\n  child one\n  child two\nsibling\n");
+    assert!(
+        h.fold_starts().contains(&0),
+        "the indentation block should fold, got {:?}",
+        h.fold_starts()
+    );
+    assert!(
+        !h.fold_starts().contains(&3),
+        "the sibling is not part of the block"
+    );
+}
+
+#[test]
+fn folding_hides_the_lines_inside_and_unfolding_brings_them_back() {
+    let mut h = Harness::new("fn f() {\n    let a = 1;\n    let b = 2;\n}\ntail\n");
+    h.toggle_fold(0);
+    assert!(h.fold_closed(0), "the click closed the fold");
+    let job = h.job_text();
+    assert!(
+        !job.contains("let a") && !job.contains("let b"),
+        "the hidden lines are not shaped: {job:?}"
+    );
+    assert!(job.contains("fn f() {"), "the opening line stays: {job:?}");
+    let drawn = h.drawn_line_numbers();
+    assert!(
+        !drawn.contains(&1) && !drawn.contains(&2) && !drawn.contains(&3),
+        "no hidden line is drawn: {drawn:?}"
+    );
+
+    h.toggle_fold(0);
+    assert!(!h.fold_closed(0), "the second click opened it");
+    let job = h.job_text();
+    assert!(
+        job.contains("let a") && job.contains("let b"),
+        "unfolding brings them back: {job:?}"
+    );
+}
+
+#[test]
+fn the_caret_cannot_land_inside_a_folded_region() {
+    let mut h = Harness::new("fn f() {\n    let a = 1;\n    let b = 2;\n}\ntail");
+    h.toggle_fold(0);
+    h.key_mod(Key::End, CTRL);
+    assert_eq!(h.line_column().0, 5, "the caret starts below the fold");
+    h.key(Key::ArrowUp);
+    assert_eq!(
+        h.line_column().0,
+        1,
+        "up out of the fold lands on its first line"
+    );
+    h.key(Key::ArrowDown);
+    assert_eq!(
+        h.line_column().0,
+        5,
+        "down crosses the whole fold in one step"
+    );
+}
+
+#[test]
+fn editing_near_a_fold_keeps_the_buffer_and_the_fold_consistent() {
+    let mut h = Harness::new("fn f() {\n    let a = 1;\n    let b = 2;\n}\ntail");
+    h.toggle_fold(0);
+    assert!(h.fold_closed(0));
+    // Type on the folded line, before its brace. The brace is still last, so the
+    // region is still there.
+    let row = row_of_line(&h, 0);
+    click_char(&mut h, row, 7);
+    h.type_text("x");
+    assert_eq!(
+        h.text(),
+        "fn f() x{\n    let a = 1;\n    let b = 2;\n}\ntail"
+    );
+    assert!(h.fold_closed(0), "typing on the fold line keeps it");
+    assert!(
+        !h.job_text().contains("let a"),
+        "and the inside stays hidden"
+    );
+    // Delete the fold's own line: there is nothing left to fold.
+    let row = row_of_line(&h, 0);
+    click_char(&mut h, row, 0);
+    h.key_mod(Key::K, CTRL_SHIFT);
+    assert_eq!(h.text(), "    let a = 1;\n    let b = 2;\n}\ntail");
+    assert!(!h.fold_closed(0), "deleting the fold's line unfolds it");
+}
+
+#[test]
+fn typing_still_works_with_a_fold_present() {
+    let mut h = Harness::new("fn f() {\n    let a = 1;\n}\ntail");
+    h.toggle_fold(0);
+    assert!(h.fold_closed(0));
+    let row = row_of_line(&h, 3);
+    click_char(&mut h, row, 0);
+    h.type_text("x");
+    assert_eq!(h.text(), "fn f() {\n    let a = 1;\n}\nxtail");
+    assert!(h.fold_closed(0), "the fold survives the edit below it");
+    h.key_mod(Key::Z, CTRL);
+    assert_eq!(h.text(), "fn f() {\n    let a = 1;\n}\ntail");
+    assert!(h.fold_closed(0), "and survives the undo");
+}
+
+#[test]
+fn two_nested_folds_can_both_be_closed() {
+    let mut h = Harness::new("outer {\n  inner {\n    x\n  }\n}\ntail");
+    assert!(
+        h.fold_starts().contains(&0) && h.fold_starts().contains(&1),
+        "both blocks open a fold, got {:?}",
+        h.fold_starts()
+    );
+    // The inner first, then the block around it.
+    h.toggle_fold(1);
+    h.toggle_fold(0);
+    assert!(h.fold_closed(0) && h.fold_closed(1));
+    // The outer fold is the one that decides where the caret can stand, even
+    // though the inner fold starts later and ends sooner.
+    h.key_mod(Key::End, CTRL);
+    h.key(Key::ArrowUp);
+    assert_eq!(
+        h.line_column().0,
+        1,
+        "the caret comes to rest on the outer fold's first line"
+    );
+    assert!(
+        !h.job_text().contains("inner"),
+        "the inner block is hidden: {:?}",
+        h.job_text()
+    );
+}
+
+#[test]
+fn the_fold_all_and_unfold_all_shortcuts_work() {
+    let mut h = Harness::new("fn f() {\n    a\n}\nfn g() {\n    b\n}\n");
+    h.key_mod(Key::OpenBracket, CTRL_SHIFT);
+    let starts = h.fold_starts();
+    assert!(starts.len() >= 2, "two blocks should fold, got {starts:?}");
+    assert!(
+        starts.iter().all(|&s| h.fold_closed(s)),
+        "Ctrl+Shift+[ closes every fold"
+    );
+    h.key_mod(Key::CloseBracket, CTRL_SHIFT);
+    assert!(
+        starts.iter().all(|&s| !h.fold_closed(s)),
+        "Ctrl+Shift+] opens every fold"
+    );
 }

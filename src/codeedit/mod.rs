@@ -39,6 +39,8 @@ fn snap_to_pixel(ui: &egui::Ui, v: f32) -> f32 {
 #[cfg(test)]
 mod behaviour;
 mod find;
+/// Which lines can be folded, and which folds are closed.
+mod fold;
 /// Drives the editor through real input events, for the tests above.
 #[cfg(test)]
 mod harness;
@@ -405,6 +407,12 @@ pub struct Editor {
     /// Caret blink phase, in seconds.
     blink: f32,
     focused: bool,
+    /// The input method's composing text, if one is active.
+    ///
+    /// Held aside rather than inserted: a composition is a candidate the reader
+    /// has not accepted, so it must not touch the buffer, the caret or the
+    /// undo history until it is committed. `None` when nothing is being composed.
+    preedit: Option<String>,
     undo: Vec<Step>,
     redo: Vec<Step>,
     /// The step being built up, if there is one.
@@ -459,6 +467,26 @@ pub struct Editor {
     pub find: Finder,
     /// What state each line starts in, for colouring.
     hl: highlight::Highlights,
+    /// The folds the lines that have been drawn were found to open, worked out as
+    /// they are looked at rather than by a scan of the document. Folding is a view
+    /// feature: nothing here changes the buffer.
+    folds: fold::Folds,
+    /// The closed folds, start line to the last line each hides. Only a fold that
+    /// has been closed hides anything, so this is what the layout, the caret and
+    /// the window consult.
+    closed: std::collections::BTreeMap<usize, usize>,
+    /// The fold starts that were on screen last frame, with what each hides.
+    /// Recorded while the window is shaped so the gutter can draw a chevron for
+    /// each without looking anything up again.
+    visible_folds: Vec<(usize, usize)>,
+    /// Where the fold chevrons were drawn last frame, so a press can be matched to
+    /// one before the text is shaped. Recorded rather than recomputed for the same
+    /// reason the find bar's buttons are: the reader aimed at where the chevron
+    /// was drawn, which is last frame's geometry.
+    fold_buttons: Vec<(usize, egui::Rect)>,
+    /// A press landed on a chevron, so the click that follows must not also move
+    /// the caret.
+    fold_press: bool,
     /// Where the caret was horizontally when a run of Up and Down began, and the
     /// caret position that run left it at. Only good while the caret is still there.
     goal: Option<(usize, f32)>,
@@ -1260,25 +1288,33 @@ impl Editor {
             if rows > 0 {
                 if row + 1 < starts.len() - 1 {
                     row += 1;
-                } else if line < last_line {
-                    line += 1;
+                } else {
+                    // The next line a reader can see, which is not the next line
+                    // of the document when a closed fold stands between them.
+                    let next = self.visible_next(line);
+                    if next <= last_line {
+                        line = next;
+                        galley = self.layout_line(ui, text, line, wrap);
+                        starts = Self::row_starts(&galley, text.line_len(line), 0).0;
+                        row = 0;
+                    } else {
+                        at_edge = true;
+                        break;
+                    }
+                }
+            } else if row > 0 {
+                row -= 1;
+            } else {
+                let prev = self.visible_prev(line);
+                if prev < line {
+                    line = prev;
                     galley = self.layout_line(ui, text, line, wrap);
                     starts = Self::row_starts(&galley, text.line_len(line), 0).0;
-                    row = 0;
+                    row = starts.len() - 2;
                 } else {
                     at_edge = true;
                     break;
                 }
-            } else if row > 0 {
-                row -= 1;
-            } else if line > 0 {
-                line -= 1;
-                galley = self.layout_line(ui, text, line, wrap);
-                starts = Self::row_starts(&galley, text.line_len(line), 0).0;
-                row = starts.len() - 2;
-            } else {
-                at_edge = true;
-                break;
             }
         }
         let target = if at_edge {
@@ -1354,7 +1390,21 @@ impl Editor {
         let line = text.line_of_char(self.caret);
         let col = self.caret.saturating_sub(text.line_start(line));
         let last = text.lines().saturating_sub(1);
-        let target = (line as i64 + delta as i64).clamp(0, last as i64) as usize;
+        // Stepped through the visible lines rather than added to the line number,
+        // so a closed fold is crossed in one step instead of landing the caret
+        // inside it.
+        let mut target = line;
+        for _ in 0..delta.unsigned_abs() {
+            let next = if delta > 0 {
+                self.visible_next(target)
+            } else {
+                self.visible_prev(target)
+            };
+            if next == target || next > last {
+                break;
+            }
+            target = next;
+        }
         let target_start = text.line_start(target);
         let len = text.line_len(target);
         self.place(target_start + col.min(len), extend);
@@ -1400,6 +1450,103 @@ impl Editor {
             hi += 1;
         }
         (lo, hi)
+    }
+}
+
+// ---- folding ----------------------------------------------------------------
+
+impl Editor {
+    /// The closed fold hiding `line`, as `(start, end)`, if there is one.
+    ///
+    /// Searched rather than taken as the nearest start, because two closed folds
+    /// can nest: closing an inner block and then the block around it leaves both
+    /// recorded, and the inner one — which starts later and ends before the line
+    /// being asked about — must not hide the outer one that really does.
+    fn hidden_fold(&self, line: usize) -> Option<(usize, usize)> {
+        self.closed
+            .range(..line)
+            .rev()
+            .find(|&(_, &end)| end >= line)
+            .map(|(&start, &end)| (start, end))
+    }
+
+    /// The first visible line after `line`, skipping a closed fold it opens onto.
+    fn visible_next(&self, line: usize) -> usize {
+        match self.hidden_fold(line + 1) {
+            Some((_, end)) => end + 1,
+            None => line + 1,
+        }
+    }
+
+    /// The first visible line before `line`, skipping a closed fold it opens onto.
+    fn visible_prev(&self, line: usize) -> usize {
+        let before = line.saturating_sub(1);
+        match self.hidden_fold(before) {
+            Some((start, _)) => start,
+            None => before,
+        }
+    }
+
+    /// `line`, or the first line of the fold that hides it.
+    ///
+    /// A window may not start on a line that is not on screen, and neither may the
+    /// caret: both are moved through here rather than each caller deciding for
+    /// itself where a hidden position really means.
+    fn visible_line(&self, line: usize) -> usize {
+        match self.hidden_fold(line) {
+            Some((start, _)) => start,
+            None => line,
+        }
+    }
+
+    /// Closes or opens the fold opened by `line`, if it opens one.
+    fn toggle_fold(&mut self, line: usize, text: &Buffer) {
+        if self.closed.remove(&line).is_some() {
+            // Opening a fold hides nothing, so the caret is where it was.
+            return;
+        }
+        if let Some(end) = self.folds.end_of(text, line) {
+            self.closed.insert(line, end);
+            // A caret inside a region that has just closed is moved onto its
+            // first line: the caret may never sit on a line that is not on screen.
+            self.clamp_caret_out_of_folds(text);
+        }
+    }
+
+    /// Closes every fold the document has.
+    fn fold_all(&mut self, text: &Buffer) {
+        self.closed = fold::compute(text)
+            .into_iter()
+            .map(|f| (f.start, f.end))
+            .collect();
+        self.clamp_caret_out_of_folds(text);
+    }
+
+    /// Opens every fold.
+    fn unfold_all(&mut self) {
+        self.closed.clear();
+    }
+
+    /// Keeps the caret out of every closed fold.
+    ///
+    /// A caret on a hidden line is drawn nowhere and moved from a place the reader
+    /// cannot see, so every move that can reach one is brought back here: the
+    /// caret goes to the first line of the fold, which is the line whose chevron
+    /// opened it and the only line of the region still on screen.
+    fn clamp_caret_out_of_folds(&mut self, text: &Buffer) {
+        let closed = &self.closed;
+        let snap = |at: usize| {
+            let line = text.line_of_char(at);
+            closed
+                .range(..line)
+                .rev()
+                .find(|&(_, &end)| end >= line)
+                .map_or(at, |(&start, _)| text.line_start(start))
+        };
+        self.caret = snap(self.caret);
+        for c in &mut self.extra {
+            c.caret = snap(c.caret);
+        }
     }
 }
 
@@ -1458,16 +1605,30 @@ pub struct RowSpan {
 /// be answering about a different line. So the lines that were appended are
 /// walked alongside the rows, and each line's newline is accounted for as the
 /// row moves on to the next one.
+///
+/// `shaped_lines` is the document line of each shaped line. It is a list rather
+/// than "the first line plus the count", because a closed fold leaves the shaped
+/// lines non-consecutive: the row for the line after a fold belongs to a line
+/// several numbers on from the row before it.
 fn row_ranges(
     rows: &[egui::epaint::text::PlacedRow],
     line_chars: &[usize],
-    first_line: usize,
+    shaped_lines: &[usize],
     base: usize,
 ) -> Vec<RowSpan> {
     let mut out = Vec::with_capacity(rows.len());
     let mut i = 0usize;
     let mut col = 0usize;
     let mut at = base;
+    // The document line of shaped line `i`. Past the end of the shaped lines,
+    // which is the trailing row a final newline leaves, it is the line after the
+    // last one shaped.
+    let line_of = |i: usize| {
+        shaped_lines
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| shaped_lines.last().map_or(0, |l| l + 1))
+    };
     for placed in rows {
         // A row's glyphs are its visible characters. The newline that ends a line
         // is not among them: the layout consumes it as the row break.
@@ -1496,13 +1657,13 @@ fn row_ranges(
             // where the layout has put a break between them.
             out.push(RowSpan {
                 chars: (at, at),
-                line: first_line + i,
+                line: line_of(i),
             });
             continue;
         }
         out.push(RowSpan {
             chars: (at, at + n),
-            line: first_line + i,
+            line: line_of(i),
         });
         at += n;
         col += n;
@@ -1536,6 +1697,14 @@ fn row_ranges(
 
 /// Width of the caret, in points. Thin, but wide enough to be easy to see.
 const CARET_W: f32 = 1.5;
+
+/// Width of a fold chevron, in points. Wide enough to hit with a pointer and
+/// small enough to sit in the gutter's left margin without crowding a number.
+const CHEVRON: f32 = 9.0;
+/// How far in from the gutter's edge a chevron sits. It keeps the chevron clear
+/// of the very edge, where a press is more likely to be a reader aiming at the
+/// margin than at the fold.
+const CHEVRON_INSET: f32 = 3.0;
 
 /// The shades of grey each token class is drawn in.
 ///
@@ -1727,11 +1896,6 @@ A"
         // One row more than fits, so a line clipped by the bottom edge is drawn
         // rather than popping in as you scroll.
         let pal = Palette::from_theme();
-        let gutter = if opts.line_numbers {
-            self.gutter(ui, &font, opts)
-        } else {
-            0.0
-        };
 
         // ---- focus, before anything is painted ----
         // Focus goes through egui's own memory rather than a field, because that
@@ -1763,7 +1927,38 @@ A"
                 rect.bottom(),
             ),
         );
+        // A press on a fold's chevron closes or opens it here, before the text is
+        // laid out, so the fold takes effect in the frame the press lands rather
+        // than the one after. The rectangles are last frame's, which is where the
+        // chevrons were drawn and therefore where the reader aimed.
+        if ui.input(|i| i.pointer.primary_pressed())
+            && let Some(pos) = ui.input(|i| i.pointer.press_origin())
+            && let Some(&(line, _)) = self.fold_buttons.iter().find(|(_, r)| r.contains(pos))
+        {
+            self.toggle_fold(line, text);
+            // The click egui reports on release must not also move the caret: the
+            // reader aimed at the chevron, not at the text beside it.
+            self.fold_press = true;
+        }
         let resp = ui.interact(press_rect, id, egui::Sense::click_and_drag());
+        // A text-edit role, so a screen reader knows this is the document rather
+        // than a painted picture. The role and a short label are all that is
+        // attached: the buffer's text is deliberately not handed over as the
+        // value, because copying a multi-megabyte file every frame is exactly
+        // the cost this editor exists to avoid. Naming the file instead would be
+        // just as cheap, but `Options` carries no path and the label is not
+        // needed to navigate to the widget by name.
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::TextEdit,
+                ui.is_enabled(),
+                if opts.editable {
+                    "Editor"
+                } else {
+                    "Editor (read only)"
+                },
+            )
+        });
         // Focus is taken when a drag begins as well as when a click finishes. A person
         // who drags across text in a document they have never clicked in means to select
         // it and then to copy it or type over it, and the drag has to have given the
@@ -1823,7 +2018,10 @@ A"
         // click. `clicked_by` is the same question without the keyboard, and the
         // only difference between the two is exactly the difference that matters
         // here.
-        let clicked = resp.clicked_by(egui::PointerButton::Primary);
+        // A click that began on a chevron belongs to the fold and not to the
+        // caret. The flag is set on the press and cleared once the button is up,
+        // so the release frame that egui calls a click is the one it suppresses.
+        let clicked = resp.clicked_by(egui::PointerButton::Primary) && !self.fold_press;
         if focused {
             self.keyboard(ui, text, opts, &mut out);
         }
@@ -1920,9 +2118,51 @@ A"
             rect.min,
             egui::Pos2::new(rect.left() + text_w, rect.bottom()),
         );
-        // Worked out after the keyboard, because a keystroke can move the
-        // window and the window decides what is shaped.
-        let first = self.top_line;
+        // An edit changes what the lines below it start in, so what was remembered
+        // about them is dropped before anything is looked up.
+        if let Some(line) = text.take_dirty_line() {
+            self.hl.invalidate_from(line);
+            self.edit_gen += 1;
+            // What a line opens can have changed with the text. The remembered
+            // folds are dropped, and a closed fold is kept only if the line that
+            // opened it still opens one: an edit that deletes its line, or takes
+            // its closer away, unfolds it, and one that leaves it alone keeps it.
+            // The line numbers of a fold whose start is at or after the edit have
+            // moved, so it is not asked about again and is dropped with the rest.
+            self.folds.clear();
+            let mut kept = std::collections::BTreeMap::new();
+            for &start in self.closed.keys() {
+                // A fold whose opening line is below the edit has had its line
+                // number moved, so it is not asked about again and is dropped. One
+                // at or above the edit keeps its number; whether it still opens a
+                // fold is asked of the text as it now is.
+                if start <= line
+                    && let Some(end) = self.folds.end_of(text, start)
+                {
+                    kept.insert(start, end);
+                }
+            }
+            self.closed = kept;
+        }
+        // The caret may not be on a line a fold hides, and a fold may have just
+        // hidden the line it is on, so it is brought out before anything is
+        // measured or shaped.
+        self.clamp_caret_out_of_folds(text);
+
+        // The gutter's width depends on whether there are folds to put a chevron
+        // in, so it is worked out after the folds and not before.
+        let gutter = if opts.line_numbers {
+            self.gutter(ui, &font, opts)
+        } else {
+            0.0
+        };
+
+        // Worked out after the keyboard, because a keystroke can move the window
+        // and the window decides what is shaped. A fold can hide the line the
+        // scroll position names, so the window is pulled up to the fold's first
+        // line before anything is measured from it.
+        let first = self.visible_line(self.top_line);
+        self.top_line = first;
         let base_char = text.line_start(first);
 
         // ---- shape only what is on screen ----
@@ -1941,16 +2181,10 @@ A"
         // With soft wrap on there are more rows than lines, and nothing in a row
         // says which line it is part of.
         let mut line_chars: Vec<usize> = Vec::with_capacity(shaped);
-        // The first line *after* the window. Whether the last shaped line gets a
-        // newline follows from this, so it is worked out once here rather than
-        // re-asked inside the loop.
-        let end_line = (first + shaped).min(text.lines());
-        // An edit changes what the lines below it start in, so what was remembered
-        // about them is dropped before anything is looked up.
-        if let Some(line) = text.take_dirty_line() {
-            self.hl.invalidate_from(line);
-            self.edit_gen += 1;
-        }
+        // The document line each shaped line is. A fold makes the shaped lines
+        // non-consecutive, so a row can no longer be told which line it is on by
+        // counting up from the first.
+        let mut shaped_lines: Vec<usize> = Vec::with_capacity(shaped);
         // The state the first shaped line starts in. `None` while a worker is still
         // finding it out, in which case the text is drawn uncoloured for now.
         let mut state = if opts.highlight {
@@ -1958,6 +2192,11 @@ A"
         } else {
             None
         };
+        // The document line `state` is the state at the start of. A fold skips
+        // lines and colouring does not: the state has to be advanced over every
+        // line a block comment or a triple-quoted string runs through, whether or
+        // not that line is drawn.
+        let mut state_line = first;
         // Long lines are shaped in slices, and the stretches left out are recorded so
         // that a position in the shaped text can still be turned into a position in
         // the document.
@@ -1968,9 +2207,26 @@ A"
         if !opts.wrap {
             self.follow_caret_on_long_line(ui, text, &font, view_w);
         }
-        for line in first..end_line {
+        // A line at a time, but only until enough *visible* lines are on screen: a
+        // fold can make the next document line one that is never drawn, and the
+        // pane has to be filled from the lines that are.
+        //
+        // While the lines are read for shaping, the fold each opens is found from
+        // the same text, so the chevrons and the regions cost no second pass over
+        // the document — which is the whole reason the fold finder is driven from
+        // here rather than by a scan.
+        self.visible_folds.clear();
+        let mut prev_fold: Option<(usize, String)> = None;
+        let mut line = first;
+        while line < text.lines() && shaped_lines.len() < shaped {
+            if state.is_some() {
+                while state_line < line {
+                    let content = text.line_str(state_line);
+                    state = state.map(|s| markup::advance(&content, &opts.lang, s));
+                    state_line += 1;
+                }
+            }
             let len = text.line_len(line);
-            let newline_after = line + 1 < end_line;
             if !opts.wrap && len > LONG_LINE {
                 let slice = self.long_slice(ui, text, &font, line, view_w);
                 long_widest = long_widest.max(slice.full);
@@ -2021,8 +2277,22 @@ A"
                 }
                 line_chars.push(piece_chars);
                 local_len += piece_chars;
+                // A line too long to shape whole is not asked about its folds
+                // either: a block that begins on it is beyond the size where a
+                // chevron is any use.
+                prev_fold = None;
             } else {
                 let content = text.line_str(line);
+                // What this line opens, or what the line before it opens and this
+                // line's indentation has just made recognisable.
+                if let Some((start, end)) = self.folds.consider(
+                    text,
+                    line,
+                    &content,
+                    prev_fold.as_ref().map(|(l, s)| (*l, s.as_str())),
+                ) {
+                    self.visible_folds.push((start, end));
+                }
                 if let Some(start) =
                     state.filter(|_| opts.highlight && content.len() <= markup::MAX_HIGHLIGHT_LINE)
                 {
@@ -2042,28 +2312,42 @@ A"
                         egui::TextFormat::simple(font.clone(), pal.text),
                     );
                 }
+                // Kept for the next line, which is the only place the indent of
+                // this one is looked at.
+                prev_fold = Some((line, content.into_owned()));
                 line_chars.push(len);
                 local_len += len;
             }
-            // The newline is what starts the next row in the job, and it is a
-            // character like any other as far as the indices go.
-            //
-            // Appended only when another line follows it *in this job*, which is not
-            // the same question as whether the document has a line after it. A
-            // window that stops in the middle of a document has more lines below
-            // its last one, and appending a newline for a line that was never
-            // shaped gave the job a trailing break: the layout answered with one
-            // more row than there were lines, that row was attributed to the line
-            // after the window — which is not on screen — and everything derived
-            // from the rows, including the window's length and how far a click can
-            // reach, came out a line too long.
-            //
-            // The same rule covers the end of the document, where the last line has
-            // no newline of its own: a document ending in a newline has an empty
-            // line *after* that newline, and that is the one line not terminated.
-            if newline_after {
+            shaped_lines.push(line);
+            state_line = line + 1;
+            // The next line to shape. A closed fold standing between this line and
+            // it is stepped over, and the characters it hides are recorded as a
+            // gap: the same mechanism a long line's unshaped slice uses, which is
+            // what lets a position in the shaped text still be turned back into a
+            // position in the document.
+            let next = line + 1;
+            let hidden = self.hidden_fold(next);
+            let next_visible = hidden.map_or(next, |(_, end)| end + 1);
+            // Another line is shaped only if there is one and there is still room
+            // for it; otherwise the job stops here, and no newline is appended for
+            // a line that was never shaped. That is what keeps the job from ending
+            // in a trailing break the layout would answer with an extra row.
+            if shaped_lines.len() < shaped && next_visible < text.lines() {
+                // The opening line's own newline is kept, so the next visible line
+                // still starts a row of its own. Everything after it up to the next
+                // visible line is the gap.
                 job.append("\n", 0.0, egui::TextFormat::simple(font.clone(), pal.text));
                 local_len += 1;
+                if hidden.is_some() {
+                    let from = text.line_start(next);
+                    let to = text.line_start(next_visible);
+                    if to > from {
+                        gaps.push((local_len, to - from));
+                    }
+                }
+                line = next_visible;
+            } else {
+                break;
             }
         }
         let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
@@ -2072,7 +2356,7 @@ A"
         // different heights and only the ones on screen have been measured. Smoothed,
         // so the thumb does not twitch as long and short lines pass through.
         if opts.wrap {
-            let drawn = end_line.saturating_sub(first).max(1) as f32;
+            let drawn = shaped_lines.len().max(1) as f32;
             let now = (galley.size().y / drawn).max(scroll_h);
             self.line_h_est = if self.line_h_est <= 0.0 {
                 now
@@ -2092,7 +2376,7 @@ A"
         {
             self.shaped = galley.job.text.clone();
         }
-        let rows = row_ranges(&galley.rows, &line_chars, first, 0);
+        let rows = row_ranges(&galley.rows, &line_chars, &shaped_lines, 0);
         self.last_rows = rows.clone();
         // Every character the job holds, which is how far a click can reach.
         let at = rows.last().map_or(0, |r| r.chars.1);
@@ -2253,6 +2537,11 @@ A"
         {
             self.select_line_at(text, at);
         }
+        // The chevron press is over once the button is up, so the next click
+        // through the editor's own path is a real one again.
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.fold_press = false;
+        }
 
         // ---- paint ----
         // Back to front, so each layer covers the one before it: the gutter and
@@ -2262,6 +2551,9 @@ A"
         // unwrapped line stops at the scrollbar rather than running under it and
         // out the other side.
         let painter = ui.painter().with_clip_rect(clip);
+        // Recorded fresh every frame, so a chevron that has scrolled away cannot
+        // still answer a press.
+        self.fold_buttons.clear();
         if opts.line_numbers {
             self.paint_gutter(ui, &painter, &m, text);
         }
@@ -2271,7 +2563,9 @@ A"
         }
         self.paint_selection(&painter, &galley, &m);
         painter.galley(m.origin, galley.clone(), m.pal.text);
+        self.paint_folds(ui, &painter, &galley, &m);
         self.paint_caret(&painter, &galley, &m);
+        self.paint_preedit(&painter, &galley, &m);
         if let Some(bar) = bar {
             self.scrollbar_paint(ui, bar);
         }
@@ -2512,31 +2806,32 @@ A"
         };
         let mut step = false;
         let mut forward = true;
-        if self.flat_button(ui, take(), "Close") {
+        if self.flat_button(ui, take(), "Close", None) {
             self.find.open = false;
             ui.memory_mut(|m| m.request_focus(egui::Id::new(ID)));
         }
-        if self.flat_button(ui, take(), "Next match (Enter)") {
+        if self.flat_button(ui, take(), "Next match (Enter)", None) {
             step = true;
         }
-        if self.flat_button(ui, take(), "Previous match (Shift+Enter)") {
+        if self.flat_button(ui, take(), "Previous match (Shift+Enter)", None) {
             step = true;
             forward = false;
         }
-        if self.flat_button(ui, take(), "Match whole word only") {
+        if self.flat_button(ui, take(), "Match whole word only", Some(self.find.whole)) {
             self.find.whole = !self.find.whole;
             self.find.jump = true;
             self.find.refresh(text);
             self.show_hit(text);
         }
-        if self.flat_button(ui, take(), "Match case") {
+        if self.flat_button(ui, take(), "Match case", Some(self.find.case)) {
             self.find.case = !self.find.case;
             self.find.jump = true;
             self.find.refresh(text);
             self.show_hit(text);
         }
 
-        let toggle = self.find.can_replace && self.flat_button(ui, take(), "Replace (Ctrl+H)");
+        let toggle = self.find.can_replace
+            && self.flat_button(ui, take(), "Replace (Ctrl+H)", Some(self.find.replace));
         if toggle {
             self.find.replace = !self.find.replace;
             if self.find.replace {
@@ -2603,14 +2898,19 @@ A"
             if r.right() > rect.right() {
                 break;
             }
-            if self.text_button(ui, r, label) {
+            // "All" is too short to say on its own; the reader gets the phrase.
+            let name = if all { "Replace all" } else { "Replace" };
+            if self.text_button(ui, r, label, name) {
                 self.find.pending = Some(all);
             }
         }
     }
 
     /// A small labelled button that lights up under the pointer.
-    fn text_button(&self, ui: &egui::Ui, r: egui::Rect, label: &str) -> bool {
+    ///
+    /// `label` is what is drawn; `name` is what a screen reader calls it, which
+    /// is the fuller phrase where the drawn label has to be short.
+    fn text_button(&self, ui: &egui::Ui, r: egui::Rect, label: &str, name: &str) -> bool {
         let resp = ui.interact(
             r,
             egui::Id::new(("find-text-btn", label)),
@@ -2640,6 +2940,10 @@ A"
             &g,
             colour,
         );
+        // Painted here, so the role and name have to be attached by hand.
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name)
+        });
         resp.clicked()
     }
 
@@ -2735,7 +3039,7 @@ A"
     ///
     /// Pictogram rather than a word, because five words do not fit in a row this
     /// height and the words are in the tooltips anyway.
-    fn flat_button(&self, ui: &egui::Ui, r: egui::Rect, tip: &str) -> bool {
+    fn flat_button(&self, ui: &egui::Ui, r: egui::Rect, tip: &str, selected: Option<bool>) -> bool {
         let resp = ui.interact(r, egui::Id::new(("find-btn", tip)), egui::Sense::click());
         if resp.hovered() {
             ui.painter()
@@ -2818,6 +3122,17 @@ A"
                 );
             }
         }
+        // A painted button is invisible to a screen reader until it says what it
+        // is; the tooltip is the only name it has, so it serves as both. A toggle
+        // also says whether it is on, which a name alone cannot.
+        match selected {
+            Some(on) => resp.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), on, tip)
+            }),
+            None => resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tip)
+            }),
+        }
         resp.on_hover_text(tip).clicked()
     }
 
@@ -2845,7 +3160,15 @@ A"
         // text does not shuffle sideways as the count grows a digit.
         let digits = self.lines.to_string().len() as f32;
         let w = ui.fonts_mut(|f| f.glyph_width(font, '0')) * digits;
-        w + crate::theme::sp::SM + crate::theme::sp::MD
+        // A strip for the fold chevrons, but only when there is a fold to put one
+        // in: most files have nothing to fold in view, and taking the width anyway
+        // would be a tax on every one of them.
+        let chevron = if self.folds.is_empty() && self.closed.is_empty() {
+            0.0
+        } else {
+            CHEVRON + crate::theme::sp::XS + CHEVRON_INSET
+        };
+        w + crate::theme::sp::SM + crate::theme::sp::MD + chevron
     }
 
     /// Which document character the pointer is over, if any.
@@ -2957,7 +3280,7 @@ A"
         row
     }
 
-    fn paint_gutter(&self, ui: &egui::Ui, painter: &egui::Painter, m: &Metrics, text: &Buffer) {
+    fn paint_gutter(&mut self, ui: &egui::Ui, painter: &egui::Painter, m: &Metrics, text: &Buffer) {
         painter.rect_filled(
             egui::Rect::from_min_size(m.rect.min, egui::vec2(m.gutter, m.rect.height())),
             egui::CornerRadius::ZERO,
@@ -2994,11 +3317,36 @@ A"
             .lines()
             .saturating_sub(usize::from(text.ends_with_newline()))
             .saturating_sub(1);
+        // Chevrons are kept off the numbers' column and drawn once per line, not
+        // once per row a wrapped line occupies.
+        let mut last_chevron: Option<usize> = None;
         for (row, span) in m.rows.iter().enumerate() {
             let y = m.row_top(row);
             let h = m.row_height(row);
             if y + h < m.rect.top() || y > m.rect.bottom() {
                 continue;
+            }
+            if last_chevron != Some(span.line) {
+                last_chevron = Some(span.line);
+                // A fold was found for this line while the window was shaped, so
+                // whether there is a chevron here is already known.
+                if self
+                    .visible_folds
+                    .iter()
+                    .any(|(start, _)| *start == span.line)
+                {
+                    let r = egui::Rect::from_center_size(
+                        egui::Pos2::new(
+                            m.rect.left() + crate::theme::sp::XS + CHEVRON_INSET + CHEVRON * 0.5,
+                            y + h * 0.5,
+                        ),
+                        egui::Vec2::splat(CHEVRON),
+                    );
+                    // Recorded so a press can be matched to it, and drawn from
+                    // the same rectangle so the two cannot disagree.
+                    self.fold_buttons.push((span.line, r));
+                    Self::paint_chevron(painter, r, self.closed.contains_key(&span.line));
+                }
             }
             if last_line == Some(span.line) || span.line > last_real {
                 continue;
@@ -3016,6 +3364,62 @@ A"
                 m.pal.ghost,
             );
         }
+    }
+
+    /// A `…` after a folded line, so it is clear that lines are hidden.
+    ///
+    /// An overlay rather than part of the shaped text: the shaped text is the
+    /// document's own lines, and appending a marker to it would put the window's
+    /// character mapping one character out for every row below the fold.
+    fn paint_folds(
+        &self,
+        ui: &egui::Ui,
+        painter: &egui::Painter,
+        galley: &egui::Galley,
+        m: &Metrics,
+    ) {
+        for (row, span) in m.rows.iter().enumerate() {
+            if !self.closed.contains_key(&span.line) {
+                continue;
+            }
+            // Once per line, on its first row.
+            if row > 0 && m.rows[row - 1].line == span.line {
+                continue;
+            }
+            let x = Self::x_of_boundary(galley, row, span.chars.1 - span.chars.0);
+            let g = crate::widgets::layout(ui, "\u{2026}".to_owned(), m.font.clone(), m.pal.ghost);
+            crate::widgets::galley_at(
+                painter,
+                egui::Pos2::new(m.origin.x + x + 6.0, m.row_top(row)),
+                &g,
+                m.pal.ghost,
+            );
+        }
+    }
+
+    /// A small triangle in the gutter: pointing down while the fold is open and
+    /// right while it is closed, which is the pair every editor with folding uses.
+    fn paint_chevron(painter: &egui::Painter, r: egui::Rect, closed: bool) {
+        let c = r.center();
+        let s = r.width() * 0.30;
+        let points = if closed {
+            vec![
+                egui::pos2(c.x - s * 0.5, c.y - s),
+                egui::pos2(c.x + s * 0.8, c.y),
+                egui::pos2(c.x - s * 0.5, c.y + s),
+            ]
+        } else {
+            vec![
+                egui::pos2(c.x - s, c.y - s * 0.5),
+                egui::pos2(c.x + s, c.y - s * 0.5),
+                egui::pos2(c.x, c.y + s * 0.8),
+            ]
+        };
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            crate::theme::c::TEXT_DIM,
+            egui::Stroke::NONE,
+        ));
     }
 
     /// Paints a wash behind every hit, and a stronger one behind the current one.
@@ -3196,6 +3600,57 @@ A"
         );
     }
 
+    /// The input method's composing text, drawn at the caret but not in the
+    /// document.
+    ///
+    /// An overlay rather than part of the shaped text: a composition changes on
+    /// every candidate keystroke, and laying the document out again for it would
+    /// move the rows and the caret under the reader. Drawn after the fact, the
+    /// buffer and the layout are exactly what they were, and the text is visible
+    /// where the reader is typing.
+    fn paint_preedit(&self, painter: &egui::Painter, galley: &egui::Galley, m: &Metrics) {
+        // Only while the editor has the keyboard, like the caret: a composition
+        // belongs to whoever is typing, and nobody is when it has no focus.
+        if !self.focused {
+            return;
+        }
+        let Some(pre) = self.preedit.as_deref() else {
+            return;
+        };
+        if pre.is_empty() {
+            return;
+        }
+        // At the caret, through the same row mapping the caret uses, so a
+        // composition on a wrap point sits where the caret is drawn rather than
+        // at the end of the row above.
+        let Some(local) = m.window.to_local(self.caret) else {
+            return;
+        };
+        let row = m.window.row_of_local(local, &m.rows);
+        if row >= galley.rows.len() {
+            return;
+        }
+        let x = Self::x_of_boundary(galley, row, local.saturating_sub(m.rows[row].chars.0));
+        // Underlined and in the accent shade, so a composition reads as text
+        // that is not in the file yet rather than as text that is.
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            pre,
+            0.0,
+            egui::TextFormat {
+                font_id: m.font.clone(),
+                color: m.pal.accent,
+                underline: egui::Stroke::new(1.0, m.pal.accent),
+                ..Default::default()
+            },
+        );
+        painter.galley(
+            egui::Pos2::new(m.origin.x + x, m.row_top(row)),
+            painter.layout_job(job),
+            m.pal.accent,
+        );
+    }
+
     /// Keys, when the editor has the pointer's attention.
     fn keyboard(&mut self, ui: &egui::Ui, text: &mut Buffer, opts: &Options, out: &mut Outcome) {
         // The events are collected first because handling one needs `&mut self`
@@ -3211,6 +3666,39 @@ A"
                     self.each(text, false, |e, tx| e.type_text(tx, t, out));
                     self.scroll_to_caret(text);
                 }
+                // An input method's composing text. It arrives as its own event
+                // rather than as keys or as `Text`, because the window layer
+                // never turns a composition into either.
+                egui::Event::Ime(ime) => match ime {
+                    egui::ImeEvent::Commit(t) => {
+                        // The composition is over whether or not the document
+                        // will take it, so a read-only pane stops showing one.
+                        self.preedit = None;
+                        if !opts.editable {
+                            continue;
+                        }
+                        // Committing is typing: the same insertion path, so
+                        // auto-pairs, undo and the selection all behave exactly
+                        // as they do for a keyboard.
+                        self.each(text, false, |e, tx| e.type_text(tx, t, out));
+                        self.scroll_to_caret(text);
+                    }
+                    egui::ImeEvent::Preedit { text: t, .. } => {
+                        // Kept aside, never written. The buffer and the caret
+                        // must not move while a candidate is being chosen, or
+                        // every candidate keystroke would edit the document.
+                        self.preedit = if t.is_empty() { None } else { Some(t.clone()) };
+                    }
+                    // The IME was enabled or dismissed. Either way there is no
+                    // composition on screen any more.
+                    #[expect(deprecated)]
+                    egui::ImeEvent::Enabled | egui::ImeEvent::Disabled => {
+                        self.preedit = None;
+                    }
+                    // Deleting around the caret is the input method's own
+                    // business; this editor has no use for it.
+                    egui::ImeEvent::DeleteSurrounding { .. } => {}
+                },
                 // The clipboard shortcuts never arrive as key presses: the
                 // window layer turns them into these three events instead, so
                 // the text goes to the system clipboard rather than ours. With
@@ -3536,6 +4024,11 @@ A"
                     out.edited = true;
                 }
             }
+            // Fold every region, or open every one. A view command, so it works
+            // on a read-only document too, and it claims no key the app wanted:
+            // the bracket pair with the control and shift keys is free.
+            egui::Key::OpenBracket if ctrl && shift => self.fold_all(text),
+            egui::Key::CloseBracket if ctrl && shift => self.unfold_all(),
             _ => {}
         }
     }
@@ -4042,6 +4535,19 @@ A"
             // for an arrow key to move the focus to, away from the text.
             egui::Sense::CLICK | egui::Sense::DRAG,
         );
+        // Painted by hand, so a screen reader has to be told it is a scrollbar.
+        // The value is the same fraction the thumb is drawn at, so the two
+        // cannot say different things about where the window is.
+        let fraction = f64::from((self.scroll_y / self.max_scroll_y().max(1.0)).clamp(0.0, 1.0));
+        resp.widget_info(|| {
+            let mut info = egui::WidgetInfo::labeled(
+                egui::WidgetType::ScrollBar,
+                ui.is_enabled(),
+                "Editor scrollbar",
+            );
+            info.value = Some(fraction);
+            info
+        });
         // Whether the pointer went down on the thumb, and where inside it,
         // remembered for as long as the button is held. Both have to be remembered
         // rather than looked at each frame: a drag is only recognised once the
@@ -5259,5 +5765,154 @@ wörld");
         assert_eq!(text.lines(), 3);
         assert_eq!(e.lines, 3);
         assert_eq!(text.line_str(2), "three");
+    }
+
+    // ---- accessibility -----------------------------------------------------
+    //
+    // The editor's own controls are painted by hand, so nothing tells a screen
+    // reader what they are until the `WidgetInfo` is attached. A click or a
+    // focus is the one moment egui turns that info into an observable event, so
+    // these tests drive the real input path and read what came out.
+
+    /// Runs one editor frame with `events`, releases the font atlas, and hands
+    /// back what reached the platform.
+    fn show_frame(
+        ctx: &egui::Context,
+        ed: &mut Editor,
+        buf: &mut Buffer,
+        rect: egui::Rect,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                ed.show(ui, rect, buf, &Options::default());
+            },
+        );
+        acknowledge(&mut out);
+        out
+    }
+
+    fn pointer(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// The widget info of the first click in the frame.
+    fn clicked(out: &egui::FullOutput) -> egui::WidgetInfo {
+        out.platform_output
+            .events
+            .iter()
+            .find_map(|e| match e {
+                egui::output::OutputEvent::Clicked(info) => Some(info.clone()),
+                _ => None,
+            })
+            .expect("the click emitted no widget info")
+    }
+
+    #[test]
+    fn the_editor_names_itself_as_a_text_edit_for_a_screen_reader() {
+        let ctx = headless();
+        let rect = pane();
+        let mut buf = Buffer::from("hello\nworld\n");
+        let mut ed = Editor::default();
+        // Asking for focus before the frame is what makes the response report
+        // that it gained focus, which is when the info is emitted as an event.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.memory_mut(|m| m.request_focus(egui::Id::new(ID)));
+            ed.show(ui, rect, &mut buf, &Options::default());
+        });
+        let info = out
+            .platform_output
+            .events
+            .iter()
+            .find_map(|e| match e {
+                egui::output::OutputEvent::FocusGained(info) => Some(info.clone()),
+                _ => None,
+            })
+            .expect("the editor never named itself to the screen reader");
+        acknowledge(&mut out);
+        assert_eq!(info.typ, egui::WidgetType::TextEdit);
+        assert_eq!(info.label.as_deref(), Some("Editor"));
+        // The value is deliberately absent: copying a whole file every frame is
+        // the cost this editor exists to avoid, and the name is enough to reach
+        // the widget.
+        assert!(info.current_text_value.is_none());
+    }
+
+    #[test]
+    fn the_find_bars_buttons_name_themselves_for_a_screen_reader() {
+        let ctx = headless();
+        let rect = pane();
+        let mut buf = Buffer::from("alpha\nbeta\n");
+        let mut ed = Editor::default();
+        ed.find.open = true;
+        // One frame so the bar is laid out and its buttons' rectangles exist.
+        let _ = show_frame(&ctx, &mut ed, &mut buf, rect, vec![]);
+        let pos = ed
+            .find_buttons
+            .first()
+            .expect("the bar drew its buttons")
+            .center();
+        let _ = show_frame(
+            &ctx,
+            &mut ed,
+            &mut buf,
+            rect,
+            vec![egui::Event::PointerMoved(pos), pointer(pos, true)],
+        );
+        let out = show_frame(
+            &ctx,
+            &mut ed,
+            &mut buf,
+            rect,
+            vec![egui::Event::PointerMoved(pos), pointer(pos, false)],
+        );
+        let info = clicked(&out);
+        assert_eq!(info.typ, egui::WidgetType::Button);
+        // The first button in the row is the close cross.
+        assert_eq!(info.label.as_deref(), Some("Close"));
+    }
+
+    #[test]
+    fn the_editor_scrollbar_names_itself_for_a_screen_reader() {
+        let ctx = headless();
+        let rect = pane();
+        let text = (0..500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buf = Buffer::from(text.as_str());
+        let mut ed = Editor::default();
+        // One frame so the metrics exist and the bar knows it has room.
+        let _ = show_frame(&ctx, &mut ed, &mut buf, rect, vec![]);
+        let pos = ed
+            .scrollbar_rect(rect)
+            .expect("a long document gets a scrollbar")
+            .center();
+        let _ = show_frame(
+            &ctx,
+            &mut ed,
+            &mut buf,
+            rect,
+            vec![egui::Event::PointerMoved(pos), pointer(pos, true)],
+        );
+        let out = show_frame(
+            &ctx,
+            &mut ed,
+            &mut buf,
+            rect,
+            vec![egui::Event::PointerMoved(pos), pointer(pos, false)],
+        );
+        let info = clicked(&out);
+        assert_eq!(info.typ, egui::WidgetType::ScrollBar);
+        assert_eq!(info.label.as_deref(), Some("Editor scrollbar"));
     }
 }

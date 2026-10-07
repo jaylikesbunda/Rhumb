@@ -50,6 +50,8 @@ impl Rhumb {
             k.properties = i.consume_key(egui::Modifiers::ALT, Key::Enter);
             k.new_menu = i.consume_key(egui::Modifiers::ALT, Key::F);
             k.toggle_details = i.consume_key(egui::Modifiers::ALT, Key::P);
+            k.toggle_dual = i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, Key::D)
+                || i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::D);
             k.settings = i.consume_key(egui::Modifiers::CTRL, Key::Comma)
                 || i.consume_key(egui::Modifiers::COMMAND, Key::Comma);
             k.escape = i.consume_key(egui::Modifiers::NONE, Key::Escape);
@@ -118,6 +120,9 @@ impl Rhumb {
         if k.toggle_details {
             self.details = !self.details;
         }
+        if k.toggle_dual {
+            self.toggle_dual();
+        }
         if k.focus_mode && self.shows_file_tab() {
             self.focus = !self.focus;
         }
@@ -159,10 +164,15 @@ impl Rhumb {
             self.select_all();
         }
         self.handle_clipboard_events(ctx);
-        if k.rename
-            && let Some(p) = self.cursor_path()
-        {
-            self.start_rename(&p);
+        if k.rename {
+            // One item keeps the single-file dialog; two or more open the batch
+            // one, the way Explorer's F2 does over a selection.
+            let paths = self.target_paths();
+            match paths.len() {
+                0 => {}
+                1 => self.start_rename(&paths[0]),
+                _ => self.start_batch_rename(paths),
+            }
         }
         if k.delete_forever {
             self.delete_selection(true);

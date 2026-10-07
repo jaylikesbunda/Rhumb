@@ -43,6 +43,15 @@ pub enum Msg {
         w: u32,
         h: u32,
     },
+    /// A remote image finished fetching and decoding, ready for a texture.
+    RemoteImage {
+        url: String,
+        px: u32,
+        /// Empty when fetching or decoding failed.
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+    },
     /// A folder's subfolders finished loading for the sidebar tree.
     TreeLoaded { path: PathBuf, dirs: Vec<PathBuf> },
     /// A folder's subtree finished being measured for the status bar and the
@@ -114,6 +123,8 @@ pub struct Job {
     pub kind: OpKind,
     pub label: String,
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while the user has this job held; the worker naps until it clears.
+    pub paused: Arc<std::sync::atomic::AtomicBool>,
     pub started: std::time::Instant,
 }
 

@@ -817,7 +817,7 @@ fn every_pair_and_triple_of_editing_commands_leaves_the_editor_sane() {
                 // sessions is not a debug-build number. The pairs and the single
                 // commands always run, and the triples are covered by the seeded
                 // random walks below at any profile.
-                if k > 0 && !cfg!(debug_assertions) && depth() < 3 {
+                if k > 0 && cfg!(debug_assertions) && depth() < 3 {
                     continue;
                 }
                 let doc = DOCS[i % DOCS.len()];
