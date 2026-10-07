@@ -643,17 +643,29 @@ impl Indexes {
     /// search is answered at once. Unlike [`Indexes::ensure`] it never starts a
     /// walk: on a first run there is nothing to read, and a folder is indexed
     /// when it is actually needed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn load_ready(&mut self, dir: &Path) {
         if self.any_for(dir).is_some() {
             return;
         }
         if let Some(index) = Self::load_cached(dir) {
-            // A new, wider one makes any it covers redundant.
-            self.list.retain(|x| !x.root.starts_with(dir));
-            self.list.push(index);
-            while self.list.len() > MAX_INDEXES {
-                self.list.remove(0);
-            }
+            self.add(index);
+        }
+    }
+
+    /// Takes an index that was read elsewhere, replacing any it covers.
+    ///
+    /// Reading a large snapshot is the cost, so the app does it on a worker and
+    /// hands the result here once it lands, rather than blocking the launch.
+    pub fn add(&mut self, index: Index) {
+        if self.any_for(&index.root).is_some() {
+            return;
+        }
+        // A new, wider one makes any it covers redundant.
+        self.list.retain(|x| !x.root.starts_with(&index.root));
+        self.list.push(index);
+        while self.list.len() > MAX_INDEXES {
+            self.list.remove(0);
         }
     }
 

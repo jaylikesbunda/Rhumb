@@ -62,6 +62,9 @@ fn main() -> eframe::Result {
         // draws matching edge handles as a fallback.
         .with_decorations(false)
         .with_resizable(true)
+        // Shown by the first frame, once it has been painted, so the window does
+        // not appear as a blank flash before its content.
+        .with_visible(false)
         .with_drag_and_drop(true);
 
     let viewport = match icon {

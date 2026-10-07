@@ -1042,6 +1042,12 @@ pub struct Rhumb {
     remote: crate::remote::RemoteImages,
     /// The name indexes searches are answered from.
     indexes: crate::index::Indexes,
+    /// A saved index being read on a worker; added to `indexes` when it lands,
+    /// so reading a large snapshot does not delay the first frame.
+    index_load: Option<std::sync::mpsc::Receiver<crate::index::Index>>,
+    /// Whether the window has been shown. It starts hidden so the first frame is
+    /// painted before it appears, which is what removes the startup flash.
+    shown: bool,
     /// Head of the text file the details pane is showing, with its path.
     peek: Option<(PathBuf, String)>,
     /// Path whose head is being read, so it is only requested once.
@@ -1213,6 +1219,8 @@ impl Rhumb {
             thumbs: Thumbs::new(tx.clone()),
             remote: crate::remote::RemoteImages::new(tx.clone()),
             indexes: crate::index::Indexes::default(),
+            index_load: None,
+            shown: false,
             peek: None,
             peek_pending: None,
             free_space: fs_model::FreeSpace::default(),
@@ -1246,11 +1254,19 @@ impl Rhumb {
         app.apply_prefs(arg.as_deref().filter(|p| p.is_dir()));
         // The window starts with one folder tab, for where it opened.
         app.init_folders();
-        // Read back the saved index of the folder being shown, if there is one,
-        // so the first search is answered from it rather than by walking. On a
-        // first run there is none, and nothing is walked.
+        // Read back the saved index of the folder being shown, on a worker: a
+        // large snapshot is a gunzip and a parse, and doing that here would put
+        // it in front of the first frame. It is added when it arrives.
+        let (itx, irx) = std::sync::mpsc::channel();
         let cwd = app.cwd.clone();
-        app.indexes.load_ready(&cwd);
+        let _ = std::thread::Builder::new()
+            .name("rhumb-index-load".into())
+            .spawn(move || {
+                if let Some(index) = crate::index::Indexes::load_cached(&cwd) {
+                    let _ = itx.send(index);
+                }
+            });
+        app.index_load = Some(irx);
         app.request_listing();
         // A window that was left in dual-pane view opens with its second list
         // reading again, so the two panes start in step.
@@ -1261,6 +1277,31 @@ impl Rhumb {
             app.open_path(&p);
         }
         app
+    }
+
+    /// Adds a saved name index a worker finished reading, if one arrived.
+    fn take_loaded_index(&mut self) {
+        let Some(rx) = self.index_load.take() else {
+            return;
+        };
+        let mut got = Vec::new();
+        let mut open = true;
+        loop {
+            match rx.try_recv() {
+                Ok(index) => got.push(index),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    open = false;
+                    break;
+                }
+            }
+        }
+        if open {
+            self.index_load = Some(rx);
+        }
+        for index in got {
+            self.indexes.add(index);
+        }
     }
 
     // ---- persistence ---------------------------------------------------
@@ -1274,6 +1315,7 @@ impl Rhumb {
         }
 
         self.drain_messages(ctx);
+        self.take_loaded_index();
         self.pump_search();
         self.expire_toasts();
         self.handle_watch_debounce();
@@ -1827,6 +1869,19 @@ impl eframe::App for Rhumb {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.draw(ui, &ctx);
+        if !self.shown {
+            // The viewport is created hidden (`with_visible(false)`), so the
+            // first frame is painted before the window appears. Showing it here
+            // is what keeps the startup from flashing.
+            self.shown = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // The window's own background, so the clear before the first frame is
+        // never a flash of the default colour.
+        c::BG.to_normalized_gamma_f32()
     }
 
     fn on_exit(&mut self) {
