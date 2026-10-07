@@ -92,6 +92,8 @@ fn main() -> eframe::Result {
 /// backend (Vulkan, GL, DX12) and enumerates their adapters, which is most of
 /// the time a window takes to appear. Every supported Windows has DX12.
 fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    // `mut` is only needed for the Windows tweak below.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut options = eframe::egui_wgpu::WgpuConfiguration::default()
         .with_surface_config(eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY);
     #[cfg(windows)]

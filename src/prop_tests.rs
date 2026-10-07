@@ -7,6 +7,7 @@
 use proptest::prelude::*;
 
 use crate::buffer::Buffer;
+#[cfg(windows)]
 use crate::fs_model;
 use crate::search;
 

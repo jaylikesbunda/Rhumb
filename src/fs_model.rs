@@ -1608,7 +1608,18 @@ mod tests {
         assert!(validate_name("  ").is_err());
         assert!(validate_name("..").is_err());
         assert!(validate_name("a/b").is_err());
-        assert!(validate_name("x*").is_err());
+        // The characters Windows forbids are legal on Unix, and the check
+        // follows the platform it runs on.
+        #[cfg(windows)]
+        {
+            assert!(validate_name("x*").is_err());
+            assert!(validate_name("CON").is_err());
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(validate_name("x*").is_ok());
+            assert!(validate_name("CON").is_ok());
+        }
     }
 
     #[test]
