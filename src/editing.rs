@@ -404,7 +404,7 @@ pub fn lang_for(path: &std::path::Path) -> crate::codeedit::Lang {
 /// Only languages this editor actually knows how to recognise. The tokenizer
 /// has one keyword list for every language it covers, so running it over a
 /// plain text file lights up every ordinary English word that happens to be a
-/// keyword in some language — `is`, `in`, `not`, `as`, `use`, `new` — and
+/// keyword in some language - `is`, `in`, `not`, `as`, `use`, `new` - and
 /// treats an apostrophe as an unterminated string, so `don't` colours half the
 /// line. A file with no language is left alone.
 pub fn highlights_code(path: &std::path::Path) -> bool {

@@ -20,7 +20,7 @@ pub type Hit = (usize, usize);
 
 /// The most hits kept for highlighting.
 ///
-/// Past this the bar still counts correctly — the count is of the whole file —
+/// Past this the bar still counts correctly - the count is of the whole file -
 /// but stops marking them, because a reader is looking at one of them and the
 /// ones past a hundred thousand are not what is on screen. Without a cap, a
 /// search for a space in a large file allocates a vector of a million pairs
@@ -81,7 +81,7 @@ pub fn find_all(text: &str, needle: &str, query: Query) -> Vec<Hit> {
 ///
 /// A candidate is found by its first byte, which is what makes this a scan and
 /// not a comparison at every position. An ASCII byte can only ever sit at a
-/// character boundary — a UTF-8 continuation byte is always 0x80 or above — so
+/// character boundary - a UTF-8 continuation byte is always 0x80 or above - so
 /// every candidate is one, and the character count only has to be advanced over
 /// the gaps between them.
 fn scan_ascii(text: &str, needle: &str, query: Query, out: &mut Vec<Hit>) {
@@ -118,7 +118,7 @@ fn scan_ascii(text: &str, needle: &str, query: Query, out: &mut Vec<Hit>) {
             }
         }
         // On by one whole character rather than one match. A needle that overlaps
-        // itself — "aa" in "aaaa" — has a hit starting inside the previous one, and
+        // itself - "aa" in "aaaa" - has a hit starting inside the previous one, and
         // stepping past the match would find only the first of them.
         let step = text[at..].chars().next().map_or(1, char::len_utf8);
         at_char += 1;
@@ -132,7 +132,7 @@ fn scan_ascii(text: &str, needle: &str, query: Query, out: &mut Vec<Hit>) {
 /// Slower by design: it compares at every character boundary rather than scanning
 /// for a first byte. It can be, because a needle with an accented letter is rare
 /// enough that getting it wrong would be the bigger problem. Nothing here
-/// allocates — `char::to_lowercase` is an iterator — because lowercasing a copy
+/// allocates - `char::to_lowercase` is an iterator - because lowercasing a copy
 /// of a multi-megabyte file on every keystroke is not a price worth paying.
 fn scan_wide(text: &str, needle: &str, query: Query, out: &mut Vec<Hit>) {
     let n = needle.len();
@@ -183,7 +183,7 @@ fn matches_at(hay: &str, needle: &str, query: Query) -> bool {
 /// Whether a hit is bounded by things that are not word characters.
 ///
 /// Asked of the text either side of the hit rather than of the hit itself,
-/// because a needle can be a whole word and still be glued to another one — in
+/// because a needle can be a whole word and still be glued to another one - in
 /// `foofoo`, both halves match `foo` and neither is a word on its own.
 fn is_whole(text: &str, start: usize, end: usize) -> bool {
     fn word(c: char) -> bool {
@@ -273,7 +273,7 @@ pub fn is_capped(hits: &[Hit]) -> bool {
 /// The hit after `from`, wrapping round, and its index.
 ///
 /// `from` is the *end* of the current hit, so stepping forward from a hit does
-/// not land on the hit itself — the case that makes "next" appear to do nothing
+/// not land on the hit itself - the case that makes "next" appear to do nothing
 /// on the first press.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn next(hits: &[Hit], from: usize, forward: bool) -> Option<(usize, Hit)> {
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn every_character_position_is_found_exactly_once() {
         // Walks the document one character at a time looking for a single
-        // character, so the offsets are the identity — which is the strongest
+        // character, so the offsets are the identity - which is the strongest
         // statement available that the character counting is right.
         let text = "aé漢z,q.j\n\tk";
         let unique: std::collections::BTreeSet<char> = text.chars().collect();

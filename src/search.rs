@@ -167,7 +167,7 @@ impl Search {
 
         let root = root.to_path_buf();
 
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("rhumb-search".into())
             .spawn(move || {
                 let started = Instant::now();
@@ -239,8 +239,12 @@ impl Search {
                     truncated,
                 }));
                 log::debug!("search: {scanned} scanned in {elapsed_ms} ms");
-            })
-            .expect("spawn search thread");
+            });
+        if spawned.is_err() {
+            // The walk never started, so nothing is left waiting on it.
+            self.running = false;
+            log::error!("could not start the search worker");
+        }
     }
 }
 

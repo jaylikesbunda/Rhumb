@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a feature or a change.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rhumb stays small and fast on purpose, so the best requests describe a
+        problem rather than a specification. If it is already in `TODO.md`, an
+        issue is not needed - a reaction or a note there is enough.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: The task you are trying to do, and where it hurts today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: A rough sketch is fine. It does not need to be a design.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What you do instead today, or other tools that do it well.
+    validations:
+      required: false

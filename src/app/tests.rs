@@ -9,7 +9,7 @@ fn file(name: &str) -> Tab {
 ///
 /// A copy rather than a call, because `split_ui` needs a whole `Rhumb` to reach.
 /// The parts that matter are copied exactly: the two child rects, the divider,
-/// and the one line that writes the fraction back — because the bug this is
+/// and the one line that writes the fraction back - because the bug this is
 /// looking for is a disagreement between where the divider is *drawn* and where
 /// the drag *thinks* it is, and that disagreement is invisible in the geometry
 /// functions alone.
@@ -100,8 +100,8 @@ fn warm_up(ctx: &Context, s: &mut Split) {
 /// The events for one frame of a drag: a move always, and a button press or
 /// release only on the frames that have one.
 ///
-/// Sending a release on every frame — which is what "pressed on the first frame,
-/// false on the rest" reads like — lets go of the button immediately, and a drag
+/// Sending a release on every frame - which is what "pressed on the first frame,
+/// false on the rest" reads like - lets go of the button immediately, and a drag
 /// that is not being held is not a drag. A platform sends one press and one
 /// release and nothing in between, and so does this.
 fn button_step(p: Pos2, pressed: bool) -> Vec<egui::Event> {
@@ -218,7 +218,7 @@ fn dragging_the_divider_moves_it_and_it_stays_where_it_was_left() {
     // The complaint this pins down: grab the divider between the editor and the
     // preview, move it, and it springs back to where it was. Which is what a
     // drag whose *result* is written from a position that is recomputed from
-    // something else looks like — the divider is drawn one place and the number
+    // something else looks like - the divider is drawn one place and the number
     // that decides where it is drawn comes from another.
     let panel = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(800.0, 600.0));
     let start = drag_the_divider(panel, 0.0);
@@ -303,7 +303,7 @@ fn the_divider_keeps_its_position_while_the_drag_is_held() {
 #[test]
 fn the_divider_goes_where_the_pointer_goes_in_the_narrow_panel() {
     // The complaint: with the file list showing, the doc panel sits at its
-    // default width — around 380 points — rather than filling the centre, and
+    // default width - around 380 points - rather than filling the centre, and
     // dragging the divider there "just bounces back to its original width".
     //
     // The cause is the minimum pane size. Two 160-point panes and a 7-point
@@ -327,7 +327,7 @@ fn the_divider_goes_where_the_pointer_goes_in_the_narrow_panel() {
          clipped away and the divider springs back"
     );
     let back = drag_the_divider(panel, -100.0);
-    // 100pt left is past the limit in a 380pt panel, so it stops there — but it
+    // 100pt left is past the limit in a 380pt panel, so it stops there - but it
     // must have *moved*, and it must have stayed there. The failure this test
     // exists for is it ending up back at 186.
     assert!(
@@ -383,7 +383,7 @@ fn neither_pane_is_squeezed_below_the_limit() {
     assert_eq!(split_left(1000.0, 0.0), SPLIT_MIN_PANE);
     assert_eq!(split_left(1000.0, 1.0), 1000.0 - SPLIT_MIN_PANE);
     // Narrow panel: a quarter each, so both panes still have a usable share and
-    // — the reason this changed — the divider still has somewhere to go. Half
+    // - the reason this changed - the divider still has somewhere to go. Half
     // each would be 150 of 300, which is correct as a floor and useless as a
     // drag: it pins the divider to one place in the whole panel.
     assert_eq!(split_left(300.0, 0.0), 75.0);

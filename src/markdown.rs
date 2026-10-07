@@ -115,8 +115,8 @@ pub fn parse_with_lines(source: &str) -> (Vec<Block>, Vec<usize>) {
         | Options::ENABLE_SUBSCRIPT
         | Options::ENABLE_SMART_PUNCTUATION;
     let (blocks, starts) = Builder::run(Parser::new_ext(source, options).into_offset_iter());
-    // `<details>` arrives as three or more top-level HTML blocks — the opening tag,
-    // the summary, then the body — so they are folded into one disclosure here.
+    // `<details>` arrives as three or more top-level HTML blocks - the opening tag,
+    // the summary, then the body - so they are folded into one disclosure here.
     let (blocks, starts) = fold_details(blocks, starts);
     // Byte offsets to line numbers, counting the newlines between one and the next.
     let bytes = source.as_bytes();
@@ -532,8 +532,8 @@ impl Builder {
         match tag {
             TagEnd::Paragraph => {
                 let spans = std::mem::take(&mut self.spans);
-                // A paragraph that is only whitespace — the space a soft break leaves
-                // between two images — is not worth a block of its own.
+                // A paragraph that is only whitespace - the space a soft break leaves
+                // between two images - is not worth a block of its own.
                 if spans.iter().any(|s| !s.text.trim().is_empty()) {
                     self.push(Block::Para(spans));
                 }
@@ -1098,8 +1098,8 @@ impl Preview {
                     c::TEXT,
                     true,
                 ) - at;
-                // A block whose state changed under us — an image finished loading, a
-                // `<details>` was opened — has a new height, so the map is rebuilt.
+                // A block whose state changed under us - an image finished loading, a
+                // `<details>` was opened - has a new height, so the map is rebuilt.
                 if (h - self.heights[i].unwrap_or(h)).abs() > 0.5 {
                     self.heights[i] = Some(h);
                     changed = true;
@@ -1134,7 +1134,7 @@ impl Preview {
     /// Lays out every block that has no height yet, so the line<->pixel map is exact.
     ///
     /// Nothing is painted: only the geometry is wanted. An image block uses the size it
-    /// already knows — a local file's pixels, or a short placeholder for a remote one —
+    /// already knows - a local file's pixels, or a short placeholder for a remote one -
     /// rather than starting a fetch, so a document full of pictures does not decode
     /// them all at once.
     fn layout_all(
@@ -1549,7 +1549,8 @@ impl Preview {
             x += w;
         }
         edges.push(x);
-        let (left, right) = (edges[0], *edges.last().unwrap());
+        let left = edges.first().copied().unwrap_or(indent);
+        let right = edges.last().copied().unwrap_or(left);
 
         let mut y = y;
         let mut rules: Vec<f32> = Vec::with_capacity(table.rows.len() + 2);
@@ -1630,7 +1631,11 @@ impl Preview {
             for line in &rules {
                 painter.hline(left..=right, *line, stroke);
             }
-            let bottom = *rules.last().unwrap();
+            let bottom = rules
+                .last()
+                .copied()
+                .or_else(|| rules.first().copied())
+                .unwrap_or(0.0);
             for edge in &edges {
                 painter.vline(*edge, rules[0]..=bottom, stroke);
             }
@@ -1681,7 +1686,7 @@ impl Preview {
         })
     }
 
-    /// Draws an image — local or remote — or a tidy reference when it cannot be
+    /// Draws an image - local or remote - or a tidy reference when it cannot be
     /// decoded. In layout-only mode (`draw` false) the height is computed without
     /// painting and without starting a fetch, using the size already known.
     ///
@@ -1798,7 +1803,7 @@ impl Preview {
             let label = if alt.is_empty() {
                 url.to_owned()
             } else {
-                format!("{alt}  \u{2014}  {url}")
+                format!("{alt}  -  {url}")
             };
             let job = plain_job(
                 label,
@@ -1824,7 +1829,7 @@ impl Preview {
     ///
     /// The job is built by `make`, and only when it is needed: a block that is
     /// already shaped costs a lookup and nothing else, where building its job first
-    /// — a string and a section for every run of text — cost more than the lookup it
+    /// - a string and a section for every run of text - cost more than the lookup it
     /// was for, on every block, every frame. The layout pass passes `cache` false, so
     /// measuring a whole document does not hold every galley in memory.
     fn shape(
@@ -3055,7 +3060,7 @@ mod tests {
     ///
     /// A child `Ui` of exactly `pane`, because the `Ui` a `run_ui` hands over has
     /// no bounded size of its own and a scroll area inside one is never smaller
-    /// than its content — which would make the whole question vacuous.
+    /// than its content - which would make the whole question vacuous.
     fn pane_ui(ui: &mut egui::Ui, pane: egui::Vec2, p: &mut Preview) {
         let mut child = ui.new_child(
             egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, pane)),
@@ -3136,7 +3141,7 @@ mod tests {
     #[test]
     fn a_tall_preview_scrolls_in_the_pane_it_is_drawn_in() {
         // The complaint this pins down: a long markdown file opens in the preview
-        // and will not scroll. The preview itself is not at fault — it reports the
+        // and will not scroll. The preview itself is not at fault - it reports the
         // height of the whole document, and the test above proves every block
         // reaches the screen. So the fault is in how the pair is assembled: the
         // scroll area is never told how tall its content is, so it believes the
@@ -3169,7 +3174,7 @@ mod tests {
             after < before - 10.0,
             "after five wheel steps the top of the document should have moved up out of \
              the way, but the first text is at y={after:.1} having started at \
-             y={before:.1} — the preview does not scroll"
+             y={before:.1} - the preview does not scroll"
         );
     }
 
@@ -3181,7 +3186,7 @@ mod tests {
         // the way to know is to put the real file through the real arrangement.
         //
         // Read from the bench directory if it is there, and skipped rather than
-        // failed if not — a test that fails because a scratch file was cleaned up is
+        // failed if not - a test that fails because a scratch file was cleaned up is
         // worse than no test, and the shape of the document is reproduced below
         // either way.
         let mut doc = String::from(
@@ -3207,7 +3212,7 @@ mod tests {
         ] {
             // A fresh context per pane, because a scroll area keeps its offset
             // between frames and would hand the next pane the last one's scroll
-            // position — so the second and third cases would start already scrolled
+            // position - so the second and third cases would start already scrolled
             // to the bottom and could not show anything moving.
             let ctx = egui::Context::default();
             ctx.set_fonts(crate::theme::fonts());

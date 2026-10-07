@@ -3,7 +3,7 @@
 //! arboard only speaks text, which is why copying here and pasting in
 //! Explorer did nothing (Explorer wants CF_HDROP), and pasting Explorer's
 //! files here failed the same way in reverse. This module speaks the two
-//! formats Explorer cares about — CF_HDROP and "Preferred DropEffect" —
+//! formats Explorer cares about - CF_HDROP and "Preferred DropEffect" -
 //! through raw Win32 calls, no COM involved.
 //!
 //! Any clipboard call can fail (another app holding it open is the usual

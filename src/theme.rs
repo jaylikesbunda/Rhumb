@@ -59,15 +59,15 @@ pub mod c {
 /// Spacing scale. Use these instead of magic numbers so rhythm is identical
 /// across every panel.
 pub mod sp {
-    /// 4px — icon-to-text gap.
+    /// 4px - icon-to-text gap.
     pub const XS: f32 = 4.0;
-    /// 8px — inner padding, list row horizontal padding.
+    /// 8px - inner padding, list row horizontal padding.
     pub const SM: f32 = 8.0;
-    /// 12px — block spacing.
+    /// 12px - block spacing.
     pub const MD: f32 = 12.0;
-    /// 16px — section spacing, dialog padding.
+    /// 16px - section spacing, dialog padding.
     pub const LG: f32 = 16.0;
-    /// 24px — major separation.
+    /// 24px - major separation.
     pub const XL: f32 = 24.0;
 
     /// File list row height.
@@ -391,7 +391,6 @@ mod tests {
             ("filter on", '\u{25CF}'),
             ("filter off", '\u{25CB}'),
             ("ellipsis", '\u{2026}'),
-            ("em dash", '\u{2014}'),
         ];
         let ctx = egui::Context::default();
         ctx.set_fonts(fonts());

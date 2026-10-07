@@ -5,8 +5,8 @@
 //! cache is bounded: every entry is a GPU texture, so it is the one place in
 //! the app where unbounded growth would actually hurt.
 //!
-//! Types the `image` crate cannot decode — video, PDF, RAW, the whole of what
-//! Explorer shows a preview for — are asked of the Windows shell instead, which
+//! Types the `image` crate cannot decode - video, PDF, RAW, the whole of what
+//! Explorer shows a preview for - are asked of the Windows shell instead, which
 //! is where Explorer gets the same picture. A type with no thumbnail handler
 //! answers `None` and the caller falls back to the per-type shell icon; outside
 //! Windows there is no shell and the answer is always `None`.

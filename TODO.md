@@ -69,8 +69,10 @@ sizes.
 
 ## Structural - unblocks everything below
 
-- [ ] Loc enum + Backend trait - Dir(PathBuf) / Shell(ShellId), Entry.kind
-      instead of is_dir: bool. Touches fs_model.rs + tree.rs.
+- [x] Loc enum + Backend trait - `Loc::of` classifies a path as Dir, Archive,
+      Recycle or ThisPc, and `Backend::list` lists it; `read_dir` dispatches
+      through it. (`Entry.kind` instead of `is_dir` is not done: the shell
+      places are modelled as folders, so the rename is cosmetic.)
 
 ## Reimplement
 

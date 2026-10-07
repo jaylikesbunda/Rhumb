@@ -27,6 +27,10 @@ Download a build from the releases page:
 
 Settings are stored in `%LOCALAPPDATA%\rhumb\prefs.txt`. Delete it to reset.
 
+Each release publishes a `SHA256SUMS` file; see
+[`docs/REPRODUCIBLE.md`](docs/REPRODUCIBLE.md) to verify a download and rebuild
+it.
+
 <details>
 <summary><b>Features</b></summary>
 
@@ -88,7 +92,7 @@ desktop under normal load. Medians, in milliseconds. A frame at 240 fps is
 | Typed character, whole app, 20,000 lines | 0.74 | 2.0 |
 | Idle frame, whole app | 0.53 | 1.2 |
 | Scrolling the editor, whole app | 0.53 | 1.2 |
-| Arrow key in a 100,000-line file | 0.29–0.38 | 1.3 |
+| Arrow key in a 100,000-line file | 0.29-0.38 | 1.3 |
 | Page Down / Ctrl+End in 100,000 lines | 0.46 / 0.55 | 1.2 |
 | Enter / Backspace mid-file, 20,000 lines | 0.22 / 0.19 | 0.8 |
 | Undo / redo after a long session | 0.53 / 0.51 | 3.1 |
@@ -179,3 +183,7 @@ MSI and portable zip, tags `v<version>` and publishes the release.
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+Contributions are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md). To report a
+security problem, follow [SECURITY.md](SECURITY.md) rather than opening a public
+issue.

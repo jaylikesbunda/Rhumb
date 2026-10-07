@@ -10,8 +10,8 @@
 //!
 //! The record comes in two shapes. Version 1 is a 280-byte structure written by
 //! Windows 95 through 2000; version 2 is 800 bytes and written by everything
-//! since Vista. Both start with the same three 8-byte fields — a version, the
-//! deleted item's size and the deletion time as a `FILETIME` — followed by the
+//! since Vista. Both start with the same three 8-byte fields - a version, the
+//! deleted item's size and the deletion time as a `FILETIME` - followed by the
 //! original path as UTF-16, so one reader covers both.
 //!
 //! The parsing and the moves are plain `std` and are kept off the Windows-only

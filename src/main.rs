@@ -30,6 +30,9 @@ mod typeahead;
 mod widgets;
 mod workers;
 
+#[cfg(test)]
+mod prop_tests;
+
 use eframe::egui::{IconData, ViewportBuilder};
 
 /// The application icon, embedded so the binary is self-contained.

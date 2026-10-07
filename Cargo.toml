@@ -56,6 +56,8 @@ sevenz-rust = { version = "0.6.1", default-features = false, features = ["compre
 # The tests build a small RAR to read back the same way; its writer is likewise
 # kept out of the normal dependencies.
 rars = { version = "0.10.0", default-features = false, features = ["write"] }
+# Randomised property tests over the pure helpers, alongside the fixed tests.
+proptest = "1"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4.1"
@@ -78,7 +80,9 @@ embed-resource = "3"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# Fat LTO trades release build time for a smaller, marginally faster binary;
+# releases are built by hand, so the extra minutes are acceptable.
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true

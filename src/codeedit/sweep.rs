@@ -3,7 +3,7 @@
 //! The tests in `behaviour.rs` are written one at a time, by hand, from a bug
 //! report or an idea. That is the right way to find the bug somebody thought of.
 //! It cannot find the one nobody did, and in an editor the bugs nobody thinks of
-//! are the interesting ones: they are all *combinations* — this key after that
+//! are the interesting ones: they are all *combinations* - this key after that
 //! click, on this document, with wrap on, at the end of the buffer, where the
 //! caret is one character past a multi-byte character.
 //!
@@ -12,8 +12,8 @@
 //!
 //! 1. **Enumeration.** Every string of length 0 to 6 over an alphabet chosen for
 //!    the tokenizer's branches. Not sampled: all of it. The alphabet is small and
-//!    brutal on purpose — `/`, `*`, `"`, `#`, `\\`, a newline, a space, a
-//!    multi-byte character, a combining one — because those are the bytes a
+//!    brutal on purpose - `/`, `*`, `"`, `#`, `\\`, a newline, a space, a
+//!    multi-byte character, a combining one - because those are the bytes a
 //!    hand-written scanner gets wrong.
 //!
 //! 2. **Permutation.** Every ordered sequence of up to three editing commands,
@@ -123,8 +123,8 @@ impl<'a> Sane<'a> {
     /// This is the strongest check in the file and it is worth spelling out. The
     /// editor's whole design is that it shapes a *window* rather than the
     /// document, and it computes that window from its own line index. If the
-    /// index and the buffer ever disagree — because an edit invalidated the
-    /// index, or because a line was added above the window — the editor does not
+    /// index and the buffer ever disagree - because an edit invalidated the
+    /// index, or because a line was added above the window - the editor does not
     /// crash and does not look obviously wrong. It shows the wrong *lines*.
     ///
     /// Deriving the expectation from the buffer rather than from the editor's own
@@ -171,7 +171,7 @@ impl<'a> Sane<'a> {
         let want = text.get(lo..hi).unwrap_or_default();
         let got = self.h.job_text();
         // The window's last line is not terminated, because there is no line after
-        // it in the window to break to — so the slice of the document above, which
+        // it in the window to break to - so the slice of the document above, which
         // does carry that line's newline, differs from the job by exactly one
         // character at the end. Both forms are accepted, and only that: the
         // tolerance is one character at one end, not a prefix match, so a window
@@ -208,7 +208,7 @@ impl<'a> Sane<'a> {
     ///
     /// The rows are what the caret, the selection, the gutter and every click are
     /// addressed through, so a row that overlaps its neighbour is not a cosmetic
-    /// fault — it means a caret can be drawn on two rows at once, and that a click
+    /// fault - it means a caret can be drawn on two rows at once, and that a click
     /// resolves to one of them at random.
     fn check_rows(&mut self) {
         let rows = self.h.rows();
@@ -242,7 +242,7 @@ impl<'a> Sane<'a> {
             // Consecutive rows are separated by the newline that ends the line
             // between them, which the layout consumes as the row break and which is
             // therefore in neither row's range. So a gap of exactly one character
-            // is right, and a gap of more is a line that got no row at all — which
+            // is right, and a gap of more is a line that got no row at all - which
             // is what makes clicking it drop the caret to the bottom of the window.
             //
             // A row may also be zero-width: a blank line is a row with nothing in
@@ -275,9 +275,9 @@ impl<'a> Sane<'a> {
     /// show, which is a different design and a worse one.
     ///
     /// What is asserted instead is the three things that are actually faults: a
-    /// number for a line the document does not have — the row after a document's
+    /// number for a line the document does not have - the row after a document's
     /// final newline belongs to no line, and numbering it puts a count in the
-    /// margin for a line that cannot be scrolled to — a number out of order, and a
+    /// margin for a line that cannot be scrolled to - a number out of order, and a
     /// skipped line.
     fn check_gutter(&mut self) {
         let drawn: Vec<usize> = self
@@ -325,7 +325,7 @@ impl<'a> Sane<'a> {
     /// Nothing drawn may be at a position that is not a number.
     ///
     /// A `NaN` in a shape is the visible form of a division by a zero height, a
-    /// pane of no size, or a wrap width that came out negative — each of which is
+    /// pane of no size, or a wrap width that came out negative - each of which is
     /// a real thing that happens when a window is resized to nothing, and each of
     /// which is silent until the rasteriser meets it. A screenshot cannot see it.
     fn check_geometry(&mut self) {
@@ -478,8 +478,8 @@ fn enumerate(max: usize) -> Vec<String> {
 #[test]
 fn every_short_line_survives_the_tokenizer() {
     // The tokenizer's first promise is that its runs concatenate back to exactly
-    // the line it was given. If that fails, everything after it — the colours, the
-    // layout, the click columns — is being computed about a different string from
+    // the line it was given. If that fails, everything after it - the colours, the
+    // layout, the click columns - is being computed about a different string from
     // the one in the buffer, and the editor is wrong in a way no test that checks
     // one token can see.
     //
@@ -967,7 +967,7 @@ fn every_pixel(shard: usize, _shards: usize) {
     // characters, the seam between the text and the scrollbar.
     //
     // Every click is followed by the oracle, and by a check that the caret the
-    // click produced is on a row that exists — the second of which is what a
+    // click produced is on a row that exists - the second of which is what a
     // click *feels* wrong about, and it is invisible to a test that only asks
     // whether the click panicked.
     let step = if depth() >= 3 { 1.0 } else { 2.0 };

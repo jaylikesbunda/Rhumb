@@ -414,7 +414,7 @@ impl Rhumb {
                             }
                             // The menu opens on the press, with the release as a
                             // fallback. A press is visible globally, while a click
-                            // needs egui to credit this exact widget — credit the
+                            // needs egui to credit this exact widget - credit the
                             // row loses whenever anything overlaps it. The close
                             // behaviour below ignores the opening click, so opening
                             // early cannot dismiss the menu again.
@@ -854,7 +854,7 @@ impl Rhumb {
         // The same centred header the editor uses: glyph and name as one
         // block, the location beneath. The old layout drew the name in one
         // strip and the path a row lower, offset by the name's width, with the
-        // folder glyph colliding with the path text — nothing shared an axis.
+        // folder glyph colliding with the path text - nothing shared an axis.
         let width = ui.available_width();
         let header_h = HEADER_TITLE_H + HEADER_PATH_H;
         let (header, _) = ui.allocate_exact_size(Vec2::new(width, header_h), Sense::hover());
@@ -1184,7 +1184,7 @@ impl Rhumb {
         }
         // Inside an archive the list is filtered in place: there is no folder tree on
         // the disk to walk, or to index. The Recycle Bin and "This PC" are the same
-        // kind of place — magic paths with no folder behind them — so a deep search
+        // kind of place - magic paths with no folder behind them - so a deep search
         // there would only ask the disk about a path that names none. Their listed
         // entries are narrowed in place instead, which is what `watch` assumes too.
         if archive::is_virtual(&self.cwd)
@@ -1196,7 +1196,7 @@ impl Rhumb {
         // Nothing queued is the common case, and this runs every frame. A
         // gate that only rejected *young* requests fell through to `start` here
         // and restarted the walk on every frame, clearing the results the
-        // previous walk was still delivering — so the list showed "Searching"
+        // previous walk was still delivering - so the list showed "Searching"
         // and never showed a single hit.
         if !search_due(self.search_typed, SEARCH_DEBOUNCE) {
             return;

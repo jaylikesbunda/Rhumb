@@ -889,8 +889,8 @@ pub fn layout_elided_middle(
     // Drop characters from the front until the remainder fits.
     //
     // `n` is how many leading characters go, so the *smallest* `n` that fits is
-    // the longest tail worth showing. `fits` is monotone — a shorter tail is
-    // never wider — which makes this a lower-bound search. `hi` always holds a
+    // the longest tail worth showing. `fits` is monotone - a shorter tail is
+    // never wider - which makes this a lower-bound search. `hi` always holds a
     // candidate known to fit, starting from the bare ellipsis, so the search
     // can never wander off the end and report nothing.
     let chars: Vec<char> = text.chars().collect();

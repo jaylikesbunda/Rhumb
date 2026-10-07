@@ -41,7 +41,7 @@ pub enum Token {
 /// editor, which is deliberately a union rather than a per-language table: a
 /// keyword list is a few hundred bytes of `&'static str` and the highlighter
 /// would rather colour `match` in a Python file than argue about grammars.
-/// A word being reserved somewhere does not make it reserved here — it only
+/// A word being reserved somewhere does not make it reserved here - it only
 /// makes it a different colour.
 ///
 /// Words are listed the way their language spells them, which is lowercase for
@@ -488,7 +488,7 @@ fn scan(
         }
 
         // 2. A block comment opens, and runs to its close or to the end of the
-        //    line — in which case the next line starts inside it.
+        //    line - in which case the next line starts inside it.
         if let Some((open, close)) = lang.block
             && line[i..].starts_with(open)
         {

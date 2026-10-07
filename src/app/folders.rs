@@ -372,10 +372,9 @@ impl Rhumb {
     /// handled by the list it landed in. The side flag flips with the states, so
     /// neither folder moves across the screen.
     pub(super) fn activate_second(&mut self) {
-        if self.second.is_none() {
+        let Some(mut sec) = self.second.take() else {
             return;
-        }
-        let mut sec = self.second.take().expect("checked above");
+        };
         self.swap_second_state(&mut sec);
         self.second = Some(sec);
         self.live_on_left = !self.live_on_left;

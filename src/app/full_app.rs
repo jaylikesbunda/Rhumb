@@ -186,9 +186,9 @@ fn typing_into_an_opened_file_reaches_the_buffer_and_marks_it_modified() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// The target: 240 frames a second, which is 4.2 ms for a whole frame — the
+/// The target: 240 frames a second, which is 4.2 ms for a whole frame - the
 /// window's own chrome, the sidebar, the file list and the editor together, and
-/// the tessellation after them — with the graphics card still needing its share.
+/// the tessellation after them - with the graphics card still needing its share.
 const FRAME_240_MS: f64 = 4.2;
 
 /// Times `n` calls of `f`, in milliseconds, as `(median, worst)`, and holds them to
@@ -3425,7 +3425,7 @@ fn virtual_entry(root: &str, name: &str) -> fs_model::Entry {
 
 /// An app showing a virtual root with two made-up entries.
 ///
-/// The root is read for real once — the same call the listing worker makes — so
+/// The root is read for real once - the same call the listing worker makes - so
 /// that "without error" is checked, but the rows themselves are made up so what
 /// gets filtered does not depend on the machine's own recycle bin or drives.
 fn virtual_listing(name: &str, root: &str) -> (App, PathBuf) {

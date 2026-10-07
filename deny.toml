@@ -1,0 +1,39 @@
+# cargo-deny configuration, checked by .github/workflows/security.yml.
+# Run locally with: cargo deny check
+#
+# Kept deliberately permissive on licences (this project is MIT and links only
+# permissively licensed crates) and strict on sources: every dependency must
+# come from crates.io, never a bare git URL or an unknown registry.
+
+[advisories]
+version = 2
+# Add an advisory id here only with a comment saying why it does not apply.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "bzip2-1.0.6",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -413,7 +413,7 @@ fn panel_header(
 /// `None` means nothing is queued. That is the case on almost every frame,
 /// because the search is pumped from the frame loop rather than from the
 /// keystroke, and a gate that only rejected *young* requests restarted the
-/// walk every frame — clearing the results as fast as the worker delivered
+/// walk every frame - clearing the results as fast as the worker delivered
 /// them, so the list read "Searching" and never showed a hit.
 fn search_due(typed: Option<Instant>, debounce: Duration) -> bool {
     typed.is_some_and(|t| t.elapsed() >= debounce)
@@ -427,7 +427,7 @@ const SPLIT_MIN_PANE: f32 = 160.0;
 ///
 /// 160 points is about right for a pane someone is reading code in, and it is
 /// what the divider stops at in a wide panel. But it cannot also be a floor in a
-/// narrow one: the doc panel sits at its default width — around 380 points —
+/// narrow one: the doc panel sits at its default width - around 380 points -
 /// whenever the file list is showing, and two 160-point panes plus the divider is
 /// 327 of that, leaving the divider 53 points to travel in the whole panel. A drag
 /// of 100 points was clipped to 26 and then stopped, which reads as the divider
@@ -1106,7 +1106,7 @@ struct Perf {
 /// Whether the `RHUMB_BENCH` probe is switched on.
 ///
 /// Asked eight times a frame, and reading the environment on Windows walks the
-/// process's whole environment block — so asking it in the loop made the probe
+/// process's whole environment block - so asking it in the loop made the probe
 /// cost more than the thing it was measuring, and every number it reported was
 /// inflated by it. Read once.
 fn bench_on() -> bool {
@@ -1520,10 +1520,10 @@ fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
             // A folder is measured in the background; until the answer lands
             // show a dash rather than walk the tree on this frame.
             (true, Some(m)) => fs_model::fmt_size(m.bytes),
-            (true, None) => String::from("\u{2014}"),
+            (true, None) => String::from("-"),
             (false, _) => md
                 .as_ref()
-                .map_or_else(|| String::from("\u{2014}"), |m| fs_model::fmt_size(m.len())),
+                .map_or_else(|| String::from("-"), |m| fs_model::fmt_size(m.len())),
         },
     );
     if let Some(m) = md.as_ref() {
@@ -1532,7 +1532,7 @@ fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
                 ui,
                 "Contains",
                 measures.map_or_else(
-                    || String::from("\u{2014}"),
+                    || String::from("-"),
                     |m| format!("{} files, {} folders", m.files, m.folders),
                 ),
             );
@@ -1540,17 +1540,17 @@ fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
         row(
             ui,
             "Created",
-            m.created().map_or(String::from("\u{2014}"), fmt_stamp),
+            m.created().map_or(String::from("-"), fmt_stamp),
         );
         row(
             ui,
             "Modified",
-            m.modified().map_or(String::from("\u{2014}"), fmt_stamp),
+            m.modified().map_or(String::from("-"), fmt_stamp),
         );
         row(
             ui,
             "Accessed",
-            m.accessed().map_or(String::from("\u{2014}"), fmt_stamp),
+            m.accessed().map_or(String::from("-"), fmt_stamp),
         );
     }
     let mut attrs: Vec<&str> = Vec::new();
@@ -1567,7 +1567,7 @@ fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
         ui,
         "Attributes",
         if attrs.is_empty() {
-            "\u{2014}".to_owned()
+            "-".to_owned()
         } else {
             attrs.join(", ")
         },
@@ -1625,7 +1625,7 @@ fn fmt_stamp(t: std::time::SystemTime) -> String {
                 d.minute()
             )
         }
-        Err(_) => String::from("\u{2014}"),
+        Err(_) => String::from("-"),
     }
 }
 
@@ -1772,8 +1772,8 @@ fn status_frame() -> Frame {
 }
 
 // Where the tests say preferences live, for the thread they run on. Without it a test
-// that builds the whole app reads the developer's own saved settings — a hidden
-// preview, a remembered folder — and passes or fails depending on whose machine it
+// that builds the whole app reads the developer's own saved settings - a hidden
+// preview, a remembered folder - and passes or fails depending on whose machine it
 // is on.
 #[cfg(test)]
 thread_local! {

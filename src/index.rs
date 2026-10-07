@@ -621,7 +621,12 @@ impl Indexes {
                 self.list.remove(0);
             }
         }
-        self.list.last().expect("just pushed")
+        // Both branches above push at least one index, so the list is never
+        // empty; the guard keeps this from ever being a panic.
+        if self.list.is_empty() {
+            self.list.push(Index::build(dir));
+        }
+        &self.list[self.list.len() - 1]
     }
 
     /// The saved snapshot for `dir`, if a fresh one is on disk and its root is

@@ -16,7 +16,7 @@
 //! would be the exact cost the editor exists to avoid: on a hundred-thousand-line
 //! file it is over a hundred milliseconds, which is most of a frame spent on text
 //! nobody is looking at. The lazy walk costs what is on screen and keeps the
-//! editor's rule — nothing here is O(document) per frame.
+//! editor's rule - nothing here is O(document) per frame.
 //!
 //! [`compute`] still builds the whole list, for "fold all" and for the tests
 //! below, because a command a reader asked for may look at the whole document;
@@ -76,8 +76,8 @@ impl Folds {
     /// has gone by. The caller records the pair either way.
     ///
     /// `content` is the line's text and `prev` the line before it with its text,
-    /// both already read for the shaping, so the common case — a line that opens
-    /// nothing — reads the document not at all.
+    /// both already read for the shaping, so the common case - a line that opens
+    /// nothing - reads the document not at all.
     pub fn consider(
         &mut self,
         text: &Buffer,
@@ -372,8 +372,8 @@ mod tests {
     fn the_lazy_look_up_agrees_with_the_whole_document_scan() {
         // The editor finds folds a line at a time; `compute` finds them all at
         // once and merges the nested ones into the block that contains them. So
-        // the two need not be identical — a nested line may keep its own chevron
-        // in the editor — but every lazy fold must sit inside a region the scan
+        // the two need not be identical - a nested line may keep its own chevron
+        // in the editor - but every lazy fold must sit inside a region the scan
         // found, and every region the scan found must still be opened by its own
         // line. A disagreement the other way would be a chevron for a region that
         // is not there.

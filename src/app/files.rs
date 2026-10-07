@@ -484,11 +484,12 @@ impl Rhumb {
         }
         match std::fs::rename(path, &target) {
             Ok(()) => {
-                self.undo = Some(Undo::Renamed {
+                let undo = Undo::Renamed {
                     from: path.to_path_buf(),
                     to: target.clone(),
-                });
-                self.undo_stack.push(self.undo.clone().expect("just set"));
+                };
+                self.undo_stack.push(undo.clone());
+                self.undo = Some(undo);
                 self.toast(format!("Renamed to {name}"));
                 if let Some(doc) = self.doc_mut()
                     && doc.path == path
@@ -668,8 +669,9 @@ impl Rhumb {
             self.toast_err(format!("Rename failed: {}", problems.join("; ")));
             return;
         }
-        self.undo = Some(Undo::RenamedBatch(renamed.clone()));
-        self.undo_stack.push(self.undo.clone().expect("just set"));
+        let undo = Undo::RenamedBatch(renamed.clone());
+        self.undo_stack.push(undo.clone());
+        self.undo = Some(undo);
         // The renamed items are the selection now, and the listing catches up.
         self.sel = renamed.iter().map(|(_, to)| to.clone()).collect();
         self.request_listing();
@@ -778,8 +780,9 @@ impl Rhumb {
         };
         match r {
             Ok(()) => {
-                self.undo = Some(Undo::Created(vec![target.clone()]));
-                self.undo_stack.push(self.undo.clone().expect("just set"));
+                let undo = Undo::Created(vec![target.clone()]);
+                self.undo_stack.push(undo.clone());
+                self.undo = Some(undo);
                 self.request_listing();
                 if folder {
                     self.toast(format!("Created folder {name}"));

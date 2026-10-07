@@ -49,3 +49,17 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - run: cargo check --all-targets
       - run: cargo test -- --skip codeedit::sweep
+
+  # The frame-cost gate. The budgets live in the tests themselves; this job
+  # fails when a change makes a frame cross one. It runs in release, where the
+  # numbers the README quotes are measured.
+  bench:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Whole-app frame budget
+        run: cargo test --release fits_in_a_frame -- --nocapture --test-threads=1
+      - name: Instant-operation budget
+        run: cargo test --release instant -- --nocapture --test-threads=1

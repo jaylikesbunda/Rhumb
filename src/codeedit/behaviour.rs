@@ -555,8 +555,8 @@ fn the_wheel_turns_the_window_the_way_the_wheel_is_turned() {
     // *up*, and the platform reports a wheel rotated upwards as positive. So a
     // positive delta moves the window towards the top of the document. The editor
     // had it the other way round, which turned the wheel the wrong way while the
-    // rest of the scrolling tests — written in the reader's direction, through the
-    // harness — stayed green.
+    // rest of the scrolling tests - written in the reader's direction, through the
+    // harness - stayed green.
     let doc = (0..400)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
@@ -626,7 +626,7 @@ fn scrolling_stops_at_both_ends_of_the_document() {
     h.scroll(9000.0);
     let shown = h.drawn_line_numbers();
     // Forty lines of text joined by newlines, so the document has a fortieth line
-    // that is empty — that is where a final Enter leaves the cursor, and the
+    // that is empty - that is where a final Enter leaves the cursor, and the
     // window is allowed to show it. What it must not do is scroll past the end
     // into nothing, so the last row is either that empty line or the one before.
     let last = shown.last().copied().unwrap_or(0);
@@ -1254,7 +1254,7 @@ fn a_read_only_document_can_be_read_and_selected_but_not_changed() {
 #[test]
 fn wrapped_lines_still_have_line_numbers() {
     // The number belongs to the line, not to the row, so a line that takes three
-    // rows is still numbered once — against its first row, which is the only one
+    // rows is still numbered once - against its first row, which is the only one
     // a reader would call "the top of the line".
     let long: String = "z".repeat(200);
     let doc = format!("one\n{long}\nthree");
@@ -1283,7 +1283,7 @@ fn wrapped_lines_still_have_line_numbers() {
 fn the_gutter_never_numbers_a_line_the_document_does_not_have() {
     // The layout emits one row more than there are lines, for the position after
     // the final newline. It is a real row and the caret can sit on it, but
-    // numbering it put a number in the gutter for a line that is not there — the
+    // numbering it put a number in the gutter for a line that is not there - the
     // last thing a reader checking a line count would want to be wrong about.
     for doc in ["one\ntwo\nthree", "one\ntwo\nthree\n", "one"] {
         let mut h = Harness::new(doc);
@@ -1369,7 +1369,7 @@ fn a_click_past_the_end_of_a_lines_text_goes_to_the_end_of_that_line() {
 fn the_caret_is_drawn_where_the_click_puts_it_on_the_same_frame() {
     // The complaint this pins down is that clicking felt loose: the caret landed a
     // frame late, so it appeared at the old place and then jumped. Resolving the
-    // click after painting is exactly that — the frame draws the caret where it
+    // click after painting is exactly that - the frame draws the caret where it
     // was, and only the next frame draws it where the pointer was. So the drawn
     // rectangle is checked on the frame of the click itself, with no extra frame in
     // between to hide the lag.
@@ -1394,7 +1394,7 @@ fn the_caret_is_drawn_where_the_click_puts_it_on_the_same_frame() {
         assert!(
             (drawn.left() - want).abs() < 1.0,
             "the caret is at character {caret}, so it should be drawn at x={want:.1}, \
-             but it is at x={:.1} — the frame is drawing where the caret used to be",
+             but it is at x={:.1} - the frame is drawing where the caret used to be",
             drawn.left()
         );
     }
@@ -1618,7 +1618,7 @@ fn assert_rows_tile(h: &Harness) {
                 b.chars.0,
                 a.chars.1 + 1,
                 "rows {i} and {} are on lines {} and {}, so exactly one \
-                 character — the newline — should be between them, but the gap \
+                 character - the newline - should be between them, but the gap \
                  is {} to {}: {rows:?}",
                 i + 1,
                 a.line,
@@ -1690,7 +1690,7 @@ fn the_rows_always_tile_the_window_and_the_caret_is_on_its_own_row() {
             h.frame();
             // Click somewhere on screen, then scroll the caret into view, so the
             // property is checked with the caret both under the pointer and
-            // arrived at by key — the two ways a caret gets placed.
+            // arrived at by key - the two ways a caret gets placed.
             let row = rng.below(h.row_count());
             let col = rng.below(20);
             click_char(&mut h, row, col);
@@ -1703,8 +1703,8 @@ fn the_rows_always_tile_the_window_and_the_caret_is_on_its_own_row() {
 
             assert_rows_tile(&h);
             // A click can leave the caret below the last line, where there is no
-            // row to draw it on. That is correct — the caret is then at the end
-            // of the document, which is where a click past the text belongs — so
+            // row to draw it on. That is correct - the caret is then at the end
+            // of the document, which is where a click past the text belongs - so
             // it is only checked when a row was drawn at all.
             if let Some(drawn) = h.caret_row() {
                 let local = h.caret().saturating_sub(h.window_base());
@@ -1827,7 +1827,7 @@ fn an_edit_is_in_the_text_of_the_frame_that_made_it() {
     //
     // Checked on the frame of the keystroke itself, with no extra frame in
     // between to hide it, and checked against the *shaped text* rather than
-    // against the buffer — the buffer is right by definition, since the buffer is
+    // against the buffer - the buffer is right by definition, since the buffer is
     // what the keystroke changed.
     let mut h = Harness::new("first line\n\nlast line\n");
     h.click(h.pos_of(2, 3.0));
@@ -2027,8 +2027,8 @@ fn the_window_cannot_scroll_past_the_last_screenful() {
 #[test]
 fn a_drag_starts_the_selection_where_the_pointer_went_down() {
     // The complaint this pins down: press somewhere, drag, and the highlight begins
-    // somewhere the pointer has never been. A drag is never registered as a click —
-    // egui drops the claim as soon as the pointer moves past the threshold — so the
+    // somewhere the pointer has never been. A drag is never registered as a click -
+    // egui drops the claim as soon as the pointer moves past the threshold - so the
     // click branch, which is what sets the anchor, never runs, and the anchor is
     // left wherever the caret last was. Everything then selects from *there*, which
     // is a selection the reader did not ask for and cannot account for.
@@ -3409,7 +3409,7 @@ fn control_enter_opens_a_line_below_indented_like_this_one() {
 //
 // Each is measured over many repetitions and reported as the median, which is what
 // typing feels like, and the worst case of the best of several trials, which is what
-// a stutter feels like — taking the best trial so that another test using the CPU at
+// a stutter feels like - taking the best trial so that another test using the CPU at
 // the same moment cannot fail this one. In a debug build everything is far slower and
 // the budgets are scaled to match; the real numbers are the release ones.
 
@@ -3491,8 +3491,8 @@ fn within(what: &str, got: (f64, f64), median: f64, worst: f64) {
     let strict = std::env::var_os("RHUMB_STRICT_SPEED").is_some();
     // At 240 frames a second a whole frame is 4.2 ms, editor and everything else in it,
     // so in the strict run no single step of editing gets more than 4 ms. Operations
-    // that work over a whole large document — pasting a hundred kilobytes, deleting
-    // millions of characters — are one-off jobs and keep the budgets they were given.
+    // that work over a whole large document - pasting a hundred kilobytes, deleting
+    // millions of characters - are one-off jobs and keep the budgets they were given.
     let worst_budget = if strict {
         ms(if worst <= 16.0 { worst.min(4.0) } else { worst })
     } else {
@@ -4134,8 +4134,8 @@ fn a_document_opened_from_a_windows_file_behaves_like_any_other_at_line_ends() {
 // ---- a person at the keyboard -------------------------------------------------
 //
 // The tests above drive the editor with the smallest input that proves a rule. These
-// use the inputs a person produces — keys with their text, held keys with repeats,
-// clicks with time between the press and the release — and check what is on the
+// use the inputs a person produces - keys with their text, held keys with repeats,
+// clicks with time between the press and the release - and check what is on the
 // screen and in the buffer at the end, which is the only thing they can see.
 
 #[test]

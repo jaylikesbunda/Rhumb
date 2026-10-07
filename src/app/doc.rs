@@ -562,7 +562,7 @@ impl Rhumb {
         let opts = codeedit::Options {
             // Always on, including while wrapping. A wrapped line has no single
             // row to put a number against, which used to be the reason for
-            // dropping the gutter entirely — but the number belongs to the *line*,
+            // dropping the gutter entirely - but the number belongs to the *line*,
             // and every editor that wraps still shows it against the first row of
             // the line. Losing the gutter is a far bigger loss than the small
             // irregularity of one number per line rather than per row.
@@ -589,7 +589,9 @@ impl Rhumb {
             ..
         } = self;
         let t0 = Instant::now();
-        let tab = tabs.active_tab_mut().expect("checked above");
+        let Some(tab) = tabs.active_tab_mut() else {
+            return;
+        };
         let out = ed.show(ui, rect, &mut tab.doc.text, &opts);
         let focused = ed.focused();
         // Let the window hand input-method events to the editor while it has the

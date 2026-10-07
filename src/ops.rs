@@ -22,11 +22,64 @@ const RETRY_ATTEMPTS: u32 = 5;
 /// hard.
 const RETRY_FIRST_MS: u64 = 10;
 
+/// A file-operation failure, classified so the retry logic and the log line do
+/// not have to read the OS message to know what went wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpError {
+    /// The file is locked by another process for the moment.
+    Locked,
+    NotFound,
+    Permission,
+    /// The destination already exists.
+    Exists,
+    /// There is not enough room.
+    NoSpace,
+    /// Anything else, with the caller keeping the raw message.
+    Other,
+}
+
+impl OpError {
+    /// Classifies a raw OS error. The numeric codes are Windows' (32/33 sharing
+    /// and lock violations, 2 not found, 5 access denied, 183 already exists,
+    /// 112 disk full); on other platforms the `ErrorKind` fallback applies.
+    pub fn from_io(e: &io::Error) -> OpError {
+        match e.raw_os_error() {
+            Some(32) | Some(33) => OpError::Locked,
+            Some(2) => OpError::NotFound,
+            Some(5) => OpError::Permission,
+            Some(183) => OpError::Exists,
+            Some(112) => OpError::NoSpace,
+            _ => match e.kind() {
+                io::ErrorKind::NotFound => OpError::NotFound,
+                io::ErrorKind::PermissionDenied => OpError::Permission,
+                io::ErrorKind::AlreadyExists => OpError::Exists,
+                _ => OpError::Other,
+            },
+        }
+    }
+
+    /// Whether trying again shortly might succeed.
+    pub fn is_retryable(self) -> bool {
+        matches!(self, OpError::Locked)
+    }
+
+    /// A short, stable code, for a log line or an error report.
+    pub fn code(self) -> &'static str {
+        match self {
+            OpError::Locked => "locked",
+            OpError::NotFound => "not-found",
+            OpError::Permission => "permission",
+            OpError::Exists => "exists",
+            OpError::NoSpace => "no-space",
+            OpError::Other => "other",
+        }
+    }
+}
+
 /// Whether an error is the OS saying the file is locked by another process for
-/// a moment. Windows reports 32 (sharing violation) and 33 (lock violation);
-/// on other platforms the codes simply never match.
+/// a moment.
 fn is_sharing_violation(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(32) | Some(33))
+    OpError::from_io(e).is_retryable()
 }
 
 /// Runs `f`, trying again a few times when the OS says the file is briefly
@@ -132,7 +185,14 @@ pub fn start_transfer_pairs(
                 };
                 match r {
                     Ok(()) => ok += 1,
-                    Err(e) => failed.push(format!("{}: {e}", short(src))),
+                    Err(e) => {
+                        log::debug!(
+                            "transfer failed [{}] {}: {e}",
+                            OpError::from_io(&e).code(),
+                            short(src)
+                        );
+                        failed.push(format!("{}: {e}", short(src)));
+                    }
                 }
                 progress.done_items = n + 1;
                 let _ = tx.send(Msg::Progress(progress.clone()));
@@ -142,7 +202,8 @@ pub fn start_transfer_pairs(
                 outcome: Outcome::Done { ok, failed },
             });
         })
-        .expect("spawn transfer thread");
+        .map(|_| ())
+        .unwrap_or_else(|e| log::error!("could not start the transfer worker: {e}"));
     job
 }
 
@@ -618,7 +679,8 @@ pub fn start_zip(
                 }
             }
         })
-        .expect("spawn zip thread");
+        .map(|_| ())
+        .unwrap_or_else(|e| log::error!("could not start the zip worker: {e}"));
     job
 }
 
@@ -672,7 +734,8 @@ pub fn start_add_to_zip(
             };
             let _ = tx.send(Msg::Finished { id, outcome });
         })
-        .expect("spawn zip-add thread");
+        .map(|_| ())
+        .unwrap_or_else(|e| log::error!("could not start the zip-add worker: {e}"));
     job
 }
 
@@ -725,7 +788,8 @@ pub fn start_remove_from_zip(
             };
             let _ = tx.send(Msg::Finished { id, outcome });
         })
-        .expect("spawn zip-del thread");
+        .map(|_| ())
+        .unwrap_or_else(|e| log::error!("could not start the zip-del worker: {e}"));
     job
 }
 
@@ -802,7 +866,8 @@ pub fn start_extract(
             };
             let _ = tx.send(Msg::Finished { id, outcome });
         })
-        .expect("spawn extract thread");
+        .map(|_| ())
+        .unwrap_or_else(|e| log::error!("could not start the extract worker: {e}"));
     job
 }
 
@@ -1111,7 +1176,8 @@ pub fn start_permanent_delete(
                 outcome: Outcome::Done { ok, failed },
             });
         })
-        .expect("spawn delete thread");
+        .map(|_| ())
+        .unwrap_or_else(|e| log::error!("could not start the delete worker: {e}"));
     spawned
 }
 

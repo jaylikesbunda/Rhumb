@@ -50,6 +50,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Make the build reproducible
+        run: |
+          # A commit timestamp instead of "now", and no incremental artifacts,
+          # so the same source builds the same bytes far more often than not.
+          # The installers (WiX, NSIS) are not bit-for-bit reproducible; the
+          # checksums still let any download be verified against the release.
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - name: Set the version
         env:
           VERSION: ${{ inputs.version }}
@@ -97,6 +106,14 @@ jobs:
           7z a "dist/rhumb-${VERSION}-windows-portable.zip" ./stage/*
           ls -l dist
 
+      - name: Write the checksums
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          cd dist
+          sha256sum ./*.exe ./*.msi ./*.zip > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
@@ -110,3 +127,4 @@ jobs:
             dist/*.msi
             dist/*setup.exe
             dist/*.zip
+            dist/SHA256SUMS

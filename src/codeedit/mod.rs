@@ -20,9 +20,9 @@
 //!
 //! The modules split so each can be tested without the others:
 //!
-//! - [`crate::buffer`] — the rope the text lives in. Pure, no egui.
-//! - [`markup`] — colouring one line. Pure, no egui.
-//! - the rest of this file — the widget itself.
+//! - [`crate::buffer`] - the rope the text lives in. Pure, no egui.
+//! - [`markup`] - colouring one line. Pure, no egui.
+//! - the rest of this file - the widget itself.
 
 /// A position in points moved to the nearest whole physical pixel.
 ///
@@ -178,7 +178,7 @@ pub struct Finder {
 type Found = (Vec<find::Hit>, bool);
 
 /// Text above this many bytes is searched on another thread. Below it a search
-/// finishes well inside a frame — about twenty milliseconds a megabyte — and answering
+/// finishes well inside a frame - about twenty milliseconds a megabyte - and answering
 /// at once keeps stepping and counting instant.
 const SEARCH_ASYNC_BYTES: usize = 256 * 1024;
 
@@ -305,7 +305,7 @@ impl Finder {
     /// Opens the bar, optionally with something already in it.
     ///
     /// A needle is only put in when there is no text selected, so Ctrl+F with a
-    /// selection searches for what is selected — which is what every other editor
+    /// selection searches for what is selected - which is what every other editor
     /// does and is the fastest way to ask "where else is this?".
     pub fn open_with(&mut self, selected: Option<String>) {
         if let Some(text) = selected.filter(|s| !s.is_empty() && !s.contains('\n')) {
@@ -360,7 +360,7 @@ struct Open {
 
 /// A line longer than this many characters, without wrapping, is shaped only where it
 /// is on screen. Shaping and drawing a line costs in proportion to its length, so a
-/// hundred kilobytes on one line — a minified script, a data file — would otherwise
+/// hundred kilobytes on one line - a minified script, a data file - would otherwise
 /// cost tens of milliseconds a frame and a keystroke, to draw a few hundred characters.
 const LONG_LINE: usize = 4_000;
 
@@ -638,7 +638,7 @@ impl Editor {
 
     /// Notes how long the document is, for the readers that only have the editor.
     ///
-    /// O(1): the rope keeps its own count, and there is no line index to rebuild —
+    /// O(1): the rope keeps its own count, and there is no line index to rebuild -
     /// the rope answers "which line is this" and "where does that line start"
     /// itself, exactly, after every edit.
     fn ensure_index(&mut self, text: &Buffer) {
@@ -842,7 +842,7 @@ impl Editor {
     /// The range of whole lines the selection touches, and the caret position
     /// to leave behind.
     ///
-    /// Shared by the line commands — delete, duplicate, comment — because they
+    /// Shared by the line commands - delete, duplicate, comment - because they
     /// all have to agree on which lines "the selection" means, and three
     /// hand-written answers to that question is how they come to disagree.
     ///
@@ -869,7 +869,7 @@ impl Editor {
         // Nothing to take: an empty document, or a line that is already at the
         // end. Pushing an undo step for an edit that changes nothing would leave
         // one Ctrl+Z doing nothing visible, and the next one undoing something
-        // else — so the document looks like it has lost a keystroke.
+        // else - so the document looks like it has lost a keystroke.
         if a >= b {
             return;
         }
@@ -939,7 +939,7 @@ impl Editor {
         let _ = crate::editing::indent(text, lo..hi, outdent);
         // The selection is deliberately re-established over those same lines
         // rather than collapsed. Collapsing it would leave nothing selected, so
-        // Shift+Tab straight after Tab would do nothing at all — and undoing an
+        // Shift+Tab straight after Tab would do nothing at all - and undoing an
         // indent by outdenting is the reason both keys exist.
         let after = text.len_chars();
         let from = text.line_start(first).min(after);
@@ -960,7 +960,7 @@ impl Editor {
         // Asked before the newline goes in: afterwards the caret is on a fresh
         // empty line, and an empty line has no indentation to copy from.
         let indent = crate::editing::indent_for_new_line(text, self.caret);
-        // Between a bracket and its closer — the state right after typing `{` — Enter
+        // Between a bracket and its closer - the state right after typing `{` - Enter
         // opens the block: the closer drops to a line of its own at the line's
         // indent, and the caret waits indented between the two.
         let between = !self.has_selection(text.len_chars())
@@ -996,7 +996,7 @@ impl Editor {
     /// Selects the whole line `at` is on, newline included.
     ///
     /// The newline goes with it, because that is what a reader means by "this
-    /// line" when they are about to delete it — a selection that stops before the
+    /// line" when they are about to delete it - a selection that stops before the
     /// newline leaves an empty line behind, so Delete appears to do nothing.
     pub fn select_line_at(&mut self, text: &Buffer, at: usize) {
         let line = text.line_of_char(at);
@@ -1014,7 +1014,7 @@ impl Editor {
     /// The caret's line and column, one-based, as a status bar shows them.
     ///
     /// The column counts characters, not bytes and not display columns, so a line
-    /// of multi-byte text reports the character the caret is between — which is
+    /// of multi-byte text reports the character the caret is between - which is
     /// what every other editor reports and the only thing a reader can act on.
     pub fn line_and_column(&self, text: &Buffer) -> (usize, usize) {
         let line = text.line_of_char(self.caret);
@@ -1027,7 +1027,7 @@ impl Editor {
     /// Without this, a line longer than the pane is only readable up to its own
     /// width: the caret walks off the right edge, `End` puts it somewhere the
     /// reader cannot see, and there is no way to bring it back. The wrap toggle
-    /// is the other answer to the same problem, and both are needed — wrapping
+    /// is the other answer to the same problem, and both are needed - wrapping
     /// changes how a file reads, and scrolling is how a file is navigated.
     ///
     /// `visible` is how much room the text has and `room` how far it can be
@@ -1101,7 +1101,7 @@ impl Editor {
     /// Measured from laid-out text, not asked of the font: a row of two hundred and
     /// fifty-six of them is shaped once and divided. The font's own figure differs
     /// from what the layout places by a small fraction of a point, and over a hundred
-    /// thousand characters a small fraction is hundreds of points — enough to put the
+    /// thousand characters a small fraction is hundreds of points - enough to put the
     /// caret off the end of the pane. Remembered per character.
     fn measure(&mut self, ui: &egui::Ui, font: &egui::FontId, c: char) -> f32 {
         if let Some(&w) = self.wide_w.get(&c) {
@@ -1460,8 +1460,8 @@ impl Editor {
     ///
     /// Searched rather than taken as the nearest start, because two closed folds
     /// can nest: closing an inner block and then the block around it leaves both
-    /// recorded, and the inner one — which starts later and ends before the line
-    /// being asked about — must not hide the outer one that really does.
+    /// recorded, and the inner one - which starts later and ends before the line
+    /// being asked about - must not hide the outer one that really does.
     fn hidden_fold(&self, line: usize) -> Option<(usize, usize)> {
         self.closed
             .range(..line)
@@ -1601,7 +1601,7 @@ pub struct RowSpan {
 /// the newline that ends a line is consumed as the row break rather than kept.
 /// Summing glyph counts therefore leaves every row boundary one character short,
 /// and since the shortfalls accumulate the twentieth row is twenty characters
-/// out — enough for the caret, the gutter numbers and the click hit-test to all
+/// out - enough for the caret, the gutter numbers and the click hit-test to all
 /// be answering about a different line. So the lines that were appended are
 /// walked alongside the rows, and each line's newline is accounted for as the
 /// row moves on to the next one.
@@ -1640,7 +1640,7 @@ fn row_ranges(
         // Taking the glyph count as the character count gave that line a range
         // five characters long, put every line after it two characters out of
         // step, and made the window claim two characters more than the document
-        // holds — so a click at the end of the last line addressed a position
+        // holds - so a click at the end of the last line addressed a position
         // past the end of the buffer, and the next keystroke sliced the text with
         // it. A row cannot cover more characters than its line has left, whatever
         // it is made of.
@@ -1672,7 +1672,7 @@ fn row_ranges(
         // A blank line is what makes this fiddly. It has no characters, so the
         // test "has this row used up the line" is true before the row has done
         // anything, and stepping straight over it would give it no row at all.
-        // Every line after it would then be drawn against the wrong range — and
+        // Every line after it would then be drawn against the wrong range - and
         // clicking on the empty line would find no row, putting the caret at the
         // bottom of the window. A row that carries no characters while the line it
         // belongs to is also empty *is* that line's row, and the line is finished
@@ -1680,7 +1680,7 @@ fn row_ranges(
         //
         // One row per line and no more. The layout is asked for a job that is the
         // visible lines and their newlines, and it answers with one row per
-        // newline-terminated line including the empty ones — so consecutive blank
+        // newline-terminated line including the empty ones - so consecutive blank
         // lines arrive here already spaced out, one row each. An earlier version
         // had a loop to hand out rows to blank lines it thought the layout had
         // not made, and it invented a row for every blank line after the first:
@@ -1774,7 +1774,7 @@ struct Metrics {
 /// may be drawn.
 ///
 /// The width is generous for a monochrome interface where the bar is the only
-/// thing that says a file is longer than the window — a hairline would be easy
+/// thing that says a file is longer than the window - a hairline would be easy
 /// to miss and impossible to grab.
 const SCROLLBAR_W: f32 = 11.0;
 const THUMB_MIN_H: f32 = 26.0;
@@ -1828,8 +1828,8 @@ impl Editor {
             self.show_hit(text);
         }
         // The index is asked about the buffer twice per frame: here, and again after
-        // the keyboard. Both are free when nothing has changed — one integer
-        // compare each — and the second is what lets the keyboard run *before* the
+        // the keyboard. Both are free when nothing has changed - one integer
+        // compare each - and the second is what lets the keyboard run *before* the
         // shaping rather than after it, which is the difference between drawing the
         // text as it is after this keystroke and drawing it as it was before. A
         // frame of lag on every character typed is the whole of what "typing feels
@@ -1886,7 +1886,7 @@ A"
         // This is here rather than with the rest of the pointer handling because
         // it decides *which* lines get shaped. Handled after the shaping, the
         // frame would draw the lines the wheel has just moved away from, and the
-        // one it is moving towards would arrive a frame late — which is a visible
+        // one it is moving towards would arrive a frame late - which is a visible
         // smear behind every flick of the wheel, and the whole reason a
         // smooth-scrolling editor can feel loose.
         self.wrapping = opts.wrap;
@@ -1911,7 +1911,7 @@ A"
         let id = egui::Id::new(ID);
         // The text area only, not the whole pane. egui gives a press to one
         // widget, and the editor's own target covers the scrollbar if it is
-        // allowed to — so a press on the bar moves the caret instead of the
+        // allowed to - so a press on the bar moves the caret instead of the
         // window, and the bar cannot be dragged at all.
         //
         // Measured from this frame's opening geometry rather than the final one,
@@ -2029,7 +2029,7 @@ A"
         // same reason the keyboard is here: stepping to a match scrolls the window,
         // and a window that moves after the text has been shaped leaves the frame
         // drawing the lines it is leaving. It runs outside the focus gate on
-        // purpose — while the bar is open the *field* has the keyboard, which is the
+        // purpose - while the bar is open the *field* has the keyboard, which is the
         // whole point of the bar.
         if self.find.open {
             self.find_keys(ui, text);
@@ -2060,7 +2060,7 @@ A"
         // just shrunk from twenty-one lines to one kept a window starting at line
         // twenty, shaped nothing at all, and drew an empty pane.
         self.ensure_index(text);
-        // A drag on the scrollbar moves the window, so it is read here too — after
+        // A drag on the scrollbar moves the window, so it is read here too - after
         // the find bar has been given its keys, which can also move the window, and
         // before the text is shaped. It used to be read immediately before the
         // paint, which drew the thumb where the drag had put it and left the text
@@ -2072,7 +2072,7 @@ A"
         // The caret and the anchor are positions in the buffer, and the buffer is
         // edited in place. A position set before this frame's edit is one
         // character out of date once it lands, and a reader that trusts it goes on
-        // to address text that is not there — which is a panic on the next
+        // to address text that is not there - which is a panic on the next
         // keystroke, not a wrong-looking caret. Clamped once here, at the only
         // point where the buffer's final length is known.
         //
@@ -2082,17 +2082,17 @@ A"
         self.caret = self.caret.min(len);
         self.anchor = self.anchor.min(len);
         // Recorded after the edits rather than before, so the next frame's readers
-        // — the status bar, the find bar — are not a keystroke behind.
+        // - the status bar, the find bar - are not a keystroke behind.
         // The bar may have opened this frame, and the bar takes its height off the
         // top of the text. Measured again so the text moves down on the frame the
         // bar appears rather than the frame after, which otherwise put a row of
-        // letters under an opaque strip for one frame — the one thing a find bar
+        // letters under an opaque strip for one frame - the one thing a find bar
         // must never do to the text it is searching.
         self.find_h = self.find_bar_h();
         // Worked out again from the pane as the caller gave it, because the bar may
         // have opened or closed while the keyboard was being read. The text has to
         // move down on the frame the bar appears rather than the frame after, or a
-        // row of letters sits under the bar for one frame — the one thing a find
+        // row of letters sits under the bar for one frame - the one thing a find
         // bar must never do to the text it is searching.
         let rect = egui::Rect::from_min_max(
             egui::Pos2::new(full_rect.left(), full_rect.top() + self.find_h),
@@ -2213,7 +2213,7 @@ A"
         //
         // While the lines are read for shaping, the fold each opens is found from
         // the same text, so the chevrons and the regions cost no second pass over
-        // the document — which is the whole reason the fold finder is driven from
+        // the document - which is the whole reason the fold finder is driven from
         // here rather than by a scan.
         self.visible_folds.clear();
         let mut prev_fold: Option<(usize, String)> = None;
@@ -2439,7 +2439,7 @@ A"
         // pointer is. The modifiers are read from the press rather than from the
         // release, because a user who holds shift to extend a selection is still
         // holding it at the moment they let go of the button, and the platform
-        // reports it either way — but the press is the frame the click is
+        // reports it either way - but the press is the frame the click is
         // recognised in, so that is where the answer is.
         if clicked && let Some(at) = self.hit(&galley, &m, &resp) {
             if ui.input(|i| i.modifiers.shift) {
@@ -2468,8 +2468,8 @@ A"
         // Set on the *press*, from the point the button went down at, and this is
         // the whole of why dragging selects from where the pointer went down rather
         // than from wherever the caret happened to be. A drag that never becomes a
-        // click — and a drag never does, because a pointer that moves past the
-        // threshold gives up its claim to being one — has nothing but this to set
+        // click - and a drag never does, because a pointer that moves past the
+        // threshold gives up its claim to being one - has nothing but this to set
         // the anchor with, so leaving the anchor alone here anchored the selection
         // to the caret's last position and the highlight began somewhere the
         // pointer had never been.
@@ -2619,8 +2619,8 @@ A"
     /// Enter, Shift+Enter, Escape and F3, while the find bar is open.
     ///
     /// Deliberately outside the "does the editor have the keyboard" gate, because
-    /// while the bar is open the *field* has it — which is the whole point of the
-    /// bar — and a key handler that only runs when the editor is focused can never
+    /// while the bar is open the *field* has it - which is the whole point of the
+    /// bar - and a key handler that only runs when the editor is focused can never
     /// see the key that closes the thing that took the focus away from it.
     ///
     /// The events are read rather than the state, because a key that is held down
@@ -2654,7 +2654,7 @@ A"
             match key {
                 // Ctrl+F while the bar is already open puts the keyboard back in
                 // the field, rather than falling through to the app's *file*
-                // search — which is what would otherwise happen, because the field
+                // search - which is what would otherwise happen, because the field
                 // has the focus and the editor's own key pass is gated on having
                 // it.
                 egui::Key::F if ctrl => {
@@ -2751,7 +2751,7 @@ A"
             self.find.refresh(text);
             // And the first one is selected, because a reader who has typed two
             // letters wants to see the first thing it found without having to press
-            // Enter — which is also what makes Enter mean "the next one".
+            // Enter - which is also what makes Enter mean "the next one".
             self.show_hit(text);
         }
         // ---- how many ----
@@ -3011,7 +3011,7 @@ A"
     /// decides which lines get shaped, so it has to be settled before the shaping
     /// and not one instruction later. So this marks the need and `find_sync`
     /// answers it at the top of the next frame, which costs one frame of scrolling
-    /// and nothing else — and costs nothing at all when the match is already on
+    /// and nothing else - and costs nothing at all when the match is already on
     /// screen, which is the common case while stepping through hits.
     fn show_hit(&mut self, text: &Buffer) {
         if let Some((lo, hi)) = self.find.selected() {
@@ -3094,7 +3094,7 @@ A"
             "Match whole word only" => {
                 // A word in brackets with a caret at its end. Two triangles, the
                 // obvious thing to reach for, sit next to the two buttons that are
-                // literally two triangles — and a reader who has to hover to tell
+                // literally two triangles - and a reader who has to hover to tell
                 // them apart has already lost more time than the icon saved.
                 let s = r.width() * 0.26;
                 let stroke = egui::Stroke::new(1.2, colour);
@@ -3179,7 +3179,7 @@ A"
     ///
     /// - A click in the left margin of a line. There is no character there, and
     ///   the galley resolves it to whatever is nearest, which for a blank line is
-    ///   the end of the *following* line — so clicking an empty line jumps the
+    ///   the end of the *following* line - so clicking an empty line jumps the
     ///   caret past everything after it.
     /// - A click past the end of the last line, which should land on the last
     ///   line rather than at the end of the shaped window.
@@ -3201,7 +3201,7 @@ A"
             .min(m.rows.len().saturating_sub(1));
         let span = m.rows[row];
         // Within the row: the nearest character boundary. A row with no characters
-        // of its own — a blank line, or a wrapped line's empty tail — puts the
+        // of its own - a blank line, or a wrapped line's empty tail - puts the
         // caret at its start, which is the only position it has.
         let local = if span.chars.1 <= span.chars.0 {
             span.chars.0
@@ -3232,7 +3232,7 @@ A"
     /// the point against the whole shaped text. The galley answers "which
     /// character is nearest this point", which is a different question: it looks
     /// for a row as well, and when the position sits exactly on a row boundary
-    /// it may answer about the row above — whose width is nothing — so a click
+    /// it may answer about the row above - whose width is nothing - so a click
     /// anywhere on a line came back as a column into the line above it, and a
     /// click past the end of a line came back as a column somewhere inside it
     /// rather than at its end.
@@ -3244,7 +3244,7 @@ A"
         // Every boundary in the row is a candidate, and the nearest one to the
         // pointer wins. Both edges of every glyph are considered, so a click in
         // the left half of a character puts the caret before it and one in the
-        // right half puts it after — which is what a reader expects, and what
+        // right half puts it after - which is what a reader expects, and what
         // makes a click land under the pointer rather than always one to its left.
         //
         // The row's own width decides the answer, so a click in the empty space
@@ -3259,8 +3259,8 @@ A"
                 .get(i + 1)
                 .map_or(start + glyph.advance_width, |next| next.pos.x);
             for (boundary, distance) in [(i, (x - start).abs()), (i + 1, (x - end).abs())] {
-                // `<=`, so a tie goes to the later boundary. A zero-width glyph — a
-                // combining mark — starts and ends at the same x, and the earlier of
+                // `<=`, so a tie goes to the later boundary. A zero-width glyph - a
+                // combining mark - starts and ends at the same x, and the earlier of
                 // the two would put a click at the end of a line just short of it.
                 if distance <= best_d {
                     best_d = distance;
@@ -3301,8 +3301,8 @@ A"
         // gutter with no set allocated to remember what came before.
         let mut last_line: Option<usize> = None;
         // The layout emits one more row than there are lines, for the position
-        // after the document's final newline. It is a real row — the caret can sit
-        // on it and it is where pressing Enter at the end of a file goes — but it
+        // after the document's final newline. It is a real row - the caret can sit
+        // on it and it is where pressing Enter at the end of a file goes - but it
         // is not a line, and numbering it would put a number in the gutter for a
         // line the document does not have.
         //
@@ -3425,7 +3425,7 @@ A"
     /// Paints a wash behind every hit, and a stronger one behind the current one.
     ///
     /// Under the glyphs rather than over them, so a match is marked without the
-    /// text becoming harder to read — which is the whole point of a match, since
+    /// text becoming harder to read - which is the whole point of a match, since
     /// the reader is reading it. The current hit is left to the ordinary
     /// selection, so it is marked in exactly the same way as any other selected
     /// text and the reader does not have to learn a second vocabulary.
@@ -3465,7 +3465,7 @@ A"
     /// The inverse of [`Self::column_in_row`], and for the same reason it does not
     /// ask the galley: `pos_from_cursor` takes an index into the whole shaped text
     /// and answers with whichever row that index lands in, so a boundary sitting
-    /// exactly on a wrap point comes back as the *end of the row above* — the
+    /// exactly on a wrap point comes back as the *end of the row above* - the
     /// same index, one row up, at an entirely different place on the screen.
     ///
     /// That is not a rounding difference. Painting a selection from those answers
@@ -3479,8 +3479,8 @@ A"
         };
         let glyphs = &placed.row.glyphs;
         if glyphs.is_empty() {
-            // A row with no glyphs of its own — a blank line, or the empty tail
-            // of a wrapped one — is as wide as nothing at all, which is the only
+            // A row with no glyphs of its own - a blank line, or the empty tail
+            // of a wrapped one - is as wide as nothing at all, which is the only
             // position it has.
             return 0.0;
         }
@@ -3737,13 +3737,13 @@ A"
         // keystroke is a caret move.
         let single: Vec<char> = t.chars().filter(|c| !c.is_control()).collect();
         // Only when what was typed *is* the closer. Without that check, any character
-        // typed between a freshly opened pair — the `a` in `(a)` — was taken for the
+        // typed between a freshly opened pair - the `a` in `(a)` - was taken for the
         // closer and swallowed, and the caret jumped past the bracket, so nothing
         // could be typed inside one.
         if single.len() == 1 && crate::editing::types_over_closer(text, self.caret, single[0]) {
             // Bounded by the document, because the closer this steps over has to exist
             // and `should_skip_closer` only proves the character *after* the caret is
-            // one — which is the last position in the document, where stepping over
+            // one - which is the last position in the document, where stepping over
             // would leave the caret one past the end.
             let end = text.len_chars();
             // Both ends of the selection move. Moving only the caret left the closer it
@@ -3815,7 +3815,7 @@ A"
         }
         if !self.has_selection(text.len_chars()) {
             // Nothing selected copies, or cuts, the line the caret is on, newline and
-            // all — which is what a reader who presses the key with the caret in a
+            // all - which is what a reader who presses the key with the caret in a
             // line wants, and what every code editor does.
             let n = text.len_chars();
             let (lo, hi) = self.selection(n);
@@ -3916,7 +3916,7 @@ A"
                 // Reached only when the editor has focus *and* the bar is open,
                 // which means the reader clicked back into the text. The step or
                 // the close has already happened in `find_keys` this frame, so
-                // there is nothing to do here — but something has to be here, or
+                // there is nothing to do here - but something has to be here, or
                 // Enter would insert a line break as well.
             }
             egui::Key::H if ctrl && opts.editable => {
@@ -4096,7 +4096,7 @@ A"
     /// Separate from the rest of the pointer handling, and called before anything
     /// is shaped, because it decides *which* lines are shaped. Called after the
     /// shaping, a frame would draw the lines the wheel has just moved away from
-    /// and the lines it is moving towards would arrive a frame late — a visible
+    /// and the lines it is moving towards would arrive a frame late - a visible
     /// smear behind every flick of the wheel.
     ///
     /// In points rather than in whole lines, which is the whole difference between
@@ -4126,8 +4126,8 @@ A"
             //
             // egui eases each notch out over about ten frames, and a wheel that keeps
             // turning gives it a new notch every few frames, so the speed rises and
-            // falls in a repeating ripple — fast on the frame after a notch, slower
-            // on the next two — which reads as stutter however fine the frames are.
+            // falls in a repeating ripple - fast on the frame after a notch, slower
+            // on the next two - which reads as stutter however fine the frames are.
             // Taking the notches and easing towards where they add up to, at one
             // steady rate, is what makes a spinning wheel move at a steady speed.
             //
@@ -4204,7 +4204,7 @@ A"
     }
 
     /// Moves the window by `dy` points of what is actually drawn, down positive, and
-    /// returns how far it really went — less than asked at either end.
+    /// returns how far it really went - less than asked at either end.
     ///
     /// Without wrapping every line is one row and this is a plain sum. With it, the
     /// window walks over the lines' own heights, so a wrapped line five rows tall is
@@ -4332,8 +4332,8 @@ A"
         }
         let last = text.lines().saturating_sub(1);
         self.top_line = self.top_line.min(last);
-        // A line can be shorter than when the offset into it was set — the pane was
-        // widened, or the line was edited — so the offset is folded back into the
+        // A line can be shorter than when the offset into it was set - the pane was
+        // widened, or the line was edited - so the offset is folded back into the
         // lines it now spans.
         loop {
             let h = self.line_height(ui, text, self.top_line);
@@ -4400,7 +4400,7 @@ A"
     /// Sets the scroll position in points, clamped to the document.
     ///
     /// Without wrapping the position is exact. With it, a distance is only an
-    /// estimate of where a line is — it is what the scrollbar deals in — so the
+    /// estimate of where a line is - it is what the scrollbar deals in - so the
     /// window is anchored at the line the estimate falls in, and the frame settles
     /// the exact anchor against the real line heights.
     fn set_scroll(&mut self, y: f32) {
@@ -4447,7 +4447,7 @@ A"
         // No bar at all when the pane is too narrow to hold one beside some text.
         //
         // The width is a quarter of the pane, so a narrow pane gets a narrow bar
-        // and a pane of *no* width gets a bar of no width — a rectangle with left
+        // and a pane of *no* width gets a bar of no width - a rectangle with left
         // and right the same x, which still claims a press from egui and still
         // pages the window when it is clicked. A window dragged down to nothing is
         // a real thing a reader does, and on that frame the text stopped responding
@@ -4679,7 +4679,7 @@ A"
     /// Column zero as the only answer makes Home useless on an indented line,
     /// where the first press scrolls sideways for no reason and a second press is
     /// needed to reach the code. This is what every editor settled on, and it
-    /// still reaches column zero — just on the second press rather than the
+    /// still reaches column zero - just on the second press rather than the
     /// first.
     ///
     /// The rule is a comparison rather than a remembered position, so it needs no
@@ -4744,7 +4744,7 @@ A"
     /// Walked in byte offsets rather than by collecting the document into a
     /// `Vec<char>` and indexing it. Collecting was one allocation of four bytes
     /// per character and a full decode of the file on every press of a key whose
-    /// whole job is to be quick — on a 7 MB file, tens of milliseconds of
+    /// whole job is to be quick - on a 7 MB file, tens of milliseconds of
     /// stutter per press. The walk is bounded by a word and the gap beside it,
     /// so it costs what it looks like, and the answer comes back as a character
     /// index because that is what the caret speaks in.
@@ -4835,7 +4835,7 @@ mod tests {
         assert_eq!(e.word_step(&lines, 4, 1), 8, "on to the next line");
         assert_eq!(e.word_step(&lines, 7, -1), 4, "back into the line above");
         // From the first character of a line, the word before it is the last
-        // word of the line above — the newline itself is a gap, and the step
+        // word of the line above - the newline itself is a gap, and the step
         // crosses it on the way.
         assert_eq!(e.word_step(&lines, 8, -1), 4, "and over the newline");
     }

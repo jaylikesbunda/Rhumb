@@ -39,7 +39,7 @@ pub struct Doc {
     /// The last `dirty()` answer, and the version it was for.
     ///
     /// `dirty()` hashes the whole buffer, and the answer is asked for twice on
-    /// every frame — once for the tab strip's dot, once for the document header's
+    /// every frame - once for the tab strip's dot, once for the document header's
     /// save button. On a large file that was two full passes over several
     /// megabytes per frame, and it was the single largest cost in the frame after
     /// the editor itself. Keyed on `version`, which every edit already bumps, so
@@ -135,7 +135,7 @@ impl Doc {
     ///
     /// The whole `Doc` travels, not just its text. Flattening it to a string
     /// dropped `read_only` and `too_large` on the floor, and the app rebuilt
-    /// the document as editable — so a large file arrived as an *empty editable
+    /// the document as editable - so a large file arrived as an *empty editable
     /// buffer*, and saving it overwrote the file with nothing.
     pub fn read(path: &Path) -> (PathBuf, Option<Doc>, Option<String>) {
         match Doc::open(path) {

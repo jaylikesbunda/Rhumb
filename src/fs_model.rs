@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,7 +39,7 @@ impl SortKey {
 pub enum GroupBy {
     #[default]
     None,
-    /// A–Z buckets, with anything not starting with a letter under `#`.
+    /// A-Z buckets, with anything not starting with a letter under `#`.
     Name,
     /// Folders, then the broad families of extension.
     Type,
@@ -417,7 +418,7 @@ fn rank_in(label: &str, order: &[&str]) -> usize {
         .unwrap_or(order.len())
 }
 
-/// A–Z buckets, with anything not starting with a letter under `#`.
+/// A-Z buckets, with anything not starting with a letter under `#`.
 fn name_group(name: &str) -> String {
     let first = name.chars().next().map(|c| c.to_ascii_uppercase());
     match first {
@@ -536,27 +537,80 @@ impl Entry {
     }
 }
 
+/// A place the file list can show.
+///
+/// Most places are a folder on a disk, but a few name no folder at all: the
+/// Recycle Bin, "This PC", and a path inside an archive. This is the one place
+/// that turns such a path back into something listable, so everything above it
+/// can keep treating a place as a path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Loc {
+    /// A real folder on a disk.
+    Dir(PathBuf),
+    /// A place inside an archive file.
+    Archive(crate::archive::Inside),
+    /// The Windows Recycle Bin.
+    Recycle,
+    /// "This PC": the drives and the user folders.
+    ThisPc,
+}
+
+impl Loc {
+    /// Classifies a path. The special forms are recognised by the same magic
+    /// paths the sidebar opens, so the two always agree.
+    pub fn of(path: &Path) -> Loc {
+        if crate::recycle::is_root(path) {
+            return Loc::Recycle;
+        }
+        if crate::this_pc::is_root(path) {
+            return Loc::ThisPc;
+        }
+        if let Some(inside) = crate::archive::split(path) {
+            return Loc::Archive(inside);
+        }
+        Loc::Dir(path.to_path_buf())
+    }
+}
+
+/// A place that can be listed one level deep.
+///
+/// The trait exists so a new kind of place (a shell namespace, a remote) is a
+/// new implementation rather than another branch in [`read_dir`].
+pub trait Backend {
+    /// The entries directly inside this place.
+    fn list(&self, show_hidden: bool) -> io::Result<Vec<Entry>>;
+}
+
+impl Backend for Loc {
+    fn list(&self, show_hidden: bool) -> io::Result<Vec<Entry>> {
+        match self {
+            // The Recycle Bin has no folder behind it; its listing is built from
+            // the deleted items' records instead.
+            Loc::Recycle => Ok(crate::recycle::list()),
+            // "This PC" is the same: its listing is the drives and user folders.
+            Loc::ThisPc => Ok(crate::this_pc::list()),
+            // An archive, or a place inside one, is read out of the archive.
+            Loc::Archive(inside) => {
+                let mut entries = crate::archive::list(&inside.archive, &inside.inner)?;
+                if !show_hidden {
+                    entries.retain(|e| !e.hidden);
+                }
+                Ok(entries)
+            }
+            Loc::Dir(path) => read_dir_fs(path, show_hidden),
+        }
+    }
+}
+
 /// Reads a directory into entries, skipping hidden files unless asked.
 ///
 /// Runs on a worker thread; touches the disk exactly once.
 pub fn read_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
-    // The Recycle Bin is a place with no folder behind it; its listing is built
-    // from the deleted items' records instead.
-    if crate::recycle::is_root(path) {
-        return Ok(crate::recycle::list());
-    }
-    // "This PC" is the same: its listing is the drives and the user folders.
-    if crate::this_pc::is_root(path) {
-        return Ok(crate::this_pc::list());
-    }
-    // An archive, or a place inside one, is read out of the archive.
-    if let Some(crate::archive::Inside { archive, inner }) = crate::archive::split(path) {
-        let mut entries = crate::archive::list(&archive, &inner)?;
-        if !show_hidden {
-            entries.retain(|e| !e.hidden);
-        }
-        return Ok(entries);
-    }
+    Backend::list(&Loc::of(path), show_hidden)
+}
+
+/// The filesystem half of [`Backend`].
+fn read_dir_fs(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
     let mut out = Vec::with_capacity(64);
     // The OS is asked for the verbatim form, which reaches past `MAX_PATH`; the
     // entries keep the ordinary path, so everything above this (breadcrumbs,
@@ -853,7 +907,7 @@ pub fn drives() -> Vec<Place> {
 ///
 /// On Windows `Disk::name()` is the volume's own label ("Windows", "Data"),
 /// which on its own leaves the row with no drive letter to identify it. Show
-/// the letter too, the way Explorer does — "Windows (C:)" — or just the letter
+/// the letter too, the way Explorer does - "Windows (C:)" - or just the letter
 /// when the volume is unlabelled. Other platforms have no letters, so their
 /// volume name is used as-is, falling back to the mount point.
 fn drive_label(mount: &Path, name: &str) -> String {
@@ -908,7 +962,7 @@ impl FreeSpace {
     /// Available and total bytes for the volume holding `path`, read right now.
     ///
     /// Waits for the OS, so it is for a worker thread that is about to do something
-    /// slow anyway — never for the thread that draws.
+    /// slow anyway - never for the thread that draws.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn blocking(path: &Path) -> Option<(u64, u64)> {
         let fs = FreeSpace {
@@ -979,7 +1033,7 @@ fn read_volumes() -> HashMap<PathBuf, (u64, u64)> {
         .collect()
 }
 
-/// The sidebar's top-level entries — places and drives — as `(label, path,
+/// The sidebar's top-level entries - places and drives - as `(label, path,
 /// is_device)`, kept so they are not asked of the OS on every frame.
 ///
 /// The drive list comes from the OS and that can be slow, so a worker reads it
@@ -1081,7 +1135,7 @@ pub fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
                 p.as_os_str().to_string_lossy().into_owned()
             }
             // On Windows the root directory follows the drive prefix, and its label
-            // comes from the path so far — which is `C:\`, so it renders as `C`
+            // comes from the path so far - which is `C:\`, so it renders as `C`
             // again. The drive has already said where this is, so this segment
             // contributes nothing to show. It is still pushed with an empty label so
             // that the address bar's separators land in the right places, and
@@ -1627,8 +1681,8 @@ mod tests {
     fn the_drive_letter_is_not_shown_twice() {
         // On Windows a path has *two* components at the front: the prefix (`C:`) and
         // the root directory (`\`). The prefix already reads as "C:", and labelling
-        // the root as well — which is derived from the accumulated path and so comes
-        // out as "C" — puts the drive letter in the address bar twice, as
+        // the root as well - which is derived from the accumulated path and so comes
+        // out as "C" - puts the drive letter in the address bar twice, as
         // `C: > C > Users > dev`. Only the prefix should be shown, and only when
         // there is one.
         let p = if cfg!(windows) {

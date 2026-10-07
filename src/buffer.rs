@@ -18,7 +18,7 @@
 //!
 //! Every edit is also written to a journal. The editor drains it when an undo step
 //! closes, so a step is the list of edits it made and undoing is replaying them
-//! backwards — no snapshot of the file, and no diff to work out afterwards.
+//! backwards - no snapshot of the file, and no diff to work out afterwards.
 
 use ropey::{Rope, RopeBuilder};
 use std::borrow::Cow;

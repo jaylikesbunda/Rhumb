@@ -11,8 +11,8 @@
 //! back to the edited line and rebuilt lazily, and only as far down as the window
 //! needs. An edit below the window costs nothing at all.
 //!
-//! When the window is far below what is known — opening a large file at the end,
-//! or dragging the scrollbar there — the scan is handed to a thread over a copy of
+//! When the window is far below what is known - opening a large file at the end,
+//! or dragging the scrollbar there - the scan is handed to a thread over a copy of
 //! the rope, which is a pointer bump. Until it answers the caller draws the text
 //! uncoloured for a few frames instead of holding the window still.
 

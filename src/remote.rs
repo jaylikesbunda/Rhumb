@@ -1,6 +1,6 @@
 //! Remote images for the Markdown preview.
 //!
-//! A Markdown file may point at an image on the web — a badge, or a picture
+//! A Markdown file may point at an image on the web - a badge, or a picture
 //! hosted on GitHub. Fetching and decoding happen on worker threads, and the
 //! result is handed back as raw RGBA because a `TextureHandle` can only be made
 //! on the UI thread. The cache is bounded: every entry is a GPU texture.

@@ -103,15 +103,15 @@ thread_local! {
     /// How many harnesses on this thread are alive right now.
     static LIVE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The clock the next harness starts at. Each one starts a long way after the last
-    /// finished, so nothing a previous harness did — a click, say — is still recent
+    /// finished, so nothing a previous harness did - a click, say - is still recent
     /// enough for egui to count the next one's input as a continuation of it.
     static CLOCK: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
 }
 
 /// A context for a new harness.
 ///
-/// Building one is most of what a harness costs — about a millisecond and a half,
-/// nearly all of it loading the fonts — and the sweeps make tens of thousands of
+/// Building one is most of what a harness costs - about a millisecond and a half,
+/// nearly all of it loading the fonts - and the sweeps make tens of thousands of
 /// them. So a thread keeps one and hands it to each harness in turn, wiped: egui's
 /// memory (focus, hover, ids) and the display scale are reset, and what carries
 /// over is only the parsed fonts and the shaped-text cache, which are pure. A
@@ -326,7 +326,7 @@ impl Harness {
     ///
     /// [`Harness::type_text`] sends the text alone, which is what a paste or an input
     /// method does. A keyboard sends both, and an editor that handles the key *and*
-    /// the text — inserting a newline twice, say — only shows it here.
+    /// the text - inserting a newline twice, say - only shows it here.
     pub fn type_like_a_person(&mut self, s: &str) {
         for ch in s.chars() {
             let (key, text) = match ch {
@@ -562,8 +562,8 @@ impl Harness {
     pub fn pointer_mod(&mut self, pos: Pos2, m: Modifiers, pressed: bool) {
         // The modifier state has to arrive as its own event, because that is
         // where egui takes it from. A pointer event carries the modifiers that
-        // were held, but `input.modifiers` — which is what a widget actually
-        // reads — is only updated by `ModifiersChanged` and by key presses.
+        // were held, but `input.modifiers` - which is what a widget actually
+        // reads - is only updated by `ModifiersChanged` and by key presses.
         // Without this a shift-click looks exactly like a plain click, and the
         // test would end up asserting that the editor ignores a modifier it was
         // never told about.
@@ -599,7 +599,7 @@ impl Harness {
     }
 
     /// Press at the last press point and drag the held pointer to `to`, without
-    /// releasing — so a test can look at what a frame drew *during* a drag.
+    /// releasing - so a test can look at what a frame drew *during* a drag.
     pub fn press_and_move_to(&mut self, to: Pos2) {
         for step in 1..=4 {
             let from = self.ctx.input(|i| i.pointer.press_origin()).unwrap_or(to);
@@ -781,7 +781,7 @@ impl Harness {
     /// Found by matching the text the editor recorded as shaped, not by picking
     /// the biggest text on the frame. The two agree on any document with more than
     /// one line and disagree on an empty one, where the gutter's "1" is a
-    /// single-row galley and the document's nothing is also a single-row galley —
+    /// single-row galley and the document's nothing is also a single-row galley -
     /// and the line number wins a size comparison, so a test asking what the
     /// editor drew was told it drew "1".
     fn galley(&self) -> &egui::epaint::TextShape {
@@ -921,7 +921,7 @@ impl Harness {
     ///
     /// Found by *position*: anything drawn to the left of where the text starts
     /// is the line-number column. Not by content, because content cannot
-    /// distinguish the two cases that matter — a document one line long is laid
+    /// distinguish the two cases that matter - a document one line long is laid
     /// out as a single row, and a document whose only line is the character `1`
     /// is laid out as text identical to the number in the gutter beside it.
     pub fn gutter_numbers(&self) -> Vec<String> {
@@ -989,7 +989,7 @@ impl Harness {
     }
 
     /// Which row holds a character, or `None` when it is in a gap between two
-    /// rows — which is where a newline is, since the layout consumes it as the
+    /// rows - which is where a newline is, since the layout consumes it as the
     /// row break rather than drawing it.
     #[allow(dead_code)]
     pub fn row_of(&self, local: usize) -> Option<usize> {
@@ -1042,7 +1042,7 @@ impl Harness {
     }
 
     /// Where the editor's scrollbar is, and the thumb on it, or `None` when it
-    /// drew neither — which is what a document that fits should do.
+    /// drew neither - which is what a document that fits should do.
     ///
     /// Both are read back from the drawn shapes rather than asked of the
     /// editor, so a test is checking what is on screen and not what the editor
@@ -1202,7 +1202,7 @@ impl Harness {
     /// How many stretches of text on screen are marked, selected or highlighted.
     ///
     /// Counted as filled rectangles that are not the gutter, the scrollbar or the
-    /// find bar — which is to say, "how much of the text has a wash under it".
+    /// find bar - which is to say, "how much of the text has a wash under it".
     pub fn marked_spans(&self) -> usize {
         let text_left = self.text_left();
         let text_top = self.rect().top() + if self.find_open() { 30.0 } else { 0.0 };
@@ -1577,8 +1577,8 @@ impl Harness {
         )
     }
 
-    /// One wheel event of `notches` lines, as a mouse sends it — a `Move` and
-    /// nothing else — followed by one frame.
+    /// One wheel event of `notches` lines, as a mouse sends it - a `Move` and
+    /// nothing else - followed by one frame.
     pub fn wheel_move(&mut self, notches: f32) {
         let centre = self.rect.center();
         self.send(
