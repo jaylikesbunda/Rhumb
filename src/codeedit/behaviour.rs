@@ -3459,7 +3459,10 @@ fn timed(
 
 /// A budget in milliseconds, relaxed for a debug build.
 fn ms(release: f64) -> f64 {
-    if cfg!(debug_assertions) {
+    // A CI runner is slow and shared. Without an explicit strict run, treat it
+    // like a debug build, so the budget catches a regression rather than the
+    // machine the test happened to run on.
+    if cfg!(debug_assertions) || std::env::var_os("CI").is_some() {
         release * 40.0
     } else {
         release

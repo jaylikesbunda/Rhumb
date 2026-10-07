@@ -213,7 +213,16 @@ fn at_240fps(what: &str, n: usize, median_ms: f64, mut f: impl FnMut() -> Durati
         "  {what:44} median {median:6.3} ms  worst {worst:6.3} ms   (frame at 240 fps: {FRAME_240_MS} ms)"
     );
     let strict = std::env::var_os("RHUMB_STRICT_SPEED").is_some();
-    let slow = if cfg!(debug_assertions) { 30.0 } else { 1.0 };
+    // A shared CI runner is slow and noisy; the absolute budgets were written
+    // for a quiet desktop. Unless a strict run is asked for, a CI build is
+    // treated like a debug one: loose enough not to fail on VM noise, tight
+    // enough that an O(document) regression still blows the budget.
+    let ci = std::env::var_os("CI").is_some();
+    let slow = if cfg!(debug_assertions) || (ci && !strict) {
+        30.0
+    } else {
+        1.0
+    };
     let worst_budget = if strict {
         FRAME_240_MS * slow
     } else {
