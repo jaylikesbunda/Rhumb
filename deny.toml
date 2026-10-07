@@ -7,8 +7,26 @@
 
 [advisories]
 version = 2
-# Add an advisory id here only with a comment saying why it does not apply.
-ignore = []
+# Each ignore is a judgement that the advisory does not apply to this program.
+# Add one only with a reason, and revisit when the dependency changes.
+ignore = [
+    # `ttf-parser` is unmaintained, reached only through winit's Linux
+    # `sctk-adwaita` decoration path. Nothing here parses fonts with it
+    # directly, and there is no upgrade to take.
+    "RUSTSEC-2026-0192",
+    # `quick-xml` 0.38 reaches us only through zbus/accesskit on Linux, which
+    # speaks to the local AT-SPI accessibility bus. No untrusted XML is parsed.
+    # zbus pins 0.38, so the 0.41 fix is not reachable from here yet.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # `sevenz-rust` is unmaintained, and its path-traversal bug lives in
+    # `decompress_impl`, which this program never calls: 7z extraction walks
+    # entries itself (`for_each_entries`) and validates every name with
+    # `clean()` and `under()` before writing. Migration to `sevenz-rust2` is a
+    # larger reader/writer API change; tracked in TODO.md.
+    "RUSTSEC-2026-0245",
+    "RUSTSEC-2026-0246",
+]
 
 [licenses]
 version = 2
@@ -27,6 +45,13 @@ allow = [
     "Unicode-DFS-2016",
     "MPL-2.0",
     "bzip2-1.0.6",
+    # Windows clipboard helpers.
+    "BSL-1.0",
+    # egui's bundled default fonts.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # rustls' bundled root certificates (via ureq).
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]

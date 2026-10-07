@@ -55,6 +55,10 @@ jobs:
   # numbers the README quotes are measured.
   bench:
     runs-on: windows-latest
+    env:
+      # The release profile uses fat LTO for a smaller shipped binary; thin is
+      # plenty for a timing run and keeps this job's build quick.
+      CARGO_PROFILE_RELEASE_LTO: thin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,0 +1,19 @@
+# cargo-audit configuration, used by the `advisories` job in
+# .github/workflows/security.yml. cargo-deny has its own copy of these in
+# deny.toml; keep the two in step.
+#
+# Every ignore is a judgement that the advisory does not apply here.
+
+[advisories]
+ignore = [
+    # ttf-parser unmaintained, reached only via winit's Linux decoration path.
+    "RUSTSEC-2026-0192",
+    # quick-xml 0.38 via zbus/accesskit on Linux; no untrusted XML is parsed,
+    # and zbus pins the version so the fix is not reachable yet.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # sevenz-rust: the path traversal is in `decompress_impl`, which is never
+    # called here; extraction validates every name itself.
+    "RUSTSEC-2026-0245",
+    "RUSTSEC-2026-0246",
+]

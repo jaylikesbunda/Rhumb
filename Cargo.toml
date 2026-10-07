@@ -45,13 +45,17 @@ zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 tar = { version = "0.4", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Reading 7z only: the compressor is not part of the program.
+# `sevenz-rust` is unmaintained and carries RUSTSEC-2026-0245 (a path
+# traversal in `decompress_impl`, which this program never calls) and
+# RUSTSEC-2026-0246 (unmaintained). Migration to `sevenz-rust2` is a larger
+# reader/writer API change; both advisories are listed in `deny.toml`.
 sevenz-rust = { version = "0.6.1", default-features = false }
 # Reading RAR only: the writer is not part of the program.
 rars = { version = "0.10.0", default-features = false }
 
 [dev-dependencies]
 # The tests build a small 7z to read back, which needs the encoder. Kept out of
-# the normal dependencies so the shipped binary does not carry it.
+# the normal dependencies so the shipped binary does not carry the compressor.
 sevenz-rust = { version = "0.6.1", default-features = false, features = ["compress"] }
 # The tests build a small RAR to read back the same way; its writer is likewise
 # kept out of the normal dependencies.

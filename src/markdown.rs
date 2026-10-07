@@ -1828,10 +1828,11 @@ impl Preview {
     /// Shapes a job at `width`, caching the result when `cache` is set.
     ///
     /// The job is built by `make`, and only when it is needed: a block that is
-    /// already shaped costs a lookup and nothing else, where building its job first
-    /// - a string and a section for every run of text - cost more than the lookup it
-    /// was for, on every block, every frame. The layout pass passes `cache` false, so
-    /// measuring a whole document does not hold every galley in memory.
+    /// already shaped costs a lookup and nothing else, where building its job
+    /// first (a string and a section for every run of text) cost more than the
+    /// lookup it was for, on every block, every frame. The layout pass passes
+    /// `cache` false, so measuring a whole document does not hold every galley
+    /// in memory.
     fn shape(
         &mut self,
         ui: &mut Ui,
