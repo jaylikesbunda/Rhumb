@@ -61,8 +61,8 @@ jobs:
         with:
           tool: nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo nextest run codeedit::behaviour --partition count:${{ matrix.shard }}/2
-      - run: cargo nextest run codeedit::multi_tests --partition count:${{ matrix.shard }}/2
+      - run: cargo nextest run codeedit::behaviour -E 'not test(/(instant|quick)/)' --partition count:${{ matrix.shard }}/2
+      - run: cargo nextest run codeedit::multi_tests -E 'not test(/(instant|quick)/)' --partition count:${{ matrix.shard }}/2
 
   # The whole-window tests: they build real folders and run real frames, and 140
   # of them on one runner overran the timeout. Shard them across four runners
@@ -81,7 +81,7 @@ jobs:
         with:
           tool: nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo nextest run app::full_app --partition count:${{ matrix.shard }}/4
+      - run: cargo nextest run app::full_app -E 'not test(/(fits_in_a_frame|stays_cheap|instant|quick)/)' --partition count:${{ matrix.shard }}/4
 
   sweep:
     runs-on: windows-latest
@@ -115,10 +115,10 @@ jobs:
       - run: "cargo test instance::"
       - run: "cargo test fs_model::"
 
-  # The frame-cost gate. The budgets live in the tests themselves; this job
-  # fails when a change makes a frame cross one. It runs in release, where the
-  # numbers the README quotes are measured. The release profile uses fat LTO
-  # for a smaller shipped binary; thin is plenty for a timing run.
+  # The frame-cost budgets only mean something on a quiet machine with nothing
+  # else running, so they are not in the correctness jobs: they run here, in
+  # release, one at a time. The nextest override in .config/nextest.toml asks
+  # for every thread, which enforces that.
   bench:
     runs-on: windows-latest
     timeout-minutes: 25
@@ -127,8 +127,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - uses: Swatinem/rust-cache@v2
-      - name: Whole-app frame budget
-        run: cargo test --release fits_in_a_frame -- --nocapture --test-threads=1
-      - name: Instant-operation budget
-        run: cargo test --release instant -- --nocapture --test-threads=1
+      - run: cargo nextest run --release -E 'test(/(fits_in_a_frame|stays_cheap|instant|quick)/)'

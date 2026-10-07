@@ -1,0 +1,14 @@
+# nextest configuration.
+#
+# nextest runs tests in parallel processes. A test that asserts a frame budget
+# cannot share a runner: a heavy test next to it starves it, and a millisecond
+# budget measured under starvation is meaningless (a 0.7 ms frame reads as
+# hundreds of ms). Asking for every thread makes nextest run these tests one at
+# a time, with nothing else running, which is the only way the number means
+# anything.
+#
+# The patterns match the timing tests by name: `..._fits_in_a_frame...`,
+# `..._is_instant...`, `..._quick...` and `..._stays_cheap`.
+[[profile.default.overrides]]
+filter = 'test(/(fits_in_a_frame|instant|quick|stays_cheap)/)'
+threads-required = "num-cpus"
