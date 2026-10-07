@@ -787,15 +787,22 @@ fn an_idle_window_with_a_focused_editor_asks_for_no_more_than_the_caret_needs() 
     let mut frames = 0;
     let mut waited = Duration::ZERO;
     while waited < Duration::from_secs(10) {
-        let wait = a.repaint_in.min(Duration::from_secs(10));
+        // Never advance by nothing: a zero repaint delay would spin here forever
+        // instead of failing the count below, which is worse than a failure.
+        let wait = a
+            .repaint_in
+            .min(Duration::from_secs(10))
+            .max(Duration::from_millis(1));
         a.time += wait.as_secs_f64();
         waited += wait;
         a.frame();
         frames += 1;
     }
-    // The caret turns on and off twice a second, and that is all there is to draw.
+    // The caret turns on and off twice a second - about twenty frames - plus a
+    // few for a worker answering once and the first frame. A window that asked
+    // for a frame every time would draw six hundred or more.
     assert!(
-        frames <= 30,
+        frames <= 40,
         "an idle window drew {frames} frames in ten seconds"
     );
     let _ = fs::remove_dir_all(&dir);

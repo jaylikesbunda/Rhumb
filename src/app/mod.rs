@@ -1048,6 +1048,11 @@ pub struct Rhumb {
     /// Whether the window has been shown. It starts hidden so the first frame is
     /// painted before it appears, which is what removes the startup flash.
     shown: bool,
+    /// The IME-allowed state last sent to the window, so the command is only sent
+    /// when it changes (a viewport command forces a repaint).
+    ime_allowed: Option<bool>,
+    /// The last IME candidate rectangle sent, for the same reason.
+    ime_rect: Option<Rect>,
     /// Head of the text file the details pane is showing, with its path.
     peek: Option<(PathBuf, String)>,
     /// Path whose head is being read, so it is only requested once.
@@ -1221,6 +1226,8 @@ impl Rhumb {
             indexes: crate::index::Indexes::default(),
             index_load: None,
             shown: false,
+            ime_allowed: None,
+            ime_rect: None,
             peek: None,
             peek_pending: None,
             free_space: fs_model::FreeSpace::default(),

@@ -586,6 +586,8 @@ impl Rhumb {
             ed,
             tabs,
             last_edit,
+            ime_allowed,
+            ime_rect,
             ..
         } = self;
         let t0 = Instant::now();
@@ -597,9 +599,26 @@ impl Rhumb {
         // Let the window hand input-method events to the editor while it has the
         // caret, and put the candidate window by the pane. The editor draws the
         // preedit itself; without this the OS never sends one.
-        ui.ctx()
-            .send_viewport_cmd(ViewportCommand::IMEAllowed(focused));
-        if focused {
+        //
+        // Sent only when the value changed: a viewport command forces a repaint,
+        // so sending these every frame kept a focused but idle window redrawing
+        // as fast as the display allowed.
+        if *ime_allowed != Some(focused) {
+            *ime_allowed = Some(focused);
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::IMEAllowed(focused));
+            if !focused {
+                // Forget the rectangle, so it is sent again when the editor next
+                // takes the keyboard.
+                *ime_rect = None;
+            }
+        }
+        if focused
+            && ime_rect.is_none_or(|r| {
+                (r.min - rect.min).length() > 0.5 || (r.max - rect.max).length() > 0.5
+            })
+        {
+            *ime_rect = Some(rect);
             ui.ctx().send_viewport_cmd(ViewportCommand::IMERect(rect));
         }
         if out.edited {
