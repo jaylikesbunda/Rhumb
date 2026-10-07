@@ -5,14 +5,20 @@ on:
     branches: [main, master]
   pull_request:
 
+# A new push to the same branch cancels the previous run instead of queueing
+# behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Everything except the exhaustive editor sweeps, which are the long pole. They
-  # run in their own job so the two halves run side by side instead of end to end.
-  test:
+  # Lint is its own job, so a formatting slip does not sit behind the tests.
+  lint:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -21,21 +27,62 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test -- --skip codeedit::sweep
+
+  # The suite is split so the parts run on several runners at once instead of
+  # end to end. `--skip` may be repeated; the four `--skip`s below leave only
+  # the small, fast tests here.
+  test-core:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo test --
+          --skip codeedit::sweep
+          --skip codeedit::behaviour
+          --skip codeedit::multi_tests
+          --skip app::full_app
+
+  # The editor's own spec: real input events, drawn geometry, timing.
+  test-editor:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test codeedit::behaviour
+      - run: cargo test codeedit::multi_tests
+
+  # The whole-window tests: they build real folders and run real frames, and
+  # they are the long pole, so they get a runner to themselves.
+  test-app:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test app::full_app
 
   sweep:
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test codeedit::sweep
 
-  # The app builds and runs on Linux too, through the portable code paths in
-  # `clip` and `instance`. winit/egui need system libraries the runner does not
-  # ship; the tests themselves run without a display.
+  # Linux is a portability check, not a second full run: everything must
+  # compile with the test targets (which catches a missing `cfg`), and the code
+  # that actually differs on Linux - the clipboard and single-instance paths,
+  # plus the cross-platform filesystem model - gets a run.
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -48,16 +95,18 @@ jobs:
             libxkbcommon-dev libwayland-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - run: cargo check --all-targets
-      - run: cargo test -- --skip codeedit::sweep
+      - run: "cargo test clip::"
+      - run: "cargo test instance::"
+      - run: "cargo test fs_model::"
 
   # The frame-cost gate. The budgets live in the tests themselves; this job
   # fails when a change makes a frame cross one. It runs in release, where the
-  # numbers the README quotes are measured.
+  # numbers the README quotes are measured. The release profile uses fat LTO
+  # for a smaller shipped binary; thin is plenty for a timing run.
   bench:
     runs-on: windows-latest
+    timeout-minutes: 25
     env:
-      # The release profile uses fat LTO for a smaller shipped binary; thin is
-      # plenty for a timing run and keeps this job's build quick.
       CARGO_PROFILE_RELEASE_LTO: thin
     steps:
       - uses: actions/checkout@v4
