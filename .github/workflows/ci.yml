@@ -45,27 +45,43 @@ jobs:
           --skip codeedit::multi_tests
           --skip app::full_app
 
-  # The editor's own spec: real input events, drawn geometry, timing.
+  # The editor's own spec: real input events, drawn geometry, timing. Split over
+  # two runners with nextest, since it is the second-longest part.
   test-editor:
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test codeedit::behaviour
-      - run: cargo test codeedit::multi_tests
+      - run: cargo nextest run codeedit::behaviour --partition count:${{ matrix.shard }}/2
+      - run: cargo nextest run codeedit::multi_tests --partition count:${{ matrix.shard }}/2
 
-  # The whole-window tests: they build real folders and run real frames, and
-  # they are the long pole, so they get a runner to themselves.
+  # The whole-window tests: they build real folders and run real frames, and 140
+  # of them on one runner overran the timeout. Shard them across four runners
+  # with nextest's deterministic partitioning.
   test-app:
     runs-on: windows-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test app::full_app
+      - run: cargo nextest run app::full_app --partition count:${{ matrix.shard }}/4
 
   sweep:
     runs-on: windows-latest
