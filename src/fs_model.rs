@@ -382,7 +382,14 @@ pub fn group_label(entry: &Entry, group_by: GroupBy) -> String {
 /// the two are told apart by the path and nothing new has to be carried on the
 /// entry.
 fn place_group(entry: &Entry) -> String {
-    if entry.path.parent().is_none() {
+    // A volume is a path whose last component is the root itself (`C:\`, `/`).
+    // Testing `parent().is_none()` misses `C:\`, whose parent is `C:`, while
+    // every folder under a volume ends in a normal name.
+    let is_volume = matches!(
+        entry.path.components().next_back(),
+        Some(std::path::Component::RootDir)
+    );
+    if is_volume {
         String::from("Devices and drives")
     } else {
         String::from("Folders")
