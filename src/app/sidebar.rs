@@ -49,15 +49,9 @@ impl Rhumb {
         let mut toggle: Option<PathBuf> = None;
         let mut expand: Option<PathBuf> = None;
 
-        // Quick access sits above everything else, the way Explorer puts it.
-        // The section only appears once something is pinned, so an unused
-        // sidebar stays quiet.
-        if !self.pins.is_empty() {
-            self.quick_access_ui(ui, &mut nav);
-        }
-
         // Roots: quick access, then devices. Labels stay friendly; the tree
-        // itself only cares about paths.
+        // itself only cares about paths. Worked out before the scroll area, so
+        // the borrow of the tree ends before the closure takes `self`.
         let roots: Vec<(String, PathBuf, bool)> = self.roots.get(ui.ctx()).to_vec();
         let paths: Vec<PathBuf> = roots.iter().map(|(_, p, _)| p.clone()).collect();
         self.sidebar_tree.tree.set_roots(&paths);
@@ -92,21 +86,34 @@ impl Rhumb {
             }
         }
 
-        for (label, path, depth, expanded, is_device) in lines {
-            if self.tree_row(
-                ui,
-                &label,
-                &path,
-                depth,
-                expanded,
-                is_device,
-                &mut nav,
-                &mut toggle,
-                &mut expand,
-            ) {
-                continue;
-            }
-        }
+        // One scroll area for the whole column: with several pinned folders or
+        // an expanded tree the rows are taller than a small window, and clipping
+        // them would hide folders with no way to reach them.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Quick access sits above everything else, the way Explorer puts
+                // it. The section only appears once something is pinned, so an
+                // unused sidebar stays quiet.
+                if !self.pins.is_empty() {
+                    self.quick_access_ui(ui, &mut nav);
+                }
+                for (label, path, depth, expanded, is_device) in lines {
+                    if self.tree_row(
+                        ui,
+                        &label,
+                        &path,
+                        depth,
+                        expanded,
+                        is_device,
+                        &mut nav,
+                        &mut toggle,
+                        &mut expand,
+                    ) {
+                        self.open_context_menu(ui, &path);
+                    }
+                }
+            });
 
         let rect = ui.max_rect();
         ui.painter().vline(
@@ -295,6 +302,10 @@ impl Rhumb {
     ) -> bool {
         let active = self.cwd == path;
         let loading = self.sidebar_tree.tree.is_pending(path);
+        // "This PC" and the Recycle Bin name no folder on disk, so there is
+        // nothing under them to expand: no chevron, and a click anywhere on the
+        // row navigates.
+        let magic = crate::recycle::is_root(path) || crate::this_pc::is_root(path);
         let width = ui.available_width();
         let indent = depth as f32 * sp::INDENT;
         let (rect, resp) = ui.allocate_exact_size(
@@ -304,7 +315,7 @@ impl Rhumb {
         // A tree row is a selectable button named by its label; a drive or folder
         // is not distinguishable to a screen reader otherwise.
         resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, active, label));
-        if resp.hovered() && !is_device {
+        if resp.hovered() && !is_device && !magic {
             self.drop_target = Some(path.to_path_buf());
         }
         let chevron_x = rect.left() + 6.0 + indent;
@@ -332,7 +343,7 @@ impl Rhumb {
             );
             if loading {
                 Icon::Refresh.paint(painter, chevron, c::TEXT_GHOST);
-            } else if !is_device {
+            } else if !is_device && !magic {
                 Icon::Chevron.paint_with(
                     painter,
                     chevron,
@@ -399,13 +410,15 @@ impl Rhumb {
             }
         }
 
-        // The leading chevron area expands; the rest of the row navigates.
+        // The leading chevron area expands; the rest of the row navigates. A
+        // magic root has no chevron, so its whole row navigates.
         if resp.clicked() {
-            let on_chevron = ui.input(|i| {
-                i.pointer
-                    .latest_pos()
-                    .is_some_and(|p| p.x < chevron_x + 14.0)
-            });
+            let on_chevron = !magic
+                && ui.input(|i| {
+                    i.pointer
+                        .latest_pos()
+                        .is_some_and(|p| p.x < chevron_x + 14.0)
+                });
             if on_chevron {
                 if loading {
                     *expand = Some(path.to_path_buf());
@@ -416,7 +429,8 @@ impl Rhumb {
                 *nav = Some(path.to_path_buf());
             }
         }
-        false
+        // A right click asks for the shared context menu, as the list's rows do.
+        resp.secondary_clicked()
     }
 
     /// Asks for a folder's subfolders, read on a worker thread.

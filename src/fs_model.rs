@@ -47,6 +47,9 @@ pub enum GroupBy {
     Modified,
     /// Folders, then size bands.
     Size,
+    /// This PC only: the user folders, then the volumes. Not a menu choice; the
+    /// place view is what This PC always uses.
+    Place,
 }
 
 impl GroupBy {
@@ -66,6 +69,7 @@ impl GroupBy {
             GroupBy::Type => "Type",
             GroupBy::Modified => "Modified",
             GroupBy::Size => "Size",
+            GroupBy::Place => "Place",
         }
     }
 
@@ -77,6 +81,7 @@ impl GroupBy {
             GroupBy::Type => "type",
             GroupBy::Modified => "modified",
             GroupBy::Size => "size",
+            GroupBy::Place => "place",
         }
     }
 
@@ -367,6 +372,20 @@ pub fn group_label(entry: &Entry, group_by: GroupBy) -> String {
         GroupBy::Type => type_group(entry).to_owned(),
         GroupBy::Modified => modified_group(entry.modified, SystemTime::now()).to_owned(),
         GroupBy::Size => size_group(entry).to_owned(),
+        GroupBy::Place => place_group(entry),
+    }
+}
+
+/// The This PC grouping: the user folders, then the volumes.
+///
+/// A volume is a root with nothing above it; every user folder has a parent, so
+/// the two are told apart by the path and nothing new has to be carried on the
+/// entry.
+fn place_group(entry: &Entry) -> String {
+    if entry.path.parent().is_none() {
+        String::from("Devices and drives")
+    } else {
+        String::from("Folders")
     }
 }
 
@@ -408,6 +427,7 @@ pub fn group_rank(group_by: GroupBy, label: &str) -> usize {
             ],
         ),
         GroupBy::Size => rank_in(label, &["Folders", "Small", "Medium", "Large"]),
+        GroupBy::Place => usize::from(label != "Folders"),
     }
 }
 
@@ -882,8 +902,41 @@ pub fn places() -> Vec<Place> {
     out
 }
 
-/// Mounted volumes. Refreshed on demand because it touches the OS.
+/// How long the drive list is trusted.
+const DRIVES_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The last reading of the volumes: when it was taken, and the list.
+type DrivesSnapshot = (std::time::Instant, Vec<Place>);
+
+/// The last reading, shared by every caller.
+///
+/// Enumerating volumes opens each one and asks for its capacity, and on a
+/// machine with a network share or a sleeping disk one call can take a long
+/// time. The sidebar, This PC and the Recycle Bin all want the same list, so it
+/// is read once per TTL however many of them ask.
+fn drives_cache() -> &'static std::sync::Mutex<Option<DrivesSnapshot>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<DrivesSnapshot>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Mounted volumes, from a reading at most [`DRIVES_TTL`] old.
 pub fn drives() -> Vec<Place> {
+    if let Ok(g) = drives_cache().lock()
+        && let Some((at, list)) = &*g
+        && at.elapsed() < DRIVES_TTL
+    {
+        return list.clone();
+    }
+    let fresh = read_drives();
+    if let Ok(mut g) = drives_cache().lock() {
+        *g = Some((std::time::Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+/// Reads the volumes now, touching the OS.
+fn read_drives() -> Vec<Place> {
     use sysinfo::Disks;
     let disks = Disks::new_with_refreshed_list();
     let mut out = Vec::new();
@@ -1529,9 +1582,11 @@ fn probe_sidebar_root_costs() {
     for (name, f) in [
         ("places()", (|| drop(places())) as fn()),
         ("drives()", || drop(drives())),
+        ("this_pc::list()", || drop(crate::this_pc::list())),
+        ("recycle::list()", || drop(crate::recycle::list())),
     ] {
         let mut times = Vec::new();
-        for _ in 0..30 {
+        for _ in 0..10 {
             let t = Instant::now();
             f();
             times.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -1957,6 +2012,21 @@ mod tests {
         ranks.dedup();
         assert_eq!(ranks.len(), cases.len(), "the type groups are distinct");
         assert!(group_rank(GroupBy::Type, "Folders") < group_rank(GroupBy::Type, "Documents"));
+    }
+
+    #[test]
+    fn the_place_grouping_puts_volumes_after_the_folders() {
+        let cases = [
+            (entry("C:\\", true, 0, None), "Devices and drives"),
+            (entry("docs", true, 0, None), "Folders"),
+        ];
+        for (e, want) in &cases {
+            assert_eq!(&group_label(e, GroupBy::Place), want, "{}", e.name);
+        }
+        assert!(
+            group_rank(GroupBy::Place, "Folders")
+                < group_rank(GroupBy::Place, "Devices and drives")
+        );
     }
 
     #[test]

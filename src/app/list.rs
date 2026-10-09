@@ -196,7 +196,7 @@ impl Rhumb {
         };
         // Grouping is a property of the folder listing, not of a recursive
         // search: results are shown flat whatever the grouping is.
-        let grouped = self.group_by != GroupBy::None && !searching;
+        let grouped = self.effective_group_by() != GroupBy::None && !searching;
         let header_h = sp::SECTION;
         // The scroll area's content is as tall as its rows. A group header
         // takes a fixed strip above the rows of its group.
@@ -217,11 +217,23 @@ impl Rhumb {
         // The cursor is an item index. In the grouped layout a header may sit
         // above it, so the scroll target is that item's actual row, not its
         // index.
-        let scroll_offset = scroll_to.map(|(item, _align)| {
-            if grouped {
+        let view_h = ui.available_height();
+        let scroll_offset = scroll_to.map(|(item, align)| {
+            let y = if grouped {
                 grouped_item_offset(&self.groups, item, grid, cols, header_h, cell_h)
             } else {
                 item as f32 * cell_h
+            };
+            // Scroll only as far as needed to bring the row into view. Jumping
+            // the row to the top on every keypress moved the whole list under
+            // the cursor each time, which read as a flicker.
+            let (top, bottom) = (self.list_scroll, self.list_scroll + view_h);
+            if align == Align2::LEFT_TOP || y < top {
+                y
+            } else if y + cell_h > bottom {
+                y + cell_h - view_h
+            } else {
+                top
             }
         });
 
@@ -238,7 +250,7 @@ impl Rhumb {
                 .id_salt((pane, ID_LIST))
                 .auto_shrink([false, false]);
             if let Some(y) = scroll_offset {
-                area = area.vertical_scroll_offset(y);
+                area = area.vertical_scroll_offset(y.max(0.0));
             } else if let Some(y) = self.scroll_restore.take() {
                 // A tab has come back, and the list goes to where it was.
                 area = area.vertical_scroll_offset(y);
@@ -773,7 +785,10 @@ impl Rhumb {
             }
             CtxAction::OpenNewWindow => {
                 if let Ok(exe) = std::env::current_exe() {
-                    let _ = std::process::Command::new(exe).arg(&path).spawn();
+                    let _ = std::process::Command::new(exe)
+                        .arg(crate::instance::NEW_WINDOW_FLAG)
+                        .arg(&path)
+                        .spawn();
                 }
             }
             CtxAction::Reveal => editor::reveal_in_file_manager(&path),
@@ -1256,17 +1271,29 @@ impl Rhumb {
     /// The sort is stable, so within a group the list keeps the sort order the
     /// header chose; only the groups themselves are rearranged, and only when
     /// the entries happened to interleave.
+    /// The grouping the list is drawn with. This PC always uses the place
+    /// grouping - the user folders, then the volumes - whatever the menu says,
+    /// so it does not read as one flat folder.
+    fn effective_group_by(&self) -> GroupBy {
+        if crate::this_pc::is_root(&self.cwd) {
+            GroupBy::Place
+        } else {
+            self.group_by
+        }
+    }
+
     fn build_groups(&mut self) {
         self.groups.clear();
-        if self.group_by == GroupBy::None {
+        let by = self.effective_group_by();
+        if by == GroupBy::None {
             return;
         }
         let mut labeled: Vec<(usize, String)> = self
             .visible
             .iter()
-            .map(|i| (*i, fs_model::group_label(&self.entries[*i], self.group_by)))
+            .map(|i| (*i, fs_model::group_label(&self.entries[*i], by)))
             .collect();
-        labeled.sort_by_key(|(_, label)| fs_model::group_rank(self.group_by, label));
+        labeled.sort_by_key(|(_, label)| fs_model::group_rank(by, label));
         self.visible.clear();
         let mut last: Option<String> = None;
         for (i, label) in labeled {

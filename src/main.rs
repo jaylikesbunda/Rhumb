@@ -41,11 +41,13 @@ const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 fn main() -> eframe::Result {
     init_logging();
 
-    // One window per user. A second launch hands its path to the first and
-    // exits, rather than opening a second window with its own history and
-    // search box.
-    let start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
-    if !instance::claim(start.as_deref()) {
+    // One window per user by default: a second launch hands its path to the
+    // first and exits, rather than opening a second window with its own history
+    // and search box. `--new-window` (from "Open in new window") is the
+    // exception and skips the hand-off entirely.
+    let start = instance::start_path();
+    let own_window = instance::wants_new_window();
+    if !own_window && !instance::claim(start.as_deref()) {
         log::info!("another instance is running; handed the path and exiting");
         return Ok(());
     }
@@ -82,8 +84,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "rhumb",
         native,
-        Box::new(|cc| {
-            instance::watch(cc.egui_ctx.clone());
+        Box::new(move |cc| {
+            // Only the primary window listens for a second launch's path; a
+            // `--new-window` instance has its own and must not steal it.
+            if !own_window {
+                instance::watch(cc.egui_ctx.clone());
+            }
             #[cfg(windows)]
             set_window_icons(cc);
             Ok(Box::new(app::Rhumb::new(cc)))

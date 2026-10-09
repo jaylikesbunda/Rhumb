@@ -5170,6 +5170,23 @@ fn a_brace_block_and_an_indentation_block_are_foldable() {
 }
 
 #[test]
+fn a_closed_indentation_fold_keeps_its_chevron() {
+    // An indentation block is only recognised from the line under it. Closing
+    // the fold hides that line, so the chevron has to come from the fold's own
+    // record, or there is no way to open it again.
+    let mut h = Harness::new("root\n  child one\n  child two\nsibling\n");
+    assert!(h.fold_starts().contains(&0), "the block folds");
+    h.toggle_fold(0);
+    assert!(h.fold_closed(0), "the fold closed");
+    assert!(
+        h.fold_chevron(0).is_some(),
+        "the chevron survives the line under it being hidden"
+    );
+    h.toggle_fold(0);
+    assert!(!h.fold_closed(0), "and pressing it opens the fold again");
+}
+
+#[test]
 fn folding_hides_the_lines_inside_and_unfolding_brings_them_back() {
     let mut h = Harness::new("fn f() {\n    let a = 1;\n    let b = 2;\n}\ntail\n");
     h.toggle_fold(0);

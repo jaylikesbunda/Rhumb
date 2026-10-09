@@ -43,6 +43,37 @@ pub fn try_acquire() -> Option<Lock> {
     platform::try_acquire()
 }
 
+/// The switch that asks a launch for a window of its own, bypassing the
+/// single-instance hand-off. "Open in new window" runs the executable with it.
+pub const NEW_WINDOW_FLAG: &str = "--new-window";
+
+/// The path named on the command line, ignoring [`NEW_WINDOW_FLAG`].
+pub fn start_path() -> Option<PathBuf> {
+    parse(std::env::args_os().skip(1)).0
+}
+
+/// Whether the launch asked for a window of its own rather than handing its
+/// path to the running one.
+pub fn wants_new_window() -> bool {
+    parse(std::env::args_os().skip(1)).1
+}
+
+/// Splits a command line (without the program name) into the path to open and
+/// whether a window of its own was asked for.
+fn parse(args: impl Iterator<Item = std::ffi::OsString>) -> (Option<PathBuf>, bool) {
+    let flag = std::ffi::OsStr::new(NEW_WINDOW_FLAG);
+    let mut path = None;
+    let mut own = false;
+    for a in args {
+        if a.as_os_str() == flag {
+            own = true;
+        } else if path.is_none() {
+            path = Some(PathBuf::from(a));
+        }
+    }
+    (path, own)
+}
+
 /// Claims the slot for this window, asking any window that already has it to
 /// open `path` instead of opening a second one.
 ///
@@ -335,6 +366,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_command_line_splits_into_a_path_and_a_new_window_switch() {
+        let args = |v: &[&str]| -> Vec<std::ffi::OsString> {
+            v.iter().map(|s| std::ffi::OsString::from(*s)).collect()
+        };
+        let parsed = |v: &[&str]| parse(args(v).into_iter());
+        assert_eq!(parsed(&[]), (None, false));
+        assert_eq!(parsed(&["C:\\x"]), (Some(PathBuf::from("C:\\x")), false));
+        assert_eq!(
+            parsed(&["--new-window", "C:\\x"]),
+            (Some(PathBuf::from("C:\\x")), true)
+        );
+        assert_eq!(
+            parsed(&["C:\\x", "--new-window"]),
+            (Some(PathBuf::from("C:\\x")), true)
+        );
     }
 
     #[test]

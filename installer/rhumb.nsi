@@ -42,6 +42,7 @@ VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "Rhumb"
 VIAddVersionKey "FileDescription" "Rhumb installer"
 VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 Rhumb contributors"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 
 Section "Install"

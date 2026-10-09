@@ -3328,13 +3328,17 @@ A"
             }
             if last_chevron != Some(span.line) {
                 last_chevron = Some(span.line);
-                // A fold was found for this line while the window was shaped, so
-                // whether there is a chevron here is already known.
-                if self
+                // A fold is found for a line while the window is shaped, or it is
+                // one that has been closed. An indentation block is only
+                // recognised from the line under it, and closing the fold hides
+                // that line, so the closed fold's own record is what keeps its
+                // chevron on screen to reopen it.
+                let folds_here = self
                     .visible_folds
                     .iter()
                     .any(|(start, _)| *start == span.line)
-                {
+                    || self.closed.contains_key(&span.line);
+                if folds_here {
                     let r = egui::Rect::from_center_size(
                         egui::Pos2::new(
                             m.rect.left() + crate::theme::sp::XS + CHEVRON_INSET + CHEVRON * 0.5,

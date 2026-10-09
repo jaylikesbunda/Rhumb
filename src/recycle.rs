@@ -146,22 +146,33 @@ fn list_in(bin_dir: &Path) -> Vec<Entry> {
     let Ok(items) = std::fs::read_dir(long_path(bin_dir)) else {
         return out;
     };
+    // One pass over the folder builds both sides at once: the data files' types,
+    // and the record paths to read. Asking for each `$R` file's metadata per
+    // record was one extra syscall per item, and a bin with many items made
+    // opening it noticeably slow.
+    let mut data: std::collections::HashMap<String, (bool, bool)> =
+        std::collections::HashMap::new();
+    let mut records: Vec<(String, PathBuf)> = Vec::new();
     for item in items.flatten() {
+        let name = item.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if let Some(suffix) = name.strip_prefix("$R") {
+            if let Ok(ft) = item.file_type() {
+                data.insert(suffix.to_owned(), (ft.is_dir(), ft.is_symlink()));
+            }
+        } else if let Some(suffix) = name.strip_prefix("$I") {
+            records.push((suffix.to_owned(), item.path()));
+        }
+    }
+    for (suffix, record) in records {
         if out.len() >= MAX_ITEMS {
             break;
         }
-        let name = item.file_name();
-        let Some(name) = name.to_str() else { continue };
-        // Only records are read; the data files are found through them.
-        let Some(suffix) = name.strip_prefix("$I") else {
+        // An orphaned record, whose data file is gone, is skipped.
+        let Some(&(is_dir, is_symlink)) = data.get(&suffix) else {
             continue;
         };
-        let r_path = bin_dir.join(format!("$R{suffix}"));
-        // An orphaned record names something that is no longer there.
-        let Ok(md) = std::fs::symlink_metadata(long_path(&r_path)) else {
-            continue;
-        };
-        let Ok(bytes) = std::fs::read(long_path(&item.path())) else {
+        let Ok(bytes) = std::fs::read(long_path(&record)) else {
             continue;
         };
         let Some(deleted) = parse_i(&bytes) else {
@@ -175,9 +186,9 @@ fn list_in(bin_dir: &Path) -> Vec<Entry> {
         );
         out.push(Entry {
             name: display,
-            path: r_path,
-            is_dir: md.is_dir(),
-            is_symlink: md.is_symlink(),
+            path: bin_dir.join(format!("$R{suffix}")),
+            is_dir,
+            is_symlink,
             size: deleted.size,
             modified: deleted.deleted,
             hidden: false,
@@ -192,23 +203,64 @@ fn list_in(bin_dir: &Path) -> Vec<Entry> {
 /// read: there is no single folder that holds them all.
 #[cfg(windows)]
 pub fn list() -> Vec<Entry> {
-    let mut out = Vec::new();
+    // A bin is read from every volume, and one spun-down or slow volume can
+    // make the whole scan take a fifth of a second. A bin rarely changes, so a
+    // reading is reused for a moment: re-opening it, or a listing refresh, is
+    // then instant, and the worst case is a few seconds of staleness.
+    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    if let Ok(g) = cache().lock()
+        && let Some((at, list)) = &*g
+        && at.elapsed() < TTL
+    {
+        return list.clone();
+    }
+    let fresh = scan();
+    if let Ok(mut g) = cache().lock() {
+        *g = Some((std::time::Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+/// The last reading of the bins: when it was taken, and the listing.
+#[cfg(windows)]
+type BinSnapshot = (std::time::Instant, Vec<Entry>);
+
+/// The last bin listing, shared by every caller.
+#[cfg(windows)]
+fn cache() -> &'static std::sync::Mutex<Option<BinSnapshot>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<BinSnapshot>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Reads every volume's bin now, touching the OS.
+#[cfg(windows)]
+fn scan() -> Vec<Entry> {
+    // Every `<volume>\$Recycle.Bin\<SID>` folder, gathered first. They are
+    // independent, so they are read at once rather than one after another: the
+    // cost is the file opens, and overlapping them is most of the win on a bin
+    // with many items.
+    let mut bins: Vec<PathBuf> = Vec::new();
     for drive in fixed_drives() {
-        if out.len() >= MAX_ITEMS {
-            break;
-        }
-        // A volume's bin holds one folder per user SID.
         let bin = drive.join("$Recycle.Bin");
         let Ok(sids) = std::fs::read_dir(long_path(&bin)) else {
             continue;
         };
-        for sid in sids.flatten() {
-            if out.len() >= MAX_ITEMS {
-                break;
-            }
-            out.extend(list_in(&sid.path()));
-        }
+        bins.extend(sids.flatten().map(|sid| sid.path()));
     }
+    let mut out = Vec::new();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = bins
+            .iter()
+            .map(|bin| scope.spawn(move || list_in(bin)))
+            .collect();
+        for handle in handles {
+            if let Ok(entries) = handle.join() {
+                out.extend(entries);
+            }
+        }
+    });
+    out.truncate(MAX_ITEMS);
     out
 }
 

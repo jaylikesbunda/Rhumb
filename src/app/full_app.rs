@@ -3510,3 +3510,24 @@ fn filtering_this_pc_narrows_in_place_without_starting_a_search() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn this_pc_is_shown_in_two_sections() {
+    // This PC is the one place that is not a folder: it reads as two sections,
+    // the user folders and the volumes, rather than one flat list.
+    let (dir, _) = workspace("rhumb-thispc-sections", 3, 5);
+    let mut a = App::new(&dir);
+    a.app.navigate(Path::new(crate::this_pc::ROOT));
+    a.settle(|a| matches!(a.app.listing, Listing::Ready));
+    let labels: Vec<&str> = a.app.groups.iter().map(|g| g.label.as_str()).collect();
+    assert!(
+        labels.contains(&"Folders"),
+        "no Folders section: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Devices and drives"),
+        "no volumes section: {labels:?}"
+    );
+    assert_eq!(labels.first().copied(), Some("Folders"), "folders lead");
+    let _ = fs::remove_dir_all(&dir);
+}

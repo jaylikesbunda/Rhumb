@@ -1133,7 +1133,7 @@ impl Rhumb {
             .name("rhumb-sweep".into())
             .spawn(archive::sweep_cache);
         let (tx, rx) = workers::bus();
-        let arg = std::env::args().nth(1).map(PathBuf::from);
+        let arg = crate::instance::start_path();
 
         let mut app = Rhumb {
             tx: tx.clone(),
