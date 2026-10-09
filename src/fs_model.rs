@@ -378,22 +378,28 @@ pub fn group_label(entry: &Entry, group_by: GroupBy) -> String {
 
 /// The This PC grouping: the user folders, then the volumes.
 ///
-/// A volume is a root with nothing above it; every user folder has a parent, so
-/// the two are told apart by the path and nothing new has to be carried on the
-/// entry.
+/// A volume is a drive root (`C:\`) or a filesystem root (`/`); every user
+/// folder sits under one, so the two are told apart by the path and nothing new
+/// has to be carried on the entry.
 fn place_group(entry: &Entry) -> String {
-    // A volume is a path whose last component is the root itself (`C:\`, `/`).
-    // Testing `parent().is_none()` misses `C:\`, whose parent is `C:`, while
-    // every folder under a volume ends in a normal name.
-    let is_volume = matches!(
-        entry.path.components().next_back(),
-        Some(std::path::Component::RootDir)
-    );
-    if is_volume {
+    if is_volume_root(&entry.path) {
         String::from("Devices and drives")
     } else {
         String::from("Folders")
     }
+}
+
+/// Whether this path names a volume itself rather than a folder sitting on one.
+///
+/// The drive letter is read as text so a `C:\` row is still a volume when the
+/// model is built on a host that does not parse Windows prefixes; the component
+/// test covers the separator-only roots (`/`, and `C:\` on Windows).
+fn is_volume_root(path: &Path) -> bool {
+    drive_letter(path).is_some()
+        || matches!(
+            path.components().next_back(),
+            Some(std::path::Component::RootDir)
+        )
 }
 
 /// Sort position of a group heading, so the list shows groups in a fixed,
