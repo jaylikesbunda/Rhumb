@@ -1069,6 +1069,9 @@ pub struct Rhumb {
     /// Folder sizes and counts, measured on a worker. Walking a folder is far
     /// too slow to do on the frame that draws it.
     measures: ops::Measures,
+    /// Metadata for the details pane and the Properties sheet, read on a worker so
+    /// a stat on a quiet share never lands on the frame that draws.
+    facts: ops::FactsCache,
     /// Paths being dragged inside the app.
     drag_payload: Vec<PathBuf>,
     /// Last keystroke in the search box, used to debounce recursive searches.
@@ -1132,6 +1135,7 @@ impl Rhumb {
         let _ = std::thread::Builder::new()
             .name("rhumb-sweep".into())
             .spawn(archive::sweep_cache);
+        crate::watchdog::start();
         let (tx, rx) = workers::bus();
         let arg = crate::instance::start_path();
 
@@ -1236,6 +1240,7 @@ impl Rhumb {
             menu: MenuState::default(),
             pins: Pins::default(),
             measures: ops::Measures::new(tx.clone()),
+            facts: ops::FactsCache::new(tx.clone()),
             drag_payload: Vec::new(),
             search_typed: None,
             close_armed: false,
@@ -1348,6 +1353,8 @@ impl Rhumb {
         }
         macro_rules! mark {
             ($name:literal) => {
+                // Also what the stall watchdog names when a frame stops answering.
+                crate::watchdog::section_done($name);
                 if bench_on() {
                     let ms = section.elapsed().as_secs_f32() * 1000.0;
                     match bench_sections.iter_mut().find(|(n, _)| *n == $name) {
@@ -1507,10 +1514,15 @@ impl Rhumb {
 }
 /// The Properties sheet, the same information Explorer shows, in one column.
 ///
-/// `measures` is the cached subtree total for a folder, or `None` while a
-/// worker is still walking it.
-fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
-    let md = std::fs::metadata(path).ok();
+/// `facts` is the item's metadata, or `None` while a worker is still reading it
+/// (or it cannot be read). `measures` is the cached subtree total for a folder,
+/// or `None` while a worker is still walking it.
+fn properties_ui(
+    ui: &mut Ui,
+    path: &Path,
+    facts: Option<&ops::Facts>,
+    measures: Option<ops::Measure>,
+) {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -1554,14 +1566,14 @@ fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
     row(
         ui,
         "Type",
-        match md.as_ref() {
-            Some(m) if m.is_dir() => "File folder".to_owned(),
-            Some(m) if m.is_symlink() => "Symbolic link".to_owned(),
+        match facts {
+            Some(f) if f.is_dir => "File folder".to_owned(),
+            Some(f) if f.is_symlink => "Symbolic link".to_owned(),
             _ => kind_of(path),
         },
     );
     row(ui, "Location", parent.display().to_string());
-    let is_dir = md.as_ref().is_some_and(std::fs::Metadata::is_dir);
+    let is_dir = facts.is_some_and(|f| f.is_dir);
     row(
         ui,
         "Size",
@@ -1570,12 +1582,10 @@ fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
             // show a dash rather than walk the tree on this frame.
             (true, Some(m)) => fs_model::fmt_size(m.bytes),
             (true, None) => String::from("-"),
-            (false, _) => md
-                .as_ref()
-                .map_or_else(|| String::from("-"), |m| fs_model::fmt_size(m.len())),
+            (false, _) => facts.map_or_else(|| String::from("-"), |f| fs_model::fmt_size(f.len)),
         },
     );
-    if let Some(m) = md.as_ref() {
+    if let Some(f) = facts {
         if is_dir {
             row(
                 ui,
@@ -1589,21 +1599,21 @@ fn properties_ui(ui: &mut Ui, path: &Path, measures: Option<ops::Measure>) {
         row(
             ui,
             "Created",
-            m.created().map_or(String::from("-"), fmt_stamp),
+            f.created.map_or(String::from("-"), fmt_stamp),
         );
         row(
             ui,
             "Modified",
-            m.modified().map_or(String::from("-"), fmt_stamp),
+            f.modified.map_or(String::from("-"), fmt_stamp),
         );
         row(
             ui,
             "Accessed",
-            m.accessed().map_or(String::from("-"), fmt_stamp),
+            f.accessed.map_or(String::from("-"), fmt_stamp),
         );
     }
     let mut attrs: Vec<&str> = Vec::new();
-    if md.as_ref().is_some_and(|m| m.permissions().readonly()) {
+    if facts.is_some_and(|f| f.readonly) {
         attrs.push("Read-only");
     }
     if path
@@ -1874,6 +1884,7 @@ fn sort_name(k: SortKey) -> &'static str {
 
 impl eframe::App for Rhumb {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        crate::watchdog::frame_begin();
         let ctx = ui.ctx().clone();
         self.draw(ui, &ctx);
         if !self.shown {
@@ -1883,6 +1894,7 @@ impl eframe::App for Rhumb {
             self.shown = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
+        crate::watchdog::frame_end();
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

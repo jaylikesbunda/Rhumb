@@ -12,9 +12,10 @@
 
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
@@ -88,6 +89,10 @@ pub struct Index {
     inner: Arc<RwLock<Inner>>,
     scanned: Arc<AtomicU64>,
     _guard: Arc<Guard>,
+    /// Folders waiting to be rescanned, in order, each once.
+    rescan_queue: Arc<Mutex<BTreeSet<PathBuf>>>,
+    /// Whether a thread is already working through `rescan_queue`.
+    rescanning: Arc<AtomicBool>,
 }
 
 impl Index {
@@ -105,6 +110,8 @@ impl Index {
             })),
             scanned: Arc::new(AtomicU64::new(0)),
             _guard: Arc::new(Guard(cancel.clone())),
+            rescan_queue: Arc::new(Mutex::new(BTreeSet::new())),
+            rescanning: Arc::new(AtomicBool::new(false)),
         };
         let inner = index.inner.clone();
         let scanned = index.scanned.clone();
@@ -249,6 +256,56 @@ impl Index {
             })
             .collect();
         (found, truncated)
+    }
+
+    /// Asks for `dir` to be rescanned by a thread that works through the queue.
+    ///
+    /// A request that arrives while a rescan is running joins the queue and is
+    /// handled by that same thread, so a busy folder costs one thread rather than
+    /// one for every change the watcher reports.
+    fn queue_rescan(&self, dir: PathBuf) {
+        self.rescan_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(dir);
+        if self.rescanning.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("rhumb-reindex".into())
+            .spawn(move || me.drain_rescans());
+        if spawned.is_err() {
+            self.rescanning.store(false, Ordering::Release);
+        }
+    }
+
+    /// Rescans queued folders until the queue is empty, then lets the thread go.
+    fn drain_rescans(&self) {
+        loop {
+            let next = self
+                .rescan_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_first();
+            match next {
+                Some(dir) => self.rescan_dir(&dir),
+                None => {
+                    self.rescanning.store(false, Ordering::Release);
+                    // Something queued after the look above, before the flag was let
+                    // go, would otherwise wait for the next change. Take the flag back
+                    // for it, unless another thread already has.
+                    let more = !self
+                        .rescan_queue
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_empty();
+                    if !more || self.rescanning.swap(true, Ordering::AcqRel) {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Brings the index up to date with one folder that has changed: names that are
@@ -408,6 +465,8 @@ impl Index {
             })),
             scanned: Arc::new(AtomicU64::new(count as u64)),
             _guard: Arc::new(Guard(Arc::new(AtomicBool::new(false)))),
+            rescan_queue: Arc::new(Mutex::new(BTreeSet::new())),
+            rescanning: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -683,11 +742,7 @@ impl Indexes {
     pub fn changed(&self, dir: &Path) {
         for x in &self.list {
             if x.covers(dir) {
-                let x = x.clone();
-                let dir = dir.to_path_buf();
-                let _ = std::thread::Builder::new()
-                    .name("rhumb-reindex".into())
-                    .spawn(move || x.rescan_dir(&dir));
+                x.queue_rescan(dir.to_path_buf());
             }
         }
     }

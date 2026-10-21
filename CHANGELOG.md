@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1
+
+### Added
+- A stall watchdog. When a frame runs for more than two seconds, `rhumb.log` gets a line while the freeze is still happening, naming the last section of the frame that finished. A frame that took that long is logged once it ends.
+
+### Fixed
+- The window no longer waits on the disk while it draws. The details pane, the Properties sheet, the status bar's selection size and the picture size check for thumbnails are all read on background workers. A network share that has gone quiet, or a sleeping drive, could previously freeze the whole window.
+- Thumbnails survive a refresh of the same folder. Only pictures whose file changed are decoded again, so the icon view no longer blanks and refills whenever a folder being written to is relisted.
+- A failed thumbnail lookup is remembered rather than retried on every frame.
+- A busy folder updates the name index through one worker thread, instead of starting a new thread for every change the watcher reports.
+
 ## 0.2.0
 
 ### Added

@@ -288,10 +288,11 @@ impl Rhumb {
             }
             Dialog::Properties { path } => {
                 let mut close = false;
+                let facts = self.facts.get(&path).flatten();
                 Modal::new(Id::new("properties"))
                     .frame(theme::dialog_frame())
                     .show(ctx, |ui| {
-                        properties_ui(ui, &path, self.measures.get(&path));
+                        properties_ui(ui, &path, facts.as_ref(), self.measures.get(&path));
                         ui.add_space(sp::MD);
                         if ui.button("OK").clicked() {
                             close = true;

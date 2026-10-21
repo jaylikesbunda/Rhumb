@@ -60,16 +60,10 @@ impl Thumbs {
         if self.inflight.get(path).is_some_and(|asked| *asked >= px) {
             return stale;
         }
+        // Nothing here touches the disk: the size check is made on the worker. A
+        // stat on this thread would run every frame for a picture not yet cached, and
+        // on a share that has gone quiet each one can block until the share answers.
         let image = is_image(path);
-        if image {
-            let Ok(md) = std::fs::metadata(crate::fs_model::long_path(path)) else {
-                return stale;
-            };
-            if md.len() == 0 || md.len() > MAX_BYTES {
-                self.cache.insert(path.to_path_buf(), None);
-                return None;
-            }
-        }
 
         self.inflight.insert(path.to_path_buf(), px);
         let p = path.to_path_buf();
@@ -81,7 +75,7 @@ impl Thumbs {
                 // the shell, which is the only thing that knows how to draw a
                 // video frame or a PDF page.
                 let decoded = if image {
-                    decode(&p, px)
+                    decode_checked(&p, px)
                 } else {
                     shell_thumbnail(&p, px)
                 };
@@ -155,6 +149,22 @@ impl Thumbs {
         self.cache.clear();
         self.inflight.clear();
     }
+
+    /// Drops one picture, so it is decoded again the next time it is asked for.
+    pub fn forget(&mut self, path: &Path) {
+        self.cache.remove(path);
+        self.inflight.remove(path);
+    }
+}
+
+/// Decodes a picture that is a sensible size. A file that cannot be stat'ed, or is
+/// empty or too big, gives nothing; the caller remembers that as a failure.
+fn decode_checked(path: &Path, px: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let md = std::fs::metadata(crate::fs_model::long_path(path)).ok()?;
+    if md.len() == 0 || md.len() > MAX_BYTES {
+        return None;
+    }
+    decode(path, px)
 }
 
 /// The size to decode a picture at for a place `points` wide on a screen that has

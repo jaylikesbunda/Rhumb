@@ -27,6 +27,7 @@ mod this_pc;
 mod thumbs;
 mod tree;
 mod typeahead;
+mod watchdog;
 mod widgets;
 mod workers;
 

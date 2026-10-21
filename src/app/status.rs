@@ -35,19 +35,17 @@ impl Rhumb {
                 String::new()
             }
         } else {
-            // Folders are measured on a worker, so the total is the sum of
-            // what is known: exact once every folder has reported, short by
-            // the rest while they are still being walked. Never block here.
+            // Files and folders alike are measured on a worker, so the total is the
+            // sum of what is known: exact once everything has reported, short by
+            // the rest while they are still being read. Nothing here touches the
+            // disk: a stat per selected item, every frame, blocks the window for as
+            // long as a quiet network share or a sleeping drive takes to answer.
             let mut bytes = 0u64;
             let mut pending = 0usize;
             for p in &self.sel {
-                if p.is_dir() {
-                    match self.measures.get(p) {
-                        Some(m) => bytes = bytes.saturating_add(m.bytes),
-                        None => pending += 1,
-                    }
-                } else {
-                    bytes = bytes.saturating_add(p.metadata().map(|m| m.len()).unwrap_or(0));
+                match self.measures.get(p) {
+                    Some(m) => bytes = bytes.saturating_add(m.bytes),
+                    None => pending += 1,
                 }
             }
             let n = self.sel.len();

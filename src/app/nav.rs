@@ -203,6 +203,9 @@ impl Rhumb {
                 Msg::Measured { path, measure } => {
                     self.measures.set(path, measure);
                 }
+                Msg::Facts { path, facts } => {
+                    self.facts.set(path, facts);
+                }
                 Msg::TreeLoaded { path, dirs } => {
                     if self.sidebar_tree.loading.as_deref() == Some(path.as_path()) {
                         self.sidebar_tree.loading = None;
@@ -239,16 +242,43 @@ impl Rhumb {
                 self.listing = Listing::Failed;
             }
             None => {
+                self.forget_changed(&entries);
                 self.entries = entries;
                 self.listed_at = Some(Instant::now());
                 fs_model::sort(&mut self.entries, self.sort, self.ascending);
                 self.listing = Listing::Ready;
                 self.row_cache.clear();
-                self.thumbs.clear();
                 self.recompute_visible();
                 if let Some(a) = self.restore_anchor.take() {
                     self.anchor = a.min(self.visible.len().saturating_sub(1));
                 }
+            }
+        }
+    }
+
+    /// Before a new listing replaces the old one, drops what the window has read
+    /// from disk that may now be out of date: pictures that need decoding again,
+    /// and the metadata the details pane holds. Listing the same folder again (which
+    /// a watcher event does all the time) keeps everything that did not change, so
+    /// the icon view does not blank and refill. A different folder starts again.
+    fn forget_changed(&mut self, fresh: &[Entry]) {
+        let same_folder = match (self.entries.first(), fresh.first()) {
+            (Some(old), Some(new)) => old.path.parent() == new.path.parent(),
+            _ => false,
+        };
+        if !same_folder {
+            self.thumbs.clear();
+            self.facts.clear();
+            return;
+        }
+        let now: std::collections::HashMap<&Path, (u64, Option<std::time::SystemTime>)> = fresh
+            .iter()
+            .map(|e| (e.path.as_path(), (e.size, e.modified)))
+            .collect();
+        for old in &self.entries {
+            if now.get(old.path.as_path()) != Some(&(old.size, old.modified)) {
+                self.thumbs.forget(&old.path);
+                self.facts.forget(&old.path);
             }
         }
     }

@@ -27,6 +27,11 @@ pub enum Msg {
     },
     /// A filesystem watch event fired somewhere.
     Watch(PathBuf),
+    /// The metadata of one item, read for the details pane. `None` when it cannot be read.
+    Facts {
+        path: PathBuf,
+        facts: Option<crate::ops::Facts>,
+    },
     /// The head of a text file, for the details pane.
     Peek {
         path: PathBuf,

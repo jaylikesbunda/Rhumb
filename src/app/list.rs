@@ -859,8 +859,10 @@ impl Rhumb {
             widgets::empty_state(ui, "No selection", "Pick a file to see its details");
             return;
         };
-        let meta = std::fs::metadata(&path).ok();
-        let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+        // Read on a worker (see `ops::Facts`): until it answers, the pane shows
+        // what the path alone says. Nothing here waits on the disk.
+        let facts = self.facts.get(&path).flatten();
+        let is_dir = facts.as_ref().is_some_and(|f| f.is_dir);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -957,7 +959,7 @@ impl Rhumb {
         }
 
         ui.add_space(sp::XS);
-        properties_ui(ui, &path, self.measures.get(&path));
+        properties_ui(ui, &path, facts.as_ref(), self.measures.get(&path));
 
         // Text files get their first lines, the way Explorer's pane does.
         if !is_dir && fs_model::is_editable_text(&path) {

@@ -484,6 +484,101 @@ pub fn measure(path: &Path) -> Measure {
 
 /// Subtree measurements for folders, filled in by a worker.
 ///
+/// What the details pane and the Properties sheet show about one item, read from
+/// its metadata.
+///
+/// A stat is a call into the file system, and on a network share that has gone
+/// quiet, or a sleeping drive, it can take as long as the share takes to answer.
+/// Done on the frame that draws, that is a window frozen for as long as it takes,
+/// and the details pane asks on every frame it is open. So it is read on a worker
+/// and kept by [`FactsCache`].
+#[derive(Clone, Debug)]
+pub struct Facts {
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub len: u64,
+    pub readonly: bool,
+    pub created: Option<std::time::SystemTime>,
+    pub modified: Option<std::time::SystemTime>,
+    pub accessed: Option<std::time::SystemTime>,
+}
+
+impl Facts {
+    /// Reads the metadata of `path`. `None` when it cannot be read at all.
+    pub fn read(path: &Path) -> Option<Facts> {
+        let m = fs::metadata(long_path(path)).ok()?;
+        Some(Facts {
+            is_dir: m.is_dir(),
+            is_symlink: m.is_symlink(),
+            len: m.len(),
+            readonly: m.permissions().readonly(),
+            created: m.created().ok(),
+            modified: m.modified().ok(),
+            accessed: m.accessed().ok(),
+        })
+    }
+}
+
+/// The metadata of items the window has been asked about, read on workers.
+///
+/// Asking returns `None` until the answer lands, which is what lets the caller
+/// show a dash instead of waiting. A value is kept until the item is listed again
+/// and has changed (see [`FactsCache::forget`]).
+pub struct FactsCache {
+    values: std::collections::HashMap<PathBuf, Option<Facts>>,
+    asked: std::collections::HashSet<PathBuf>,
+    tx: Sender<Msg>,
+}
+
+impl FactsCache {
+    pub fn new(tx: Sender<Msg>) -> Self {
+        Self {
+            values: std::collections::HashMap::new(),
+            asked: std::collections::HashSet::new(),
+            tx,
+        }
+    }
+
+    /// `None` while the worker is still reading. `Some(None)` when the item cannot
+    /// be read; `Some(Some(_))` otherwise.
+    pub fn get(&mut self, path: &Path) -> Option<Option<Facts>> {
+        if let Some(f) = self.values.get(path) {
+            return Some(f.clone());
+        }
+        if self.asked.insert(path.to_path_buf()) {
+            let tx = self.tx.clone();
+            let p = path.to_path_buf();
+            let _ = std::thread::Builder::new()
+                .name("rhumb-facts".into())
+                .spawn(move || {
+                    let _ = tx.send(Msg::Facts {
+                        facts: Facts::read(&p),
+                        path: p,
+                    });
+                });
+        }
+        None
+    }
+
+    /// Records a worker's answer.
+    pub fn set(&mut self, path: PathBuf, facts: Option<Facts>) {
+        self.asked.remove(&path);
+        self.values.insert(path, facts);
+    }
+
+    /// Drops every answer, e.g. when another folder is shown. A read still in flight
+    /// keeps its place, so its answer lands as usual.
+    pub fn clear(&mut self) {
+        self.values.clear();
+    }
+
+    /// Drops one item's answer, so it is read again the next time it is asked for.
+    pub fn forget(&mut self, path: &Path) {
+        self.values.remove(path);
+        self.asked.remove(path);
+    }
+}
+
 /// Measuring means walking, and a folder can hold hundreds of thousands of
 /// entries. Doing that on the UI thread froze the window for seconds, so the
 /// walk happens on a worker and the answer is kept until something changes it.
