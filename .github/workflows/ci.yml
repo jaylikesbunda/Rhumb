@@ -85,7 +85,10 @@ jobs:
 
   sweep:
     runs-on: windows-latest
-    timeout-minutes: 25
+    # The exhaustive sweeps take about 18 minutes with a warm cargo cache. A
+    # Cargo.lock change invalidates that cache, and the cold rebuild pushed a
+    # 25-minute budget over the edge, so leave room for the compile.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
