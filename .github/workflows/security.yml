@@ -36,16 +36,11 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # The advisories deny.toml already accepts, so the two security jobs
-          # agree and the weekly run does not re-file them as issues.
-          ignore: |
-            RUSTSEC-2026-0192
-            RUSTSEC-2026-0194
-            RUSTSEC-2026-0195
-            RUSTSEC-2026-0245
-            RUSTSEC-2026-0246
-            RUSTSEC-2026-0370
-            RUSTSEC-2026-0371
-            RUSTSEC-2026-0372
+          # agree and the weekly run does not re-file them as issues. The action
+          # splits this input on commas, not newlines.
+          ignore: >-
+            RUSTSEC-2026-0192,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0245,
+            RUSTSEC-2026-0246,RUSTSEC-2026-0370,RUSTSEC-2026-0371,RUSTSEC-2026-0372
 
   licenses-and-bans:
     runs-on: ubuntu-latest
