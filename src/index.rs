@@ -10,9 +10,9 @@
 //! The index is kept up to date by being told which folder changed
 //! ([`Index::rescan_dir`]), not by walking again.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};

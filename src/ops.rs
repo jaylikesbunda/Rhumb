@@ -1546,7 +1546,7 @@ mod tests {
         let f = fs::File::open(&archive).unwrap();
         let mut z = zip::ZipArchive::new(f).unwrap();
         let names: Vec<String> = (0..z.len())
-            .map(|i| z.by_index(i).unwrap().name().to_owned())
+            .map(|i| z.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"photos/a.txt".to_owned()), "{names:?}");
         assert!(names.contains(&"photos/2024/b.txt".to_owned()), "{names:?}");

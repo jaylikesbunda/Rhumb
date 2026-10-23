@@ -50,7 +50,10 @@ pub fn frame_end() {
     }
     let took = now_ms().saturating_sub(start);
     if Duration::from_millis(took) >= STALL {
-        log::warn!("a frame took {took} ms (last section done: {})", last_section());
+        log::warn!(
+            "a frame took {took} ms (last section done: {})",
+            last_section()
+        );
     }
 }
 

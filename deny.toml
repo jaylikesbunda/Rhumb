@@ -19,6 +19,13 @@ ignore = [
     # zbus pins 0.38, so the 0.41 fix is not reachable from here yet.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # zbus 5's split-out crates (`zbus_names`, `zvariant`, `zvariant_derive`)
+    # are unmaintained standing alone: they were folded back into zbus 6.
+    # accesskit's atspi support still pins zbus 5, so there is no upgrade to
+    # take; these reach us only on the Linux accessibility path.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
     # `sevenz-rust` is unmaintained, and its path-traversal bug lives in
     # `decompress_impl`, which this program never calls: 7z extraction walks
     # entries itself (`for_each_entries`) and validates every name with

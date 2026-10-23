@@ -219,12 +219,15 @@ fn read_zip(archive: &Path) -> io::Result<Vec<Item>> {
         // The raw entry: its header is all that is wanted, and an encrypted file has
         // one like any other.
         let f = z.by_index_raw(i).map_err(invalid)?;
-        let Some(path) = clean(f.name()) else {
+        let Ok(name) = f.name() else {
+            continue;
+        };
+        let Some(path) = clean(&name) else {
             continue;
         };
         items.push(Item {
             path,
-            is_dir: f.is_dir() || f.name().ends_with('/'),
+            is_dir: f.is_dir() || name.ends_with('/'),
             size: f.size(),
             modified: f.last_modified().and_then(zip_time),
         });
@@ -615,7 +618,7 @@ pub fn remove_from_zip(zip: &Path, entries: &[String]) -> Result<usize, String> 
         let mut removed = 0usize;
         for i in 0..reader.len() {
             let f = reader.by_index_raw(i).map_err(|e| e.to_string())?;
-            let gone = clean(f.name()).is_some_and(|n| {
+            let gone = f.name().ok().and_then(|n| clean(&n)).is_some_and(|n| {
                 targets
                     .iter()
                     .any(|t| n == *t || n.starts_with(&format!("{t}/")))
@@ -671,7 +674,10 @@ pub fn extract_with(
                 .map_err(invalid)?;
             for i in 0..z.len() {
                 let mut f = z.by_index(i).map_err(invalid)?;
-                let Some(name) = clean(f.name()) else {
+                let Ok(raw_name) = f.name() else {
+                    continue;
+                };
+                let Some(name) = clean(&raw_name) else {
                     continue;
                 };
                 if !wanted(&name) {
@@ -682,7 +688,7 @@ pub fn extract_with(
                 let Some(out) = under(dest, rel) else {
                     continue;
                 };
-                if f.is_dir() || f.name().ends_with('/') {
+                if f.is_dir() || raw_name.ends_with('/') {
                     std::fs::create_dir_all(long_path(&out))?;
                 } else {
                     if !step(&name, f.size()) {
