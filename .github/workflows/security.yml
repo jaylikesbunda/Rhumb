@@ -23,11 +23,29 @@ on:
 jobs:
   advisories:
     runs-on: ubuntu-latest
+    # audit-check publishes its findings as a check run, and files an issue for
+    # each new advisory on the weekly schedule. Both need scoped permissions:
+    # the default token is read-only.
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # The advisories deny.toml already accepts, so the two security jobs
+          # agree and the weekly run does not re-file them as issues.
+          ignore: |
+            RUSTSEC-2026-0192
+            RUSTSEC-2026-0194
+            RUSTSEC-2026-0195
+            RUSTSEC-2026-0245
+            RUSTSEC-2026-0246
+            RUSTSEC-2026-0370
+            RUSTSEC-2026-0371
+            RUSTSEC-2026-0372
 
   licenses-and-bans:
     runs-on: ubuntu-latest
