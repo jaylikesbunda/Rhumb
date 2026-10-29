@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+- Markdown is syntax-highlighted in the editor, with fenced code coloured by its language.
+- A Markdown formatting toolbar: bold, italic, strikethrough, code, links, headings, lists and quotes. Every button toggles, and each action is one undo step.
+- The toolbar folds into a "..." menu when the pane is too narrow to show it all.
+- Ctrl+B, Ctrl+I and Ctrl+K for bold, italic and links while editing Markdown.
+- Clickable task checkboxes in the preview, which tick the item in the source.
+
 ## 0.2.1
 
 ### Added

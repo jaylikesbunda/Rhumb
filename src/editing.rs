@@ -356,23 +356,29 @@ pub fn lang_for(path: &std::path::Path) -> crate::codeedit::Lang {
     let ext = ext.as_str();
     let c_block = Some(("/*", "*/"));
     match ext {
+        // Markdown colours by its own scanner in `codeedit::md`, and its
+        // fenced blocks hand their tags to `fence_lang` below.
+        "md" | "markdown" | "mdown" | "mkd" | "mdx" | "rmd" => Lang::markdown(),
         "html" | "xml" | "svg" | "vue" | "svelte" | "xsl" | "plist" | "csproj" | "xaml" => Lang {
             line: "",
             block: Some(("<!--", "-->")),
             triple: false,
             template: false,
+            md: false,
         },
         "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" => Lang {
             line: "//",
             block: c_block,
             triple: false,
             template: true,
+            md: false,
         },
         "py" | "pyi" => Lang {
             line: "#",
             block: None,
             triple: true,
             template: false,
+            md: false,
         },
         // TOML has multi-line strings and no block comments.
         "toml" => Lang {
@@ -380,6 +386,7 @@ pub fn lang_for(path: &std::path::Path) -> crate::codeedit::Lang {
             block: None,
             triple: true,
             template: false,
+            md: false,
         },
         "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "cxx" | "hxx" | "cs" | "go" | "java" | "kt"
         | "kts" | "scala" | "php" | "css" | "scss" | "less" | "swift" | "dart" | "d" | "proto"
@@ -388,12 +395,14 @@ pub fn lang_for(path: &std::path::Path) -> crate::codeedit::Lang {
             block: c_block,
             triple: false,
             template: false,
+            md: false,
         },
         "sql" => Lang {
             line: "--",
             block: c_block,
             triple: false,
             template: false,
+            md: false,
         },
         _ => Lang::line_only(comment_token(path)),
     }
@@ -407,8 +416,15 @@ pub fn lang_for(path: &std::path::Path) -> crate::codeedit::Lang {
 /// keyword in some language - `is`, `in`, `not`, `as`, `use`, `new` - and
 /// treats an apostrophe as an unterminated string, so `don't` colours half the
 /// line. A file with no language is left alone.
+///
+/// Markdown is the exception that proves the rule: its scanner never consults
+/// the keyword table, so every Markdown extension is coloured, with headings,
+/// fences and links standing out and prose staying ink.
 pub fn highlights_code(path: &std::path::Path) -> bool {
-    !comment_token(path).is_empty() || {
+    matches!(
+        crate::fs_model::ext_of(path).as_str(),
+        "md" | "markdown" | "mdown" | "mkd" | "mdx" | "rmd"
+    ) || !comment_token(path).is_empty() || {
         // Languages with no line comment but which are unmistakably code.
         matches!(
             crate::fs_model::ext_of(path).as_str(),
@@ -459,6 +475,49 @@ pub fn highlights_code(path: &std::path::Path) -> bool {
                 | "f95"
         )
     }
+}
+
+/// The language a fenced code block's tag names, for colouring the block.
+///
+/// Fence tags are language names, not file extensions - `rust`, `python`,
+/// `c++` - so a small alias table stands in front of `lang_for`. A tag this
+/// editor has no tokenizer for returns `None`, and the block is drawn plain.
+/// Markdown itself is refused: a fenced Markdown block colouring as Markdown
+/// would put fences inside fences for no reader's benefit.
+pub fn fence_lang(tag: &str) -> Option<crate::codeedit::Lang> {
+    let ext = match tag.to_ascii_lowercase().as_str() {
+        "rust" | "rs" => "rs",
+        "python" | "py" | "py3" | "python3" => "py",
+        "javascript" | "js" | "node" | "nodejs" | "jsx" => "jsx",
+        "typescript" | "ts" | "tsx" => "tsx",
+        "c++" | "cpp" | "cxx" | "cc" | "hpp" => "cpp",
+        "c" => "c",
+        "c#" | "csharp" | "cs" => "cs",
+        "go" | "golang" => "go",
+        "java" => "java",
+        "kotlin" | "kt" | "kts" => "kt",
+        "scala" => "scala",
+        "ruby" | "rb" => "rb",
+        "php" => "php",
+        "swift" => "swift",
+        "dart" => "dart",
+        "shell" | "bash" | "sh" | "zsh" | "fish" | "console" => "sh",
+        "powershell" | "ps1" | "pwsh" => "ps1",
+        "sql" => "sql",
+        "toml" => "toml",
+        "html" | "xml" | "svg" => "html",
+        "css" => "css",
+        "scss" => "scss",
+        "less" => "less",
+        "lua" => "lua",
+        "zig" => "zig",
+        "d" => "d",
+        "proto" | "protobuf" => "proto",
+        "glsl" => "glsl",
+        "hlsl" => "hlsl",
+        _ => return None,
+    };
+    Some(lang_for(std::path::Path::new(&format!("x.{ext}"))))
 }
 
 #[cfg(test)]
@@ -625,12 +684,17 @@ mod tests {
                 "{code} should be coloured"
             );
         }
+        // Markdown is coloured too, but by its own scanner, which never
+        // consults the keyword table: its headings and fences are structure,
+        // and its prose is still left alone.
+        for md in ["a.md", "a.markdown", "a.mdown", "a.mkd"] {
+            assert!(highlights_code(Path::new(md)), "{md} should be coloured");
+        }
         // Prose, data and the unknown must be left alone. The tokenizer has one
         // keyword list covering every language, so running it over a text file
         // lights up ordinary English words like `is`, `not` and `use`.
         for plain in [
             "a.txt",
-            "a.md",
             "a.log",
             "a.csv",
             "a.rst",

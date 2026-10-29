@@ -5,6 +5,14 @@ use super::*;
 impl Rhumb {
     pub(super) fn handle_keys(&mut self, ctx: &Context) {
         let mut k = Keys::default();
+        // While the Markdown editor has the caret, Ctrl+B bolds rather than
+        // toggling the sidebar, and Ctrl+I and Ctrl+K style too: the file list
+        // answers for Ctrl+B the rest of the time. The editor's own pass has
+        // already run, so a key still arriving here is one the caret did not
+        // want, which is what makes the hand-off safe.
+        let md_editing = self.ed_focused
+            && self.doc().is_some_and(|d| d.kind == DocKind::Markdown);
+        let mut md_action: Option<crate::format::MdAction> = None;
         ctx.input_mut(|i| {
             k.help = i.consume_key(egui::Modifiers::NONE, Key::Slash);
             k.alt_left = i.consume_key(egui::Modifiers::ALT, Key::ArrowLeft);
@@ -17,8 +25,18 @@ impl Rhumb {
             k.refresh = i.consume_key(egui::Modifiers::NONE, Key::F5);
             k.toggle_hidden = i.consume_key(egui::Modifiers::CTRL, Key::H)
                 || i.consume_key(egui::Modifiers::COMMAND, Key::H);
-            k.toggle_sidebar = i.consume_key(egui::Modifiers::CTRL, Key::B)
-                || i.consume_key(egui::Modifiers::COMMAND, Key::B);
+            if md_editing {
+                for key in [Key::B, Key::I, Key::K] {
+                    if i.consume_key(egui::Modifiers::CTRL, key)
+                        || i.consume_key(egui::Modifiers::COMMAND, key)
+                    {
+                        md_action = format_bar::action_of_key(key);
+                    }
+                }
+            } else {
+                k.toggle_sidebar = i.consume_key(egui::Modifiers::CTRL, Key::B)
+                    || i.consume_key(egui::Modifiers::COMMAND, Key::B);
+            }
             k.close_file = i.consume_key(egui::Modifiers::CTRL, Key::W)
                 || i.consume_key(egui::Modifiers::COMMAND, Key::W);
             k.new_tab = i.consume_key(egui::Modifiers::CTRL, Key::T)
@@ -112,6 +130,9 @@ impl Rhumb {
         }
         if k.toggle_sidebar {
             self.sidebar = !self.sidebar;
+        }
+        if let Some(action) = md_action {
+            self.apply_md_action(action);
         }
         if k.new_menu {
             // Consumed by the toolbar's New button, which owns the popup id.

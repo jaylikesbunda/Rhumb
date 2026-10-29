@@ -11,8 +11,9 @@ use egui::{
 use std::sync::Arc;
 
 /// Strictly neutral (achromatic) palette. Every colour below has identical red,
-/// green and blue channels, which a unit test enforces. The single exception is
-/// the desaturated warning tint used for destructive actions.
+/// green and blue channels, which a unit test enforces. The exceptions are the
+/// desaturated warning tint used for destructive actions and the three muted
+/// Markdown syntax tints, whose restraint the tests also check.
 pub mod c {
     use egui::Color32;
 
@@ -54,6 +55,18 @@ pub mod c {
     pub const CARET: Color32 = grey(0x93);
     /// Destructive-action text. The only non-grey in the app.
     pub const DANGER: Color32 = Color32::from_rgb(0xC2, 0x92, 0x92);
+
+    /// Markdown heading markers and text: warm sand.
+    ///
+    /// The three Markdown tints are the only chromatic ink the editor draws.
+    /// Each is deliberately muted - no channel runs away from the others by
+    /// more than a third - so prose still reads as ink and the tints only
+    /// separate the constructs. A unit test holds them to that.
+    pub const MD_HEAD: Color32 = Color32::from_rgb(0xC7, 0xB1, 0x82);
+    /// Markdown links and autolinks: soft steel blue.
+    pub const MD_LINK: Color32 = Color32::from_rgb(0x88, 0xA5, 0xC7);
+    /// Markdown inline code and fence tags: sage green.
+    pub const MD_CODE: Color32 = Color32::from_rgb(0x9E, 0xB6, 0x95);
 }
 
 /// Spacing scale. Use these instead of magic numbers so rhythm is identical
@@ -446,6 +459,27 @@ mod tests {
     #[test]
     fn the_only_tinted_colour_is_the_destructive_one() {
         assert!(c::DANGER.r() > c::DANGER.b(), "DANGER should read as warm");
+    }
+
+    #[test]
+    fn markdown_tints_stay_subtle() {
+        // The three Markdown syntax tints are the only chromatic ink besides
+        // DANGER, and they earn the exception by staying quiet: no channel runs
+        // away from the others by more than a third of the range, so each still
+        // reads as greyed ink with a direction, not as a colour. Each also has
+        // to differ from the body text by enough to be worth having.
+        for (name, col) in [
+            ("MD_HEAD", c::MD_HEAD),
+            ("MD_LINK", c::MD_LINK),
+            ("MD_CODE", c::MD_CODE),
+        ] {
+            let spread = col.r().max(col.g()).max(col.b()) - col.r().min(col.g()).min(col.b());
+            assert!(spread <= 0x46, "{name} is too loud: {col:?}");
+            assert!(col.r() < 0xD0, "{name} is too bright to be subtle: {col:?}");
+        }
+        for (name, col) in [("MD_HEAD", c::MD_HEAD), ("MD_LINK", c::MD_LINK)] {
+            assert_ne!(col, c::TEXT, "{name} would be invisible against text");
+        }
     }
 
     #[test]

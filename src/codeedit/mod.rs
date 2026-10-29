@@ -45,6 +45,8 @@ mod fold;
 #[cfg(test)]
 mod harness;
 mod highlight;
+/// The Markdown colouring rules, dispatched to from `markup` when `Lang::md`.
+mod md;
 mod markup;
 mod multi;
 #[cfg(test)]
@@ -908,6 +910,73 @@ impl Editor {
         out.edited = true;
     }
 
+    /// Replaces `lo..hi` with `replacement` as one undo step, and leaves the
+    /// caret just after what replaced the range.
+    ///
+    /// This is the door the rest of the app knocks on when it wants to edit the
+    /// document the caret is in: the Markdown toolbar, the shortcuts, and the
+    /// preview's task checkboxes all come through here, and every one of them
+    /// gets the same history the keys get - one Ctrl+Z takes the edit back.
+    pub fn replace_span(
+        &mut self,
+        text: &mut Buffer,
+        lo: usize,
+        hi: usize,
+        replacement: &str,
+        out: &mut Outcome,
+    ) {
+        let n = text.len_chars();
+        let (lo, hi) = (lo.min(n), hi.min(n).max(lo.min(n)));
+        self.push_undo(text);
+        text.replace(lo, hi, replacement);
+        let n = text.len_chars();
+        let caret = (lo + replacement.chars().count()).min(n);
+        self.set_caret(caret, n);
+        out.edited = true;
+    }
+
+    /// Applies a Markdown formatting action to the selection, as one undo step.
+    ///
+    /// The formatting maths in [`crate::format`] runs on a window of the
+    /// document that starts at a line start and ends at a line end, so the
+    /// line-prefix actions can see whole lines and the wrap actions can peek at
+    /// the characters just outside the selection, without ever copying the
+    /// whole file. `url` is the text clipboard's contents when it looks like a
+    /// link, which is how the link button fills in the address.
+    pub fn apply_md(
+        &mut self,
+        text: &mut Buffer,
+        action: crate::format::MdAction,
+        url: Option<&str>,
+        out: &mut Outcome,
+    ) {
+        let n = text.len_chars();
+        let (lo, hi) = self.selection(n);
+        let first = text.line_of_char(lo);
+        // A selection that ends at a line start belongs to the line before it,
+        // which is what the `- 1` is for.
+        let last = text
+            .line_of_char(hi.saturating_sub(if hi > lo { 1 } else { 0 }))
+            .max(first);
+        let w_lo = text.line_start(first);
+        let w_hi = text.line_end(last);
+        let window = text.slice(w_lo, w_hi).into_owned();
+        let sel = (lo - w_lo, hi - w_lo);
+        let Some(edit) = crate::format::apply(&window, sel, action, url) else {
+            return;
+        };
+        self.push_undo(text);
+        let (a, b) = (w_lo + edit.start, w_lo + edit.end);
+        text.replace(a.min(n), b.min(n), &edit.text);
+        let n = text.len_chars();
+        let (a, b) = (
+            (w_lo + edit.sel.0).min(n),
+            (w_lo + edit.sel.1).min(n),
+        );
+        self.select(a, b, n);
+        out.edited = true;
+    }
+
     /// Tab, or Shift+Tab over a selection. Falls through to the shared
     /// indenter so tab and the command key cannot disagree.
     pub fn tab(&mut self, text: &mut Buffer, outdent: bool, out: &mut Outcome) {
@@ -1566,6 +1635,18 @@ fn font() -> egui::FontId {
     crate::theme::mono_font(crate::theme::fs::MONO)
 }
 
+/// The same glyphs, one weight up, for Markdown headings and strong runs.
+///
+/// JetBrains Mono keeps its advance widths across weights, so a run drawn in
+/// this takes no more room than the same run in [`font`], and the caret and
+/// column maths that assume one character = one advance stay exact.
+fn bold_font() -> egui::FontId {
+    egui::FontId::new(
+        crate::theme::fs::MONO,
+        egui::FontFamily::Name(crate::theme::FAMILY_MONO_BOLD.into()),
+    )
+}
+
 /// The characters between two character indices.
 ///
 /// Bounds are clamped rather than trusted, because the selection can be a
@@ -1706,17 +1787,22 @@ const CHEVRON: f32 = 9.0;
 /// margin than at the fold.
 const CHEVRON_INSET: f32 = 3.0;
 
-/// The shades of grey each token class is drawn in.
+/// The shade each token class is drawn in, and whether it is drawn bold.
 ///
 /// Kept as its own type so the tokenizer stays free of any colour type, and so
 /// the mapping from class to shade is one readable table rather than a colour
-/// chosen at each call site.
+/// chosen at each call site. The three Markdown tints are the only chromatic
+/// ink the editor draws; everything else is the same grey ladder as before.
 #[derive(Clone, Copy, Debug)]
 struct Palette {
     text: egui::Color32,
     dim: egui::Color32,
     ghost: egui::Color32,
     accent: egui::Color32,
+    head: egui::Color32,
+    link: egui::Color32,
+    code: egui::Color32,
+    strong: egui::Color32,
 }
 
 impl Palette {
@@ -1726,19 +1812,56 @@ impl Palette {
             dim: crate::theme::c::TEXT_DIM,
             ghost: crate::theme::c::TEXT_GHOST,
             accent: crate::theme::c::ACCENT,
+            head: crate::theme::c::MD_HEAD,
+            link: crate::theme::c::MD_LINK,
+            code: crate::theme::c::MD_CODE,
+            strong: crate::theme::c::SEL_TEXT,
         }
     }
 
     /// Comments are the dimmest thing on screen so that prose recedes behind the
     /// code, and keywords are the brightest so that structure reads first.
-    fn of(&self, token: Token) -> egui::Color32 {
+    /// Markdown headings and strong runs come back bold as well as coloured:
+    /// a heading should read as structure even in peripheral vision.
+    fn of(&self, token: Token) -> (egui::Color32, bool) {
         match token {
-            Token::Plain => self.text,
-            Token::Str | Token::Number => self.dim,
-            Token::Comment => self.ghost,
-            Token::Keyword => self.accent,
+            Token::Plain => (self.text, false),
+            Token::Str | Token::Number | Token::Emph => (self.dim, false),
+            Token::Comment | Token::Marker | Token::Fence => (self.ghost, false),
+            Token::Keyword => (self.accent, false),
+            Token::Heading => (self.head, true),
+            Token::Strong => (self.strong, true),
+            Token::CodeSpan => (self.code, false),
+            Token::Link => (self.link, false),
         }
     }
+
+    /// Whether a token class is drawn underlined. Only links, so a URL in
+    /// source reads as something with a destination.
+    fn underlined(token: Token) -> bool {
+        matches!(token, Token::Link)
+    }
+}
+
+/// The text format one token run is drawn in: its shade, its weight, and its
+/// underline if it is a link.
+///
+/// One function rather than open code at each paint site, so a run can never
+/// end up bold in one place and not another. The fonts passed in are the
+/// regular and the one-weight-up mono; they have identical advance widths, so
+/// nothing that assumes one character = one advance notices the difference.
+fn format_of(
+    font: &egui::FontId,
+    bold: &egui::FontId,
+    pal: &Palette,
+    token: Token,
+) -> egui::text::TextFormat {
+    let (color, strong) = pal.of(token);
+    let mut fmt = egui::TextFormat::simple(if strong { bold.clone() } else { font.clone() }, color);
+    if Palette::underlined(token) {
+        fmt.underline = egui::Stroke::new(1.0, color);
+    }
+    fmt
 }
 
 /// Everything the paint pass needs, worked out once per frame.
@@ -1839,6 +1962,7 @@ impl Editor {
         // the top. The bar is drawn over this and the text over what is left.
         let full_rect = rect;
         let font = font();
+        let bold = bold_font();
         // The galley gives every row this height, so it is what decides how
         // many rows to shape. Drawing still reads its geometry back from the
         // galley rather than trusting this number.
@@ -2248,11 +2372,7 @@ A"
                             if from < to {
                                 let part: String =
                                     run.chars().skip(from - at).take(to - from).collect();
-                                job.append(
-                                    &part,
-                                    lead,
-                                    egui::TextFormat::simple(font.clone(), pal.of(token)),
-                                );
+                                job.append(&part, lead, format_of(&font, &bold, &pal, token));
                                 lead = 0.0;
                                 piece_chars += to - from;
                             }
@@ -2299,11 +2419,7 @@ A"
                     let (runs, next) = tokenize_with(&content, &opts.lang, start);
                     state = Some(next);
                     for (run, token) in runs {
-                        job.append(
-                            &run,
-                            0.0,
-                            egui::TextFormat::simple(font.clone(), pal.of(token)),
-                        );
+                        job.append(&run, 0.0, format_of(&font, &bold, &pal, token));
                     }
                 } else {
                     job.append(

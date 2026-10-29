@@ -5,6 +5,7 @@ mod dialogs;
 mod doc;
 mod files;
 mod folders;
+mod format_bar;
 mod keys;
 mod list;
 mod nav;

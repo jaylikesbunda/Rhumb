@@ -665,6 +665,47 @@ fn the_preview_catches_up_after_typing_pauses_and_not_on_every_keystroke() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn clicking_a_task_checkbox_in_the_preview_flips_it_in_the_source() {
+    let dir = std::env::temp_dir().join("rhumb-task-toggle");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("tasks.md");
+    fs::write(&md, "- [ ] milk\n").unwrap();
+    let mut a = App::new(&dir);
+    a.open_and_focus(&md);
+    for _ in 0..1000 {
+        a.frame();
+        std::thread::sleep(Duration::from_millis(5));
+        if a.app.preview_range > 0.0 {
+            break;
+        }
+    }
+    for _ in 0..10 {
+        a.frame();
+    }
+    let preview = a.app.preview_rect;
+    assert!(preview.width() > 50.0, "the preview is on screen");
+    // The one item's checkbox sits just inside the pane's top left: the
+    // block indent, plus the box's own offset and half its width.
+    let box_at = Pos2::new(preview.left() + 16.0 + 6.5, preview.top() + 8.5);
+    a.click_at(box_at);
+    assert!(
+        a.text().contains("- [x] milk"),
+        "the click ticked the box in the source: {:?}",
+        a.text()
+    );
+    // And again, the other way: a checkbox is a toggle in both directions,
+    // with the document edited in place and nothing else moved.
+    a.click_at(box_at);
+    assert!(
+        a.text().contains("- [ ] milk"),
+        "the click unticked it: {:?}",
+        a.text()
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// `cargo test --release probe_preview -- --ignored --nocapture`
 #[test]
 #[ignore]

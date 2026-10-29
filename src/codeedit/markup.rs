@@ -33,6 +33,22 @@ pub enum Token {
     Number,
     /// A reserved word.
     Keyword,
+    /// A Markdown ATX heading, marker and text: the one line of a document
+    /// that states its own structure, drawn loudest.
+    Heading,
+    /// Markdown wrapped in `**` or `__` that closed on the same line.
+    Strong,
+    /// Markdown wrapped in a single `*` or `_`, or struck through with `~~`.
+    Emph,
+    /// Markdown between backticks.
+    CodeSpan,
+    /// Markdown in `[text](url)` or `<url>` shape.
+    Link,
+    /// A blockquote's `>` markers, or a list's bullet, number or task box.
+    Marker,
+    /// The ` ``` ` or `~~~` of a fenced code block, on the line that opens or
+    /// closes it, and the tag that names the language.
+    Fence,
 }
 
 /// Reserved words across the languages this editor claims to highlight.
@@ -160,7 +176,7 @@ fn is_keyword(word: &str) -> bool {
 /// A range with `start == end` means no run is in progress, which is how the
 /// scanner says "nothing collected yet" without an `Option` to unwrap at every
 /// step. `Open::idle` is the only way to make one.
-struct Open {
+pub(crate) struct Open {
     start: usize,
     end: usize,
     token: Token,
@@ -173,7 +189,7 @@ struct Open {
 
 impl Open {
     /// No run in progress.
-    fn idle() -> Open {
+    pub(crate) fn idle() -> Open {
         Open {
             start: 0,
             end: 0,
@@ -194,7 +210,7 @@ impl Open {
 /// the middle of a line is a glyph with no width at a made-up position, and the
 /// caller has no way to want one. This is also the only place that can decide a
 /// run is real, so "never emit an empty `String`" is checked once.
-fn push(runs: &mut Vec<(String, Token)>, open: &mut Open, line: &str) {
+pub(crate) fn push(runs: &mut Vec<(String, Token)>, open: &mut Open, line: &str) {
     if open.live() {
         runs.push((line[open.start..open.end].to_owned(), open.token));
     }
@@ -206,7 +222,7 @@ fn push(runs: &mut Vec<(String, Token)>, open: &mut Open, line: &str) {
 ///
 /// Merging is what turns ` = ` into one run instead of three, and a Str
 /// immediately followed by another Str is one colour either way.
-fn emit(
+pub(crate) fn emit(
     runs: &mut Vec<(String, Token)>,
     open: &mut Open,
     line: &str,
@@ -232,7 +248,7 @@ fn emit(
 }
 
 /// Length in bytes of the character at `at`, which must be a boundary.
-fn char_len(line: &str, at: usize) -> usize {
+pub(crate) fn char_len(line: &str, at: usize) -> usize {
     if line.as_bytes()[at] < 0x80 {
         // ASCII is one byte by definition, and it is nearly all of the text.
         1
@@ -347,6 +363,16 @@ pub enum State {
     Triple(u8),
     /// Inside a template literal, which is a backtick string that may span lines.
     Template,
+    /// Inside a fenced code block: the fence character, and the language the
+    /// fence tag resolved to, `None` when there was no tag or nobody knows it.
+    ///
+    /// Only Markdown carries this state. The language is kept rather than the
+    /// tag text so the state stays `Copy`, and so two tags that name the same
+    /// language compare equal, which is what the per-line state cache keys on.
+    Fence {
+        ch: u8,
+        lang: Option<Lang>,
+    },
 }
 
 /// What a language can carry across a line break.
@@ -360,6 +386,9 @@ pub struct Lang {
     pub triple: bool,
     /// Whether a backtick string may span lines.
     pub template: bool,
+    /// This language *is* Markdown: lines are coloured by the Markdown scanner
+    /// in [`super::md`], whose fences delegate back to the code scanner here.
+    pub md: bool,
 }
 
 impl Lang {
@@ -370,6 +399,18 @@ impl Lang {
             block: None,
             triple: false,
             template: false,
+            md: false,
+        }
+    }
+
+    /// Markdown, whose fences are the one construct that crosses a line break.
+    pub const fn markdown() -> Lang {
+        Lang {
+            line: "",
+            block: None,
+            triple: false,
+            template: false,
+            md: true,
         }
     }
 }
@@ -401,6 +442,11 @@ pub fn tokenize(line: &str, comment: &str) -> Vec<(String, Token)> {
 /// [`tokenize`] for a language with constructs that cross lines: the runs of one
 /// line, given the state it starts in, and the state the next line starts in.
 pub fn tokenize_with(line: &str, lang: &Lang, state: State) -> (Vec<(String, Token)>, State) {
+    // Markdown colours by its own scanner, which hands fenced lines back here
+    // for the fence's language.
+    if lang.md {
+        return super::md::tokenize(line, state);
+    }
     // A line this long is drawn plain. Colouring it means scanning every character
     // and building a run for each token every frame, which for a minified file is
     // a million characters and a quarter of a second, to colour text nobody reads
@@ -427,6 +473,9 @@ pub fn tokenize_with(line: &str, lang: &Lang, state: State) -> (Vec<(String, Tok
 /// The same scan as [`tokenize_with`] with the colouring thrown away, so the two
 /// can never disagree about where a comment ends.
 pub fn advance(line: &str, lang: &Lang, state: State) -> State {
+    if lang.md {
+        return super::md::advance(line, state);
+    }
     if line.len() > MAX_HIGHLIGHT_LINE {
         return state;
     }
@@ -478,6 +527,10 @@ fn scan(
             }
             i = end;
         }
+        // A fenced Markdown block can only reach the code scanner through a
+        // bug in the dispatch, and the answer to a bug is a plainly drawn
+        // line, never a panic. Scanning on from `Normal` is the plain draw.
+        State::Fence { .. } => {}
     }
 
     while i < bytes.len() {

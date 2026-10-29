@@ -4564,6 +4564,7 @@ const BLOCKY: super::Lang = super::Lang {
     block: Some(("/*", "*/")),
     triple: false,
     template: false,
+    md: false,
 };
 
 #[test]

@@ -552,6 +552,23 @@ impl Rhumb {
     /// The code editor.
     pub(super) fn editor_ui(&mut self, ui: &mut Ui, rect: Rect) {
         self.editor_rect = rect;
+        // The Markdown formatting bar sits above the editor and takes its strip
+        // off the pane; anything else is edited without one.
+        let (md, bar_read_only) = self
+            .tabs
+            .active_tab()
+            .map_or((false, false), |t| {
+                (format_bar::wanted(t.doc.kind), t.doc.read_only)
+            });
+        let (rect, action) = if md {
+            let (rest, clicked) = format_bar::show(ui, rect, bar_read_only);
+            (rest, clicked)
+        } else {
+            (rect, None)
+        };
+        if let Some(action) = action {
+            self.apply_md_action(action);
+        }
         // The wrapping toggle gives up the gutter, because a wrapped line has no
         // single row to put a number against. The toggle in the header says so.
         let Some(tab) = self.tabs.active_tab() else {
@@ -730,6 +747,95 @@ impl Rhumb {
         self.preview_off = out.state.offset.y;
         self.preview_range = (out.content_size.y - out.inner_rect.height()).max(0.0);
         self.preview_rect = out.inner_rect;
+        // A checkbox clicked in the preview edits the source, through the same
+        // editor machinery a keystroke uses, so it lands in the undo history.
+        if let Some(at) = self.preview.take_toggle() {
+            self.toggle_task(at);
+        }
+    }
+
+    /// Runs one Markdown formatting action on the active document.
+    ///
+    /// The toolbar buttons and the shortcuts both land here, so there is one
+    /// place that turns an action into an edit, marks the document dirty and
+    /// restarts the preview's debounce.
+    pub(super) fn apply_md_action(&mut self, action: crate::format::MdAction) {
+        let Some(tab) = self.tabs.active_tab_mut() else {
+            return;
+        };
+        if tab.doc.read_only {
+            return;
+        }
+        // The clipboard's text becomes the link's address when it looks like
+        // one; anything else leaves the parentheses for the reader to fill.
+        let url = if matches!(action, crate::format::MdAction::Link) {
+            arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok())
+        } else {
+            None
+        };
+        let Self {
+            ed,
+            tabs,
+            last_edit,
+            ..
+        } = self;
+        let Some(tab) = tabs.active_tab_mut() else {
+            return;
+        };
+        let mut out = codeedit::Outcome::default();
+        ed.apply_md(&mut tab.doc.text, action, url.as_deref(), &mut out);
+        if out.edited {
+            tab.doc.touch();
+            *last_edit = Some(Instant::now());
+        }
+    }
+
+    /// Flips the task checkbox the reader clicked in the preview.
+    ///
+    /// `at` is the byte offset the item's checkbox had in the text the preview
+    /// parsed, which is the document as of a moment ago. Rather than trusting
+    /// the offset exactly, the item's line is searched for its marker, so a
+    /// checkbox still lands even if typing moved it since.
+    fn toggle_task(&mut self, at: usize) {
+        let Some(tab) = self.tabs.active_tab_mut() else {
+            return;
+        };
+        if tab.doc.read_only {
+            return;
+        }
+        let text = &mut tab.doc.text;
+        if at >= text.len_bytes() {
+            return;
+        }
+        let ch = text.char_of_byte(at);
+        let line = text.line_of_char(ch);
+        let line_text = text.line_str(line).to_string();
+        // A task marker sits at the front of its item; a `[ ]` deeper into the
+        // line is prose and is left alone.
+        let head_end = line_text.len().min(16);
+        let head = &line_text[..head_end];
+        let Some(byte_at) = ["[ ]", "[x]", "[X]"].iter().filter_map(|m| head.find(m)).min()
+        else {
+            return;
+        };
+        let unchecked = head[byte_at..].starts_with("[ ]");
+        let replacement = if unchecked { "[x]" } else { "[ ]" };
+        let start = text.line_start(line) + head[..byte_at].chars().count();
+        let Self {
+            ed,
+            tabs,
+            last_edit,
+            ..
+        } = self;
+        let Some(tab) = tabs.active_tab_mut() else {
+            return;
+        };
+        let mut out = codeedit::Outcome::default();
+        ed.replace_span(&mut tab.doc.text, start, start + 3, replacement, &mut out);
+        if out.edited {
+            tab.doc.touch();
+            *last_edit = Some(Instant::now());
+        }
     }
 
     // ---- status bar --------------------------------------------------------

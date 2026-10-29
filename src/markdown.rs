@@ -47,6 +47,9 @@ impl Span {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ListItem {
     pub checked: Option<bool>,
+    /// The byte offset of the item's task marker in the source, when there is
+    /// one, so a click on the rendered checkbox can find the `[ ]` to flip.
+    pub at: Option<usize>,
     pub blocks: Vec<Block>,
 }
 
@@ -408,7 +411,7 @@ impl Builder {
                     b.cur = range.start;
                 }
             }
-            b.event(ev);
+            b.event(ev, range.start);
         }
         b.finish()
     }
@@ -419,7 +422,7 @@ impl Builder {
         self.starts.push(self.cur);
     }
 
-    fn event(&mut self, ev: Event<'_>) {
+    fn event(&mut self, ev: Event<'_>, at: usize) {
         match ev {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -431,12 +434,14 @@ impl Builder {
             }
             Event::SoftBreak => merge(&mut self.spans, Span::plain(" ")),
             Event::HardBreak => merge(&mut self.spans, Span::plain("\n")),
-            // The checkbox is metadata, not text.
+            // The checkbox is metadata, not text. Its offset is kept, because
+            // a click on the rendered box has to find the `[ ]` in the source.
             Event::TaskListMarker(checked) => {
                 if let Some(Frame::List { items, .. }) = self.stack.last_mut()
                     && let Some(item) = items.last_mut()
                 {
                     item.checked = Some(checked);
+                    item.at = Some(at);
                 }
             }
             Event::Rule => self.push(Block::Rule),
@@ -639,6 +644,7 @@ impl Builder {
                 match self.stack.last_mut() {
                     Some(Frame::List { items, .. }) => items.push(ListItem {
                         checked: None,
+                        at: None,
                         blocks: vec![para],
                     }),
                     _ => self.push(para),
@@ -678,6 +684,7 @@ impl Builder {
                 } else {
                     items.push(ListItem {
                         checked: None,
+                        at: None,
                         blocks: vec![block],
                     });
                 }
@@ -806,6 +813,9 @@ pub struct Preview {
     version: Option<u64>,
     /// A parse running on another thread: where its answer will be, once it has one.
     pending: Option<Arc<std::sync::Mutex<Option<Parsed>>>>,
+    /// A task checkbox the reader clicked, as the byte offset of its marker in
+    /// the source. Drained by the caller, which edits the document.
+    pending_toggle: Option<usize>,
     /// Width the cache was built for.
     width: f32,
     stats: Stats,
@@ -831,6 +841,7 @@ impl Preview {
             laid_out: false,
             version: None,
             pending: None,
+            pending_toggle: None,
             width: 0.0,
             stats: Stats::default(),
         }
@@ -939,11 +950,21 @@ impl Preview {
         self.cache.clear();
         self.version = None;
         self.pending = None;
+        self.pending_toggle = None;
         self.width = 0.0;
     }
 
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// Takes the task checkbox the reader clicked, if there was one this frame.
+    ///
+    /// The answer is the byte offset of the item's marker in the source the
+    /// preview parsed; the caller edits the document there and the debounced
+    /// re-parse brings the checkbox back around.
+    pub fn take_toggle(&mut self) -> Option<usize> {
+        self.pending_toggle.take()
     }
 
     /// Whether every block has an exact height, so the line<->pixel map is exact.
@@ -1338,9 +1359,33 @@ impl Preview {
                                 Pos2::new(indent + 1.0, y + 3.0),
                                 Vec2::splat(s),
                             );
+                            // The box answers clicks: checking one here is
+                            // checking it in the source, which the caller does
+                            // through the editor, undo history included. The
+                            // hit area is a little bigger than the drawing, so
+                            // a checkbox is not a target a mouse has to thread.
+                            let hit = rect.expand(4.0);
+                            let id = egui::Id::new(("md-task", item.at));
+                            let resp = ui
+                                .interact(hit, id, Sense::click())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if resp.clicked()
+                                && let Some(at) = item.at
+                            {
+                                self.pending_toggle = Some(at);
+                            }
+                            let hovered = resp.hovered();
                             let painter = ui.painter();
-                            let stroke =
-                                Stroke::new(1.0, if checked { c::TEXT_DIM } else { c::BORDER });
+                            let stroke = Stroke::new(
+                                1.0,
+                                if hovered {
+                                    c::ACCENT
+                                } else if checked {
+                                    c::TEXT_DIM
+                                } else {
+                                    c::BORDER
+                                },
+                            );
                             painter.rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
                             if checked {
                                 painter.line_segment(
@@ -2252,12 +2297,21 @@ fn code_job(text: &str, lang: &str) -> LayoutJob {
 }
 
 /// Monochrome mapping of token classes onto shades of grey.
+///
+/// A fenced block can only ever hold code tokens, since the delegation in the
+/// tokenizer starts its own scan; the Markdown classes are arms for the
+/// compiler, and answer with the shades their kind of text wears in prose.
 fn code_token_color(token: crate::codeedit::Token) -> Color32 {
+    use crate::codeedit::Token;
     match token {
-        crate::codeedit::Token::Comment => c::TEXT_GHOST,
-        crate::codeedit::Token::Keyword | crate::codeedit::Token::Str => c::ACCENT,
-        crate::codeedit::Token::Number => c::TEXT_DIM,
-        crate::codeedit::Token::Plain => c::TEXT,
+        Token::Comment => c::TEXT_GHOST,
+        Token::Keyword | Token::Str => c::ACCENT,
+        Token::Number => c::TEXT_DIM,
+        Token::Plain => c::TEXT,
+        Token::Heading | Token::Strong => crate::theme::c::MD_HEAD,
+        Token::CodeSpan | Token::Fence => crate::theme::c::MD_CODE,
+        Token::Link => crate::theme::c::MD_LINK,
+        Token::Emph | Token::Marker => c::TEXT_DIM,
     }
 }
 

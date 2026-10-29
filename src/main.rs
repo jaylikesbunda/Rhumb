@@ -14,6 +14,7 @@ mod codeedit;
 mod editing;
 mod editor;
 mod fs_model;
+mod format;
 mod index;
 mod instance;
 mod markdown;

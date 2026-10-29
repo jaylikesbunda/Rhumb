@@ -185,6 +185,7 @@ mod tests {
         block: Some(("/*", "*/")),
         triple: false,
         template: false,
+        md: false,
     };
 
     fn ctx() -> egui::Context {

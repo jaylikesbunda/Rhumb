@@ -335,7 +335,7 @@ impl Rhumb {
                             ("Ctrl+F", "Focus the search box"),
                             ("Ctrl+1  /  2  /  3", "Details  /  list  /  large icons"),
                             ("Ctrl+Shift+V", "Cycle the view"),
-                            ("Ctrl+B", "Toggle the sidebar"),
+                            ("Ctrl+B", "Toggle the sidebar (bold in Markdown)"),
                             ("Alt+P", "Toggle the details pane"),
                             ("Alt+Enter", "Properties"),
                             ("Ctrl+H", "Show hidden items"),
@@ -367,6 +367,11 @@ impl Rhumb {
                             ("Ctrl+Tab  /  Ctrl+Shift+Tab", "Next  /  previous tab"),
                             ("Tab  /  Shift+Tab", "Indent  /  outdent"),
                             ("Ctrl+/", "Toggle a line comment"),
+                            (
+                                "Ctrl+B  /  Ctrl+I",
+                                "In a Markdown file: bold  /  italic",
+                            ),
+                            ("Ctrl+K", "In a Markdown file: a link from the clipboard"),
                             ("Escape", "Clear the search, then the selection"),
                             ("?  /  /", "This list"),
                         ];
